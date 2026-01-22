@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'AE Kompensation - DACH',
-  description: 'Sales Compensation Dashboard für Account Executives im DACH-Markt',
+  title: 'Commercial Business Planner',
+  description: 'Business Planning & Compensation Dashboard',
 };
 
 export default function RootLayout({

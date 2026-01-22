@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { GoLive, User } from '@/lib/types';
+import { Partner, SubscriptionPackage } from '@/lib/golive-types';
+import { loadPartners, loadSubscriptionPackages } from '@/lib/golive-import-hooks';
 import { useLanguage } from '@/lib/LanguageContext';
 import { formatCurrency } from '@/lib/calculations';
 import DebugPanel from './DebugPanel';
@@ -27,8 +29,21 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
   const [hasTerminal, setHasTerminal] = useState(initialData?.has_terminal || false);
   const [payArr, setPayArr] = useState(initialData?.pay_arr?.toString() || '');
   const [commissionRelevant, setCommissionRelevant] = useState(initialData?.commission_relevant ?? defaultCommissionRelevant);
+  // NEU: Partnership & Enterprise
+  const [partnerId, setPartnerId] = useState<string | null>(initialData?.partner_id || null);
+  const [isEnterprise, setIsEnterprise] = useState(initialData?.is_enterprise || false);
+  const [partners, setPartners] = useState<Partner[]>([]);
+  // NEU: Subscription Package
+  const [subscriptionPackageId, setSubscriptionPackageId] = useState<string | null>(initialData?.subscription_package_id || null);
+  const [subscriptionPackages, setSubscriptionPackages] = useState<SubscriptionPackage[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Partner und Subscription Packages laden
+  useEffect(() => {
+    loadPartners().then(setPartners).catch(console.error);
+    loadSubscriptionPackages().then(setSubscriptionPackages).catch(console.error);
+  }, []);
 
   const subsArr = subsMonthly ? parseFloat(subsMonthly) * 12 : 0;
 
@@ -50,6 +65,11 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
         has_terminal: hasTerminal,
         pay_arr: payArr ? parseFloat(payArr) : null,
         commission_relevant: commissionRelevant,
+        // NEU: Partnership & Enterprise
+        partner_id: partnerId,
+        is_enterprise: isEnterprise,
+        // NEU: Subscription Package
+        subscription_package_id: subscriptionPackageId,
       });
 
       if (result.error) {
@@ -63,6 +83,9 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
         setSubsMonthly('');
         setHasTerminal(false);
         setPayArr('');
+        setPartnerId(null);
+        setIsEnterprise(false);
+        setSubscriptionPackageId(null);
         // Monat und commissionRelevant behalten für schnelle Eingabe
         
         // Erfolgsmeldung nach 1 Sekunde ausblenden
@@ -186,6 +209,25 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
           )}
         </div>
 
+        {/* Subscription Package */}
+        <div className="p-3 bg-green-50 rounded-lg border border-green-200">
+          <label className="block text-sm font-medium text-green-700 mb-2">
+            📦 Subscription Paket
+          </label>
+          <select
+            value={subscriptionPackageId || ''}
+            onChange={(e) => setSubscriptionPackageId(e.target.value || null)}
+            className="w-full px-3 py-2 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 bg-white"
+          >
+            <option value="">Kein Paket (Standard)</option>
+            {subscriptionPackages.map(pkg => (
+              <option key={pkg.id} value={pkg.id}>
+                {pkg.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
         {/* Terminal */}
         <div className="flex items-center">
           <input
@@ -199,6 +241,49 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
             {t('goLive.hasTerminal')}
           </label>
         </div>
+
+        {/* Partnership */}
+        <div className="p-3 bg-purple-50 rounded-lg border border-purple-200">
+          <label className="block text-sm font-medium text-purple-700 mb-2">
+            🤝 Partnership
+          </label>
+          <select
+            value={partnerId || ''}
+            onChange={(e) => setPartnerId(e.target.value || null)}
+            className="w-full px-3 py-2 border border-purple-300 rounded-lg focus:ring-2 focus:ring-purple-500 bg-white"
+          >
+            <option value="">Kein Partner (Standard)</option>
+            {partners.map(partner => (
+              <option key={partner.id} value={partner.id}>
+                {partner.name}
+              </option>
+            ))}
+          </select>
+          {partnerId && (
+            <p className="text-xs text-purple-600 mt-1">
+              ℹ️ Wird intern Head of Partnerships zugeordnet
+            </p>
+          )}
+        </div>
+
+        {/* Filialunternehmen */}
+        <div className="flex items-center p-3 bg-indigo-50 rounded-lg border border-indigo-200">
+          <input
+            type="checkbox"
+            id="isEnterprise"
+            checked={isEnterprise}
+            onChange={(e) => setIsEnterprise(e.target.checked)}
+            className="w-5 h-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+          />
+          <label htmlFor="isEnterprise" className="ml-2 text-sm font-medium text-gray-700">
+            🏢 Filialunternehmen (≥5 Filialen)
+          </label>
+        </div>
+        {isEnterprise && (
+          <p className="text-xs text-indigo-600 -mt-2 ml-3">
+            ℹ️ Wird intern Head of Partnerships zugeordnet
+          </p>
+        )}
 
         {/* Provisions-relevant */}
         <div className="flex items-center p-3 bg-amber-50 rounded-lg border border-amber-200">

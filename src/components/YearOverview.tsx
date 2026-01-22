@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { AESettings, YearSummary, GoLive, User, canReceiveGoLives, getDefaultCommissionRelevant } from '@/lib/types';
+import { Partner, SubscriptionPackage } from '@/lib/golive-types';
+import { loadPartners, loadSubscriptionPackages } from '@/lib/golive-import-hooks';
 import { useLanguage } from '@/lib/LanguageContext';
 import { formatCurrency, formatPercent, getAchievementColor } from '@/lib/calculations';
 import { PerformanceChart, GoLivesBarChart, ProvisionAreaChart } from './TrendCharts';
@@ -43,8 +45,19 @@ export default function YearOverview({
     has_terminal: false,
     pay_arr: '',
     commission_relevant: true,
+    partner_id: null as string | null,
+    is_enterprise: false,
+    subscription_package_id: null as string | null,
   });
   const [saving, setSaving] = useState(false);
+  const [partners, setPartners] = useState<Partner[]>([]);
+  const [subscriptionPackages, setSubscriptionPackages] = useState<SubscriptionPackage[]>([]);
+
+  // Partner und Subscription Packages laden
+  useEffect(() => {
+    loadPartners().then(setPartners).catch(console.error);
+    loadSubscriptionPackages().then(setSubscriptionPackages).catch(console.error);
+  }, []);
 
   // User die Go-Lives erhalten können
   const goLiveReceivers = allUsers.filter(u => canReceiveGoLives(u.role));
@@ -65,11 +78,17 @@ export default function YearOverview({
       has_terminal: gl.has_terminal,
       pay_arr: gl.pay_arr?.toString() || '',
       commission_relevant: gl.commission_relevant !== false,
+      partner_id: gl.partner_id || null,
+      is_enterprise: gl.is_enterprise || false,
+      subscription_package_id: gl.subscription_package_id || null,
     });
   };
 
   const handleSaveEdit = async () => {
     if (!editingGoLive || !onUpdateGoLive) return;
+    
+    // Monat aus dem Datum extrahieren (YYYY-MM-DD Format)
+    const newMonth = editForm.go_live_date ? parseInt(editForm.go_live_date.split('-')[1]) : editingGoLive.month;
     
     setSaving(true);
     const result = await onUpdateGoLive(editingGoLive.id, {
@@ -77,10 +96,14 @@ export default function YearOverview({
       customer_name: editForm.customer_name,
       oak_id: editForm.oak_id ? parseInt(editForm.oak_id) : null,
       go_live_date: editForm.go_live_date,
+      month: newMonth, // Monat aus Datum aktualisieren
       subs_monthly: parseFloat(editForm.subs_monthly) || 0,
       has_terminal: editForm.has_terminal,
       pay_arr: editForm.pay_arr ? parseFloat(editForm.pay_arr) : null,
       commission_relevant: editForm.commission_relevant,
+      partner_id: editForm.partner_id,
+      is_enterprise: editForm.is_enterprise,
+      subscription_package_id: editForm.subscription_package_id,
     });
     
     setSaving(false);
@@ -447,7 +470,7 @@ export default function YearOverview({
                     >
                       {goLiveReceivers.map(u => (
                         <option key={u.id} value={u.id}>
-                          {u.name} - {u.role === 'ae' ? 'AE' : u.role === 'line_manager' ? 'Line Manager' : u.role === 'country_manager' ? 'Country Manager' : u.role}
+                          {u.name} - {t(`roles.${u.role}`)}
                         </option>
                       ))}
                     </select>
@@ -512,6 +535,25 @@ export default function YearOverview({
                   )}
                 </div>
 
+                {/* Subscription Package */}
+                <div className="p-3 bg-green-50 rounded-lg border border-green-200">
+                  <label className="block text-sm font-medium text-green-700 mb-2">
+                    📦 Subscription Paket
+                  </label>
+                  <select
+                    value={editForm.subscription_package_id || ''}
+                    onChange={(e) => setEditForm({ ...editForm, subscription_package_id: e.target.value || null })}
+                    className="w-full px-3 py-2 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 bg-white"
+                  >
+                    <option value="">Kein Paket (Standard)</option>
+                    {subscriptionPackages.map(pkg => (
+                      <option key={pkg.id} value={pkg.id}>
+                        {pkg.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Terminal */}
                 <div className="flex items-center">
                   <input
@@ -539,6 +581,49 @@ export default function YearOverview({
                     {t('goLive.commissionRelevant')}
                   </label>
                 </div>
+
+                {/* Partnership */}
+                <div className="p-3 bg-purple-50 rounded-lg border border-purple-200">
+                  <label className="block text-sm font-medium text-purple-700 mb-2">
+                    🤝 Partnership
+                  </label>
+                  <select
+                    value={editForm.partner_id || ''}
+                    onChange={(e) => setEditForm({ ...editForm, partner_id: e.target.value || null })}
+                    className="w-full px-3 py-2 border border-purple-300 rounded-lg focus:ring-2 focus:ring-purple-500 bg-white"
+                  >
+                    <option value="">Kein Partner (Standard)</option>
+                    {partners.map(partner => (
+                      <option key={partner.id} value={partner.id}>
+                        {partner.name}
+                      </option>
+                    ))}
+                  </select>
+                  {editForm.partner_id && (
+                    <p className="text-xs text-purple-600 mt-1">
+                      ℹ️ Wird intern Head of Partnerships zugeordnet
+                    </p>
+                  )}
+                </div>
+
+                {/* Filialunternehmen */}
+                <div className="flex items-center p-3 bg-indigo-50 rounded-lg border border-indigo-200">
+                  <input
+                    type="checkbox"
+                    id="year_edit_isEnterprise"
+                    checked={editForm.is_enterprise}
+                    onChange={(e) => setEditForm({ ...editForm, is_enterprise: e.target.checked })}
+                    className="w-5 h-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                  />
+                  <label htmlFor="year_edit_isEnterprise" className="ml-2 text-sm font-medium text-gray-700">
+                    🏢 Filialunternehmen (≥5 Filialen)
+                  </label>
+                </div>
+                {editForm.is_enterprise && (
+                  <p className="text-xs text-indigo-600 -mt-2 ml-3">
+                    ℹ️ Wird intern Head of Partnerships zugeordnet
+                  </p>
+                )}
 
                 {/* Pay ARR */}
                 <div>

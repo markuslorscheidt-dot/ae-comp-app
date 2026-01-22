@@ -1,20 +1,113 @@
-// Types für das DACH Kompensationsmodell v3.7
+// Types für Commercial Business Planner v4.0
 
-export type UserRole = 'country_manager' | 'line_manager' | 'ae' | 'sdr' | 'sonstiges' | 'head_of_partnerships';
+// ============================================
+// BEREICHE (Business Areas)
+// ============================================
+export type BusinessArea = 'dlt' | 'new_business' | 'expanding_business' | 'marketing';
+
+export const BUSINESS_AREAS: BusinessArea[] = ['dlt', 'new_business', 'expanding_business', 'marketing'];
+
+export const BUSINESS_AREA_LABELS: Record<BusinessArea, string> = {
+  dlt: 'DLT',
+  new_business: 'New Business',
+  expanding_business: 'Expanding Business',
+  marketing: 'Marketing'
+};
+
+export const BUSINESS_AREA_DESCRIPTIONS: Record<BusinessArea, string> = {
+  dlt: 'Digital Leadership Team - Führungsebene mit Zugriff auf alle Bereiche',
+  new_business: 'Neukundengewinnung - Sales Team für neue Kunden',
+  expanding_business: 'Bestandskundenentwicklung - Customer Success Team',
+  marketing: 'Marketing - Leadgenerierung und Markenbildung'
+};
+
+// ============================================
+// ROLLEN
+// ============================================
+export type UserRole = 
+  // Superuser
+  | 'country_manager'
+  // DLT
+  | 'dlt_member'
+  // New Business
+  | 'line_manager_new_business'
+  | 'ae_subscription_sales'
+  | 'ae_payments'
+  | 'commercial_director'
+  | 'head_of_partnerships'
+  // Expanding Business
+  | 'head_of_expanding_revenue'
+  | 'cs_account_executive'
+  | 'cs_account_manager'
+  | 'cs_sdr'
+  // Marketing
+  | 'head_of_marketing'
+  | 'marketing_specialist'
+  | 'marketing_executive'
+  | 'demand_generation_specialist'
+  // Legacy/Sonstige
+  | 'sonstiges';
+
+// Mapping: Welche Rolle gehört zu welchem Bereich
+export const ROLE_TO_AREA: Record<UserRole, BusinessArea[]> = {
+  // Superuser - alle Bereiche + Debug
+  country_manager: ['dlt', 'new_business', 'expanding_business', 'marketing'],
+  // DLT - alle Bereiche
+  dlt_member: ['dlt', 'new_business', 'expanding_business', 'marketing'],
+  // New Business
+  line_manager_new_business: ['new_business'],
+  ae_subscription_sales: ['new_business'],
+  ae_payments: ['new_business'],
+  commercial_director: ['new_business'],
+  head_of_partnerships: ['new_business'],
+  // Expanding Business
+  head_of_expanding_revenue: ['expanding_business'],
+  cs_account_executive: ['expanding_business'],
+  cs_account_manager: ['expanding_business'],
+  cs_sdr: ['expanding_business'],
+  // Marketing
+  head_of_marketing: ['marketing'],
+  marketing_specialist: ['marketing'],
+  marketing_executive: ['marketing'],
+  demand_generation_specialist: ['marketing'],
+  // Sonstige
+  sonstiges: ['new_business'], // Default zu New Business
+};
+
+// Helper: Kann User auf Bereich zugreifen?
+export const canAccessArea = (role: UserRole, area: BusinessArea): boolean => {
+  return ROLE_TO_AREA[role]?.includes(area) ?? false;
+};
+
+// Helper: Alle Bereiche für eine Rolle
+export const getAreasForRole = (role: UserRole): BusinessArea[] => {
+  return ROLE_TO_AREA[role] ?? [];
+};
 
 // Helper um planbare Rollen zu identifizieren (haben Targets & Provisions-Berechnung)
-export const PLANNABLE_ROLES: UserRole[] = ['ae'];
+// New Business AEs
+export const PLANNABLE_ROLES: UserRole[] = ['ae_subscription_sales', 'ae_payments'];
 
 export const isPlannable = (role: UserRole): boolean => PLANNABLE_ROLES.includes(role);
 
 // Rollen die Go-Lives erhalten können (für ARR-Tracking)
-export const CAN_RECEIVE_GO_LIVES: UserRole[] = ['ae', 'line_manager', 'country_manager', 'sonstiges'];
+export const CAN_RECEIVE_GO_LIVES: UserRole[] = [
+  'ae_subscription_sales', 
+  'ae_payments', 
+  'line_manager_new_business', 
+  'country_manager',
+  'dlt_member',
+  'commercial_director',
+  'head_of_partnerships',
+  'sonstiges'
+];
 
 export const canReceiveGoLives = (role: UserRole): boolean => CAN_RECEIVE_GO_LIVES.includes(role);
 
 // Default für commission_relevant basierend auf Rolle
 export const getDefaultCommissionRelevant = (role: UserRole): boolean => {
-  return role === 'ae'; // Nur AE-Go-Lives sind standardmäßig provisions-relevant
+  // Nur AE-Rollen sind standardmäßig provisions-relevant
+  return role === 'ae_subscription_sales' || role === 'ae_payments';
 };
 
 export interface User {
@@ -48,17 +141,29 @@ export interface AESettings {
   // Grundeinstellungen
   ote: number;                      // On-Target Earnings (€57.000)
   
-  // Go-Lives pro Monat (für Zielberechnung)
+  // Go-Lives pro Monat (für Zielberechnung) - Legacy: Summe aller Kategorien
   monthly_go_live_targets: number[];  // 12 Werte [25, 30, 32, 49, ...]
+  
+  // NEU: Go-Lives aufgeteilt nach Kategorien (12 Werte pro Kategorie)
+  monthly_inbound_targets?: number[];      // Inbound Go-Lives
+  monthly_outbound_targets?: number[];     // Outbound Go-Lives
+  monthly_partnerships_targets?: number[]; // Partnerships Go-Lives
+  
+  // NEU: Prozentuale Verteilung der Business Targets auf diesen AE
+  target_percentage?: number;              // z.B. 60 = 60% der Business Targets
   
   // Durchschnittliche Monatsumsätze
   avg_subs_bill: number;            // €155 pro Kunde/Monat
-  avg_pay_bill: number;             // €162 pro Kunde/Monat
-  pay_arr_factor: number;           // 0.75 = 75% vom Subs
+  avg_pay_bill: number;             // €50 pro Terminal/Monat (für Terminal Sales)
+  avg_pay_bill_tipping?: number;    // €30 pro Tipping-Terminal/Monat
+  pay_arr_factor: number;           // 0.75 = 75% vom Subs (optional, für Legacy)
   
-  // Berechnete monatliche ARR-Ziele (wird aus Go-Lives berechnet)
-  monthly_subs_targets: number[];   // 12 Werte
-  monthly_pay_targets: number[];    // 12 Werte
+  // Berechnete monatliche ARR-Ziele (Subs wird aus Go-Lives berechnet)
+  monthly_subs_targets: number[];   // 12 Werte - berechnet: Go-Lives × avg_subs_bill × 12
+  monthly_pay_targets: number[];    // 12 Werte - NEU: direkt aus Sheet ODER berechnet
+  
+  // NEU: Pay ARR Targets direkt aus Google Sheet (ersetzt Berechnung)
+  monthly_pay_arr_targets?: number[];  // 12 Werte - direkt importiert aus Sheet
   
   // Terminal-Provisionen
   terminal_base: number;            // €30
@@ -68,6 +173,11 @@ export interface AESettings {
   // Provisions-Stufen (frei editierbar)
   subs_tiers: ProvisionTier[];
   pay_tiers: ProvisionTier[];
+  
+  // NEU: Google Sheets Integration
+  google_sheet_url?: string;        // URL zum Google Sheet
+  use_google_sheet?: boolean;       // true = aus Sheet laden, false = manuell
+  last_sheet_sync?: string;         // Zeitstempel der letzten Synchronisation
   
   created_at: string;
   updated_at: string;
@@ -93,6 +203,11 @@ export interface GoLive {
   has_terminal: boolean;
   pay_arr: number | null;    // Wird nach 3 Monaten eingetragen
   commission_relevant: boolean; // Provisions-relevant ja/nein
+  // NEU: Partnership & Enterprise Zuordnung
+  partner_id: string | null;    // Partner-ID für Partnership-Deals
+  is_enterprise: boolean;       // Filialunternehmen (≥5 Filialen)
+  // NEU: Subscription Package
+  subscription_package_id: string | null;  // Subscription-Paket (Kickstart, Power, etc.)
   notes: string | null;
   created_at: string;
   updated_at: string;
@@ -189,11 +304,23 @@ export const DEFAULT_MONTHLY_GO_LIVE_TARGETS = [
   25, 30, 32, 49, 39, 32, 31, 28, 48, 48, 45, 18
 ];
 
+// Default Go-Lives Kategorien (Summe = DEFAULT_MONTHLY_GO_LIVE_TARGETS)
+export const DEFAULT_MONTHLY_INBOUND_TARGETS = [
+  15, 18, 19, 30, 24, 19, 19, 17, 29, 29, 27, 11
+];
+export const DEFAULT_MONTHLY_OUTBOUND_TARGETS = [
+  5, 6, 6, 10, 8, 7, 6, 6, 10, 10, 9, 4
+];
+export const DEFAULT_MONTHLY_PARTNERSHIPS_TARGETS = [
+  5, 6, 7, 9, 7, 6, 6, 5, 9, 9, 9, 3
+];
+
 // Default Grundeinstellungen
 export const DEFAULT_SETTINGS = {
   ote: 57000,
   avg_subs_bill: 155,
-  avg_pay_bill: 162,
+  avg_pay_bill: 50,              // €50 pro Terminal/Monat
+  avg_pay_bill_tipping: 30,     // €30 pro Tipping-Terminal/Monat
   pay_arr_factor: 0.75,
   terminal_base: 30,
   terminal_bonus: 50,
@@ -205,9 +332,28 @@ export function calculateMonthlySubsTargets(goLiveTargets: number[], avgSubsBill
   return goLiveTargets.map(gl => gl * avgSubsBill * 12);
 }
 
-// Berechnet monatliche Pay ARR Ziele aus Subs Zielen
+// Berechnet monatliche Pay ARR Ziele aus Subs Zielen (Legacy-Modus)
 export function calculateMonthlyPayTargets(subsTargets: number[], payArrFactor: number): number[] {
   return subsTargets.map(subs => Math.round(subs * payArrFactor));
+}
+
+// NEU: Berechnet Go-Lives Summe aus den drei Kategorien
+export function calculateTotalGoLives(
+  inbound: number[],
+  outbound: number[],
+  partnerships: number[]
+): number[] {
+  return inbound.map((val, i) => val + (outbound[i] || 0) + (partnerships[i] || 0));
+}
+
+// NEU: Google Sheet URL zu CSV Export URL konvertieren
+export function googleSheetToCsvUrl(sheetUrl: string): string | null {
+  // Extrahiere Sheet ID aus verschiedenen URL-Formaten
+  const match = sheetUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
+  if (!match) return null;
+  
+  const sheetId = match[1];
+  return `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv`;
 }
 
 // ============================================

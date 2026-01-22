@@ -10,9 +10,14 @@ import {
   DEFAULT_SUBS_TIERS,
   DEFAULT_PAY_TIERS,
   DEFAULT_MONTHLY_GO_LIVE_TARGETS,
+  DEFAULT_MONTHLY_INBOUND_TARGETS,
+  DEFAULT_MONTHLY_OUTBOUND_TARGETS,
+  DEFAULT_MONTHLY_PARTNERSHIPS_TARGETS,
   DEFAULT_SETTINGS,
   calculateMonthlySubsTargets,
-  calculateMonthlyPayTargets
+  calculateMonthlyPayTargets,
+  calculateTotalGoLives,
+  googleSheetToCsvUrl
 } from './types';
 
 // ============================================
@@ -224,15 +229,26 @@ export function useAuth() {
 // ============================================
 
 function parseSettings(data: any): AESettings {
-  // Go-Live Targets parsen
-  const goLiveTargets = data.monthly_go_live_targets || DEFAULT_MONTHLY_GO_LIVE_TARGETS;
+  // Go-Live Kategorien parsen
+  const inboundTargets = data.monthly_inbound_targets || DEFAULT_MONTHLY_INBOUND_TARGETS;
+  const outboundTargets = data.monthly_outbound_targets || DEFAULT_MONTHLY_OUTBOUND_TARGETS;
+  const partnershipsTargets = data.monthly_partnerships_targets || DEFAULT_MONTHLY_PARTNERSHIPS_TARGETS;
+  
+  // Go-Live Targets: Wenn Kategorien vorhanden, summieren; sonst Legacy-Feld nutzen
+  const goLiveTargets = data.monthly_go_live_targets || 
+    calculateTotalGoLives(inboundTargets, outboundTargets, partnershipsTargets);
+  
   const avgSubsBill = Number(data.avg_subs_bill) || DEFAULT_SETTINGS.avg_subs_bill;
   const avgPayBill = Number(data.avg_pay_bill) || DEFAULT_SETTINGS.avg_pay_bill;
+  const avgPayBillTipping = Number(data.avg_pay_bill_tipping) || DEFAULT_SETTINGS.avg_pay_bill_tipping;
   const payArrFactor = Number(data.pay_arr_factor) || DEFAULT_SETTINGS.pay_arr_factor;
   
-  // ARR-Ziele werden IMMER aus Go-Lives berechnet (nicht aus DB lesen, da diese veraltet sein können)
+  // Subs ARR-Ziele werden aus Go-Lives berechnet
   const subsTargets = calculateMonthlySubsTargets(goLiveTargets, avgSubsBill);
-  const payTargets = calculateMonthlyPayTargets(subsTargets, payArrFactor);
+  
+  // Pay ARR-Ziele: Direkt aus Sheet ODER berechnet (Legacy)
+  const payTargets = data.monthly_pay_arr_targets || 
+    calculateMonthlyPayTargets(subsTargets, payArrFactor);
 
   return {
     id: data.id,
@@ -241,16 +257,29 @@ function parseSettings(data: any): AESettings {
     region: data.region || 'DACH',
     ote: Number(data.ote) || DEFAULT_SETTINGS.ote,
     monthly_go_live_targets: goLiveTargets,
+    // NEU: Go-Live Kategorien
+    monthly_inbound_targets: inboundTargets,
+    monthly_outbound_targets: outboundTargets,
+    monthly_partnerships_targets: partnershipsTargets,
+    // NEU: AE Target-Prozentsatz
+    target_percentage: data.target_percentage || null,
     avg_subs_bill: avgSubsBill,
     avg_pay_bill: avgPayBill,
+    avg_pay_bill_tipping: avgPayBillTipping,
     pay_arr_factor: payArrFactor,
     monthly_subs_targets: subsTargets,
     monthly_pay_targets: payTargets,
+    // NEU: Pay ARR direkt aus Sheet
+    monthly_pay_arr_targets: data.monthly_pay_arr_targets || null,
     terminal_base: Number(data.terminal_base) || DEFAULT_SETTINGS.terminal_base,
     terminal_bonus: Number(data.terminal_bonus) || DEFAULT_SETTINGS.terminal_bonus,
     terminal_penetration_threshold: Number(data.terminal_penetration_threshold) || DEFAULT_SETTINGS.terminal_penetration_threshold,
     subs_tiers: data.subs_tiers || DEFAULT_SUBS_TIERS,
     pay_tiers: data.pay_tiers || DEFAULT_PAY_TIERS,
+    // NEU: Google Sheets Integration
+    google_sheet_url: data.google_sheet_url || null,
+    use_google_sheet: data.use_google_sheet || false,
+    last_sheet_sync: data.last_sheet_sync || null,
     created_at: data.created_at,
     updated_at: data.updated_at
   };
@@ -309,16 +338,29 @@ export function useSettings(userId: string | undefined) {
     if (updates.region !== undefined) updateData.region = updates.region;
     if (updates.ote !== undefined) updateData.ote = updates.ote;
     if (updates.monthly_go_live_targets !== undefined) updateData.monthly_go_live_targets = updates.monthly_go_live_targets;
+    // NEU: Go-Live Kategorien
+    if (updates.monthly_inbound_targets !== undefined) updateData.monthly_inbound_targets = updates.monthly_inbound_targets;
+    if (updates.monthly_outbound_targets !== undefined) updateData.monthly_outbound_targets = updates.monthly_outbound_targets;
+    if (updates.monthly_partnerships_targets !== undefined) updateData.monthly_partnerships_targets = updates.monthly_partnerships_targets;
+    // NEU: AE Target-Prozentsatz
+    if (updates.target_percentage !== undefined) updateData.target_percentage = updates.target_percentage;
     if (updates.avg_subs_bill !== undefined) updateData.avg_subs_bill = updates.avg_subs_bill;
     if (updates.avg_pay_bill !== undefined) updateData.avg_pay_bill = updates.avg_pay_bill;
+    if (updates.avg_pay_bill_tipping !== undefined) updateData.avg_pay_bill_tipping = updates.avg_pay_bill_tipping;
     if (updates.pay_arr_factor !== undefined) updateData.pay_arr_factor = updates.pay_arr_factor;
     if (updates.monthly_subs_targets !== undefined) updateData.monthly_subs_targets = updates.monthly_subs_targets;
     if (updates.monthly_pay_targets !== undefined) updateData.monthly_pay_targets = updates.monthly_pay_targets;
+    // NEU: Pay ARR direkt
+    if (updates.monthly_pay_arr_targets !== undefined) updateData.monthly_pay_arr_targets = updates.monthly_pay_arr_targets;
     if (updates.terminal_base !== undefined) updateData.terminal_base = updates.terminal_base;
     if (updates.terminal_bonus !== undefined) updateData.terminal_bonus = updates.terminal_bonus;
     if (updates.terminal_penetration_threshold !== undefined) updateData.terminal_penetration_threshold = updates.terminal_penetration_threshold;
     if (updates.subs_tiers !== undefined) updateData.subs_tiers = updates.subs_tiers;
     if (updates.pay_tiers !== undefined) updateData.pay_tiers = updates.pay_tiers;
+    // NEU: Google Sheets Integration
+    if (updates.google_sheet_url !== undefined) updateData.google_sheet_url = updates.google_sheet_url;
+    if (updates.use_google_sheet !== undefined) updateData.use_google_sheet = updates.use_google_sheet;
+    if (updates.last_sheet_sync !== undefined) updateData.last_sheet_sync = updates.last_sheet_sync;
 
     const { error } = await supabase
       .from('ae_settings')
@@ -367,11 +409,16 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
           year: gl.year,
           month: gl.month,
           customer_name: gl.customer_name,
+          oak_id: gl.oak_id ? Number(gl.oak_id) : null,
           go_live_date: gl.go_live_date,
           subs_monthly: Number(gl.subs_monthly) || 0,
           subs_arr: Number(gl.subs_arr) || (Number(gl.subs_monthly) || 0) * 12,
           has_terminal: gl.has_terminal || false,
           pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
+          commission_relevant: gl.commission_relevant ?? true,
+          partner_id: gl.partner_id || null,
+          is_enterprise: gl.is_enterprise || false,
+          subscription_package_id: gl.subscription_package_id || null,
           notes: gl.notes,
           created_at: gl.created_at,
           updated_at: gl.updated_at
@@ -411,6 +458,12 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
         subs_arr: subsArr,
         has_terminal: goLive.has_terminal || false,
         pay_arr: goLive.pay_arr || null,
+        commission_relevant: goLive.commission_relevant ?? true,
+        // NEU: Partnership & Enterprise
+        partner_id: goLive.partner_id || null,
+        is_enterprise: goLive.is_enterprise || false,
+        // NEU: Subscription Package
+        subscription_package_id: goLive.subscription_package_id || null,
         notes: goLive.notes || null
       })
       .select()
@@ -436,6 +489,13 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
     if (updates.pay_arr !== undefined) updateData.pay_arr = updates.pay_arr;
     if (updates.notes !== undefined) updateData.notes = updates.notes;
     if (updates.commission_relevant !== undefined) updateData.commission_relevant = updates.commission_relevant;
+    // NEU: Partnership & Enterprise
+    if (updates.partner_id !== undefined) updateData.partner_id = updates.partner_id;
+    if (updates.is_enterprise !== undefined) updateData.is_enterprise = updates.is_enterprise;
+    // NEU: Subscription Package
+    if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
+    // NEU: Monat (bei Datumsänderung)
+    if (updates.month !== undefined) updateData.month = updates.month;
 
     const { error } = await supabase
       .from('go_lives')
@@ -565,11 +625,15 @@ export function useAllGoLives(year: number = 2026) {
             year: gl.year,
             month: gl.month,
             customer_name: gl.customer_name,
+            oak_id: gl.oak_id ? Number(gl.oak_id) : null,
             go_live_date: gl.go_live_date,
             subs_monthly: Number(gl.subs_monthly) || 0,
             subs_arr: Number(gl.subs_arr) || (Number(gl.subs_monthly) || 0) * 12,
             has_terminal: gl.has_terminal || false,
             pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
+            commission_relevant: gl.commission_relevant ?? true,
+            partner_id: gl.partner_id || null,
+            is_enterprise: gl.is_enterprise || false,
             notes: gl.notes,
             created_at: gl.created_at,
             updated_at: gl.updated_at
@@ -660,8 +724,15 @@ export function useSettingsForUser(userId: string | undefined, year: number = 20
           region: 'DACH',
           ote: DEFAULT_SETTINGS.ote,
           monthly_go_live_targets: DEFAULT_MONTHLY_GO_LIVE_TARGETS,
+          // NEU: Go-Live Kategorien
+          monthly_inbound_targets: DEFAULT_MONTHLY_INBOUND_TARGETS,
+          monthly_outbound_targets: DEFAULT_MONTHLY_OUTBOUND_TARGETS,
+          monthly_partnerships_targets: DEFAULT_MONTHLY_PARTNERSHIPS_TARGETS,
+          // NEU: AE Target-Prozentsatz (wird in UI berechnet/gesetzt)
+          target_percentage: null,
           avg_subs_bill: DEFAULT_SETTINGS.avg_subs_bill,
           avg_pay_bill: DEFAULT_SETTINGS.avg_pay_bill,
+          avg_pay_bill_tipping: DEFAULT_SETTINGS.avg_pay_bill_tipping,
           pay_arr_factor: DEFAULT_SETTINGS.pay_arr_factor,
           monthly_subs_targets: calculateMonthlySubsTargets(DEFAULT_MONTHLY_GO_LIVE_TARGETS, DEFAULT_SETTINGS.avg_subs_bill),
           monthly_pay_targets: calculateMonthlyPayTargets(
@@ -673,6 +744,8 @@ export function useSettingsForUser(userId: string | undefined, year: number = 20
           terminal_penetration_threshold: DEFAULT_SETTINGS.terminal_penetration_threshold,
           subs_tiers: DEFAULT_SUBS_TIERS,
           pay_tiers: DEFAULT_PAY_TIERS,
+          // NEU: Google Sheets Integration (Standard: deaktiviert)
+          use_google_sheet: false,
         };
 
         const { data: newData, error: insertError } = await supabase
@@ -714,16 +787,29 @@ export function useSettingsForUser(userId: string | undefined, year: number = 20
     if (updates.region !== undefined) updateData.region = updates.region;
     if (updates.ote !== undefined) updateData.ote = updates.ote;
     if (updates.monthly_go_live_targets !== undefined) updateData.monthly_go_live_targets = updates.monthly_go_live_targets;
+    // NEU: Go-Live Kategorien
+    if (updates.monthly_inbound_targets !== undefined) updateData.monthly_inbound_targets = updates.monthly_inbound_targets;
+    if (updates.monthly_outbound_targets !== undefined) updateData.monthly_outbound_targets = updates.monthly_outbound_targets;
+    if (updates.monthly_partnerships_targets !== undefined) updateData.monthly_partnerships_targets = updates.monthly_partnerships_targets;
+    // NEU: AE Target-Prozentsatz
+    if (updates.target_percentage !== undefined) updateData.target_percentage = updates.target_percentage;
     if (updates.avg_subs_bill !== undefined) updateData.avg_subs_bill = updates.avg_subs_bill;
     if (updates.avg_pay_bill !== undefined) updateData.avg_pay_bill = updates.avg_pay_bill;
+    if (updates.avg_pay_bill_tipping !== undefined) updateData.avg_pay_bill_tipping = updates.avg_pay_bill_tipping;
     if (updates.pay_arr_factor !== undefined) updateData.pay_arr_factor = updates.pay_arr_factor;
     if (updates.monthly_subs_targets !== undefined) updateData.monthly_subs_targets = updates.monthly_subs_targets;
     if (updates.monthly_pay_targets !== undefined) updateData.monthly_pay_targets = updates.monthly_pay_targets;
+    // NEU: Pay ARR direkt
+    if (updates.monthly_pay_arr_targets !== undefined) updateData.monthly_pay_arr_targets = updates.monthly_pay_arr_targets;
     if (updates.terminal_base !== undefined) updateData.terminal_base = updates.terminal_base;
     if (updates.terminal_bonus !== undefined) updateData.terminal_bonus = updates.terminal_bonus;
     if (updates.terminal_penetration_threshold !== undefined) updateData.terminal_penetration_threshold = updates.terminal_penetration_threshold;
     if (updates.subs_tiers !== undefined) updateData.subs_tiers = updates.subs_tiers;
     if (updates.pay_tiers !== undefined) updateData.pay_tiers = updates.pay_tiers;
+    // NEU: Google Sheets Integration
+    if (updates.google_sheet_url !== undefined) updateData.google_sheet_url = updates.google_sheet_url;
+    if (updates.use_google_sheet !== undefined) updateData.use_google_sheet = updates.use_google_sheet;
+    if (updates.last_sheet_sync !== undefined) updateData.last_sheet_sync = updates.last_sheet_sync;
 
     const { error } = await supabase
       .from('ae_settings')
@@ -780,6 +866,9 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
           has_terminal: gl.has_terminal || false,
           pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
           commission_relevant: gl.commission_relevant ?? true,
+          partner_id: gl.partner_id || null,
+          is_enterprise: gl.is_enterprise || false,
+          subscription_package_id: gl.subscription_package_id || null,
           notes: gl.notes,
           created_at: gl.created_at,
           updated_at: gl.updated_at
@@ -817,6 +906,11 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
         has_terminal: goLive.has_terminal || false,
         pay_arr: goLive.pay_arr || null,
         commission_relevant: goLive.commission_relevant ?? true,
+        // NEU: Partnership & Enterprise
+        partner_id: goLive.partner_id || null,
+        is_enterprise: goLive.is_enterprise || false,
+        // NEU: Subscription Package
+        subscription_package_id: goLive.subscription_package_id || null,
         notes: goLive.notes || null
       })
       .select()
@@ -842,6 +936,13 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
     if (updates.pay_arr !== undefined) updateData.pay_arr = updates.pay_arr;
     if (updates.notes !== undefined) updateData.notes = updates.notes;
     if (updates.commission_relevant !== undefined) updateData.commission_relevant = updates.commission_relevant;
+    // NEU: Partnership & Enterprise
+    if (updates.partner_id !== undefined) updateData.partner_id = updates.partner_id;
+    if (updates.is_enterprise !== undefined) updateData.is_enterprise = updates.is_enterprise;
+    // NEU: Subscription Package
+    if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
+    // NEU: Monat (bei Datumsänderung)
+    if (updates.month !== undefined) updateData.month = updates.month;
 
     const { error } = await supabase
       .from('go_lives')
@@ -1744,6 +1845,272 @@ export async function restoreBackup(backup: BackupData): Promise<{ success: bool
   } catch (err: any) {
     return { success: false, error: err.message || 'Restore fehlgeschlagen', details };
   }
+}
+
+// ============================================
+// GOOGLE SHEETS INTEGRATION
+// ============================================
+
+export interface GoogleSheetUserData {
+  name: string;
+  inbound: number[];      // 12 Monatswerte
+  outbound: number[];     // 12 Monatswerte
+  partnerships: number[]; // 12 Monatswerte
+  payArr: number[];       // 12 Monatswerte
+}
+
+export interface GoogleSheetParseResult {
+  success: boolean;
+  error?: string;
+  totalDach?: GoogleSheetUserData;
+  users: GoogleSheetUserData[];
+}
+
+/**
+ * Parst CSV-Daten aus Google Sheet
+ * 
+ * Struktur des Sheets (analysiert aus echten Daten):
+ * 
+ * Zeile für User-Header: "","Slavo","Slavo","","","100","100",...
+ *   - Spalte 1+2: User-Name (identisch)
+ * 
+ * Zeile für Daten: "","","Inbound GoLive","","210","25","25","25","18",...
+ *   - Spalte 2: Kategorie-Name
+ *   - Spalte 4: Jahres-Total
+ *   - Spalten 5-16: Monatswerte (Jan-Dez)
+ * 
+ * Kategorien die wir brauchen:
+ * - "Partnerships & Enterprises GoLive" → partnerships
+ * - "Inbound GoLive" → inbound  
+ * - "Outbound GoLive" → outbound
+ * - "Pay ARR incl Tipping" → payArr
+ */
+export function parseGoogleSheetCsv(csvText: string): GoogleSheetParseResult {
+  try {
+    // Einfaches CSV Parsing mit Regex für quoted values
+    const parseCSVLine = (line: string): string[] => {
+      const result: string[] = [];
+      let current = '';
+      let inQuotes = false;
+      
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          inQuotes = !inQuotes;
+        } else if (char === ',' && !inQuotes) {
+          result.push(current);
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      result.push(current);
+      return result;
+    };
+    
+    const lines = csvText.split('\n').filter(line => line.trim());
+    
+    if (lines.length < 2) {
+      return { success: false, error: 'Leere oder ungültige CSV-Daten', users: [] };
+    }
+    
+    const userMap = new Map<string, GoogleSheetUserData>();
+    let currentUserName = '';
+    
+    for (const line of lines) {
+      const values = parseCSVLine(line);
+      
+      if (values.length < 17) {
+        continue;
+      }
+      
+      const col1 = values[1]?.trim() || '';
+      const col2 = values[2]?.trim() || '';
+      
+      // Erkennung einer User-Header-Zeile: col1 und col2 sind identisch und nicht leer
+      // z.B. "Slavo","Slavo" oder "Total DACH","Total DACH"
+      if (col1 && col1 === col2 && !col1.includes('€') && col1 !== 'Month') {
+        currentUserName = col1;
+        
+        if (!userMap.has(currentUserName)) {
+          userMap.set(currentUserName, {
+            name: currentUserName,
+            inbound: new Array(12).fill(0),
+            outbound: new Array(12).fill(0),
+            partnerships: new Array(12).fill(0),
+            payArr: new Array(12).fill(0)
+          });
+        }
+        continue;
+      }
+      
+      // Datenzeile verarbeiten
+      if (!currentUserName) continue;
+      
+      const userData = userMap.get(currentUserName);
+      if (!userData) continue;
+      
+      const category = col2.toLowerCase();
+      
+      // Monatswerte extrahieren (Spalten 5-16, also Index 5 bis 16)
+      const extractMonthValues = (): number[] => {
+        const vals: number[] = [];
+        for (let i = 5; i <= 16; i++) {
+          const raw = values[i] || '0';
+          // Entferne € Symbol, Punkte als Tausendertrennzeichen, ersetze Komma durch Punkt
+          const cleaned = raw.replace(/€/g, '').replace(/\s/g, '').replace(/\./g, '').replace(',', '.');
+          const num = parseFloat(cleaned) || 0;
+          vals.push(Math.round(num));
+        }
+        return vals;
+      };
+      
+      // Kategorien matchen
+      if (category === 'inbound golive' || category.includes('inbound golive')) {
+        userData.inbound = extractMonthValues();
+      } else if (category === 'outbound golive' || category.includes('outbound golive')) {
+        userData.outbound = extractMonthValues();
+      } else if (category.includes('partnerships') && category.includes('golive')) {
+        userData.partnerships = extractMonthValues();
+      } else if (category.includes('pay arr')) {
+        userData.payArr = extractMonthValues();
+      }
+    }
+    
+    // Ergebnisse aufbereiten
+    const totalDach = userMap.get('Total DACH');
+    userMap.delete('Total DACH');
+    
+    const users = Array.from(userMap.values());
+    
+    // Debug-Output
+    console.log('=== Google Sheet Parser Debug ===');
+    console.log('Total users found:', users.length);
+    users.forEach(u => {
+      console.log(`User: ${u.name}`);
+      console.log(`  Inbound: ${u.inbound.join(', ')} = ${u.inbound.reduce((a,b) => a+b, 0)}`);
+      console.log(`  Outbound: ${u.outbound.join(', ')} = ${u.outbound.reduce((a,b) => a+b, 0)}`);
+      console.log(`  Partnerships: ${u.partnerships.join(', ')} = ${u.partnerships.reduce((a,b) => a+b, 0)}`);
+      console.log(`  Pay ARR: ${u.payArr.reduce((a,b) => a+b, 0)}`);
+    });
+    if (totalDach) {
+      console.log('Total DACH found with', totalDach.inbound.reduce((a,b) => a+b, 0), 'inbound');
+    }
+    console.log('=================================');
+    
+    return {
+      success: true,
+      totalDach,
+      users
+    };
+  } catch (err: any) {
+    console.error('CSV Parse error:', err);
+    return { success: false, error: err.message || 'Fehler beim Parsen der CSV-Daten', users: [] };
+  }
+}
+
+/**
+ * Fetch Google Sheet als CSV
+ */
+export async function fetchGoogleSheetCsv(sheetUrl: string): Promise<{ data: string | null; error: string | null }> {
+  try {
+    const csvUrl = googleSheetToCsvUrl(sheetUrl);
+    if (!csvUrl) {
+      return { data: null, error: 'Ungültige Google Sheet URL' };
+    }
+    
+    const response = await fetch(csvUrl);
+    
+    if (!response.ok) {
+      return { data: null, error: `HTTP ${response.status}: ${response.statusText}` };
+    }
+    
+    const csvText = await response.text();
+    return { data: csvText, error: null };
+  } catch (err: any) {
+    return { data: null, error: err.message || 'Netzwerkfehler beim Abrufen des Sheets' };
+  }
+}
+
+/**
+ * Synchronisiert Settings mit Google Sheet Daten
+ * Matched User anhand Vorname (z.B. "Slavo" → "Slavo Ristanovic")
+ */
+export async function syncSettingsFromGoogleSheet(
+  sheetUrl: string,
+  allUsers: User[],
+  currentSettings: Map<string, AESettings>,
+  updateSettingsFn: (userId: string, updates: Partial<AESettings>) => Promise<{ error: any }>
+): Promise<{ 
+  success: boolean; 
+  error?: string; 
+  synced: string[]; 
+  notFound: string[];
+  totalDachData?: GoogleSheetUserData;
+}> {
+  // 1. Fetch CSV
+  const { data: csvText, error: fetchError } = await fetchGoogleSheetCsv(sheetUrl);
+  if (fetchError || !csvText) {
+    return { success: false, error: fetchError || 'Keine Daten erhalten', synced: [], notFound: [] };
+  }
+  
+  // 2. Parse CSV
+  const parseResult = parseGoogleSheetCsv(csvText);
+  if (!parseResult.success) {
+    return { success: false, error: parseResult.error, synced: [], notFound: [] };
+  }
+  
+  // 3. Match users and update settings
+  const synced: string[] = [];
+  const notFound: string[] = [];
+  
+  for (const sheetUser of parseResult.users) {
+    // Match by first name (case insensitive)
+    const firstName = sheetUser.name.toLowerCase();
+    const matchedUser = allUsers.find(u => 
+      u.name.toLowerCase().startsWith(firstName) ||
+      u.name.toLowerCase().split(' ')[0] === firstName
+    );
+    
+    if (!matchedUser) {
+      notFound.push(sheetUser.name);
+      continue;
+    }
+    
+    // Calculate total Go-Lives from categories
+    const goLiveTargets = calculateTotalGoLives(
+      sheetUser.inbound,
+      sheetUser.outbound,
+      sheetUser.partnerships
+    );
+    
+    // Build updates
+    const updates: Partial<AESettings> = {
+      monthly_inbound_targets: sheetUser.inbound,
+      monthly_outbound_targets: sheetUser.outbound,
+      monthly_partnerships_targets: sheetUser.partnerships,
+      monthly_go_live_targets: goLiveTargets,
+      monthly_pay_arr_targets: sheetUser.payArr,
+      use_google_sheet: true,
+      google_sheet_url: sheetUrl,
+      last_sheet_sync: new Date().toISOString()
+    };
+    
+    // Update settings
+    const { error } = await updateSettingsFn(matchedUser.id, updates);
+    if (error) {
+      console.error(`Error updating settings for ${matchedUser.name}:`, error);
+    } else {
+      synced.push(matchedUser.name);
+    }
+  }
+  
+  return { 
+    success: true, 
+    synced, 
+    notFound,
+    totalDachData: parseResult.totalDach
+  };
 }
 
 export function downloadBackup(backup: BackupData) {

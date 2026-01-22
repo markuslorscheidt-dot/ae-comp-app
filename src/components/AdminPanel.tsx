@@ -18,20 +18,60 @@ type AdminView = 'users' | 'add-user' | 'permissions' | 'team-overview' | 'backu
 
 const PERMISSION_KEYS: (keyof Permissions)[] = [
   'viewAllUsers', 'enterOwnGoLives', 'enterGoLivesForOthers', 'enterPayARR',
-  'editSettings', 'editTiers', 'manageUsers', 'assignRoles', 'viewAllReports', 'exportReports', 'hasAdminAccess'
+  'editSettings', 'editTiers', 'manageUsers', 'assignRoles', 'viewAllReports', 'exportReports', 'hasAdminAccess',
+  'isSuperuser', 'isDLT', 'canSeeDebug'
 ];
 
-const ALL_ROLES: UserRole[] = ['country_manager', 'line_manager', 'ae', 'sdr', 'sonstiges'];
+// Alle verfügbaren Rollen für das neue System
+const ALL_ROLES: UserRole[] = [
+  // Superuser
+  'country_manager',
+  // DLT
+  'dlt_member',
+  // New Business
+  'line_manager_new_business',
+  'ae_subscription_sales',
+  'ae_payments',
+  'commercial_director',
+  'head_of_partnerships',
+  // Expanding Business
+  'head_of_expanding_revenue',
+  'cs_account_executive',
+  'cs_account_manager',
+  'cs_sdr',
+  // Marketing
+  'head_of_marketing',
+  'marketing_specialist',
+  'marketing_executive',
+  'demand_generation_specialist',
+  // Sonstige
+  'sonstiges'
+];
 
 const REGIONS = ['DACH', 'Deutschland', 'Österreich', 'Schweiz', 'DACH-Nord', 'DACH-Süd', 'DACH-Ost', 'DACH-West'];
 
 // Welche Rollen kann eine Rolle editieren?
 const EDITABLE_ROLES: Record<UserRole, UserRole[]> = {
-  country_manager: ['country_manager', 'line_manager', 'head_of_partnerships', 'ae', 'sdr', 'sonstiges'],
-  line_manager: ['line_manager', 'ae', 'sdr', 'sonstiges'],
-  head_of_partnerships: ['ae', 'sdr', 'sonstiges'],
-  ae: [],
-  sdr: [],
+  // Superuser kann alles
+  country_manager: ALL_ROLES,
+  // DLT kann alle außer Superuser
+  dlt_member: ALL_ROLES.filter(r => r !== 'country_manager'),
+  // Line Manager New Business
+  line_manager_new_business: ['ae_subscription_sales', 'ae_payments', 'sonstiges'],
+  // Andere Manager können ihre Bereiche verwalten
+  head_of_expanding_revenue: ['cs_account_executive', 'cs_account_manager', 'cs_sdr'],
+  head_of_marketing: ['marketing_specialist', 'marketing_executive', 'demand_generation_specialist'],
+  // Nicht-Manager können keine Rollen editieren
+  ae_subscription_sales: [],
+  ae_payments: [],
+  commercial_director: [],
+  head_of_partnerships: [],
+  cs_account_executive: [],
+  cs_account_manager: [],
+  cs_sdr: [],
+  marketing_specialist: [],
+  marketing_executive: [],
+  demand_generation_specialist: [],
   sonstiges: [],
 };
 
@@ -244,7 +284,14 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
     }
   };
 
-  const teamStats = users.filter(u => u.role === 'ae' || u.role === 'line_manager').map(user => {
+  // Alle User mit planbaren Rollen oder Manager-Rollen für Team-Statistiken
+  const teamStats = users.filter(u => 
+    u.role === 'ae_subscription_sales' || 
+    u.role === 'ae_payments' || 
+    u.role === 'line_manager_new_business' ||
+    u.role === 'cs_account_executive' ||
+    u.role === 'cs_account_manager'
+  ).map(user => {
     const userSettings = allSettings.find(s => s.user_id === user.id);
     const userGoLives = goLives.filter(gl => gl.user_id === user.id);
     if (!userSettings) return { user, goLivesCount: 0, subsActual: 0, payActual: 0, totalProvision: 0 };
@@ -253,16 +300,34 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
   });
 
   const getRoleColor = (role: UserRole) => {
+    // Superuser
     if (role === 'country_manager') return 'bg-purple-100 text-purple-700';
-    if (role === 'line_manager') return 'bg-blue-100 text-blue-700';
-    if (role === 'ae') return 'bg-green-100 text-green-700';
+    // DLT
+    if (role === 'dlt_member') return 'bg-indigo-100 text-indigo-700';
+    // Directors/Heads
+    if (role === 'commercial_director' || role === 'head_of_expanding_revenue' || role === 'head_of_marketing' || role === 'head_of_partnerships') return 'bg-blue-100 text-blue-700';
+    // Line Managers
+    if (role === 'line_manager_new_business') return 'bg-sky-100 text-sky-700';
+    // AEs
+    if (role === 'ae_subscription_sales' || role === 'ae_payments' || role === 'cs_account_executive') return 'bg-green-100 text-green-700';
+    // Marketing
+    if (role === 'marketing_specialist' || role === 'marketing_executive' || role === 'demand_generation_specialist') return 'bg-orange-100 text-orange-700';
+    // Account Managers & SDRs
+    if (role === 'cs_account_manager' || role === 'cs_sdr') return 'bg-teal-100 text-teal-700';
+    // Sonstige
     if (role === 'sonstiges') return 'bg-amber-100 text-amber-700';
     return 'bg-gray-100 text-gray-700';
   };
 
-  // Mögliche Manager für Dropdown
+  // Mögliche Manager für Dropdown - alle Manager-/Head-Rollen
   const possibleManagers = users.filter(u => 
-    u.role === 'country_manager' || u.role === 'line_manager'
+    u.role === 'country_manager' || 
+    u.role === 'dlt_member' ||
+    u.role === 'line_manager_new_business' ||
+    u.role === 'commercial_director' ||
+    u.role === 'head_of_partnerships' ||
+    u.role === 'head_of_expanding_revenue' ||
+    u.role === 'head_of_marketing'
   );
 
   return (
@@ -520,7 +585,7 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
                       <div className="flex-1">
                         <div className="flex items-center space-x-2">
                           <span className={`px-2 py-0.5 rounded text-xs font-medium ${getRoleColor(role)}`}>{t(`roles.${role}`)}</span>
-                          {role === 'sdr' && <span className="text-xs text-orange-600">{t('admin.addUser.notActive')}</span>}
+                          {/* Alle Rollen sind jetzt aktiv */}
                         </div>
                         <p className="text-sm text-gray-500 mt-1">{t(`roleDescriptions.${role}`)}</p>
                         <div className="flex flex-wrap gap-1 mt-2">

@@ -54,6 +54,13 @@ export interface Partner {
   updated_at: string;
 }
 
+// Subscription Package (aus DB)
+export interface SubscriptionPackage {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
 // Filter-State für Import-Dialog
 export interface GoLiveFilters {
   countries: GoLiveCountry[]; // ['Germany', 'Austria', 'Switzerland']

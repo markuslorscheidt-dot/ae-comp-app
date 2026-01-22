@@ -56,7 +56,7 @@ export default function AuthForm({ onSignIn, onSignUp }: AuthFormProps) {
 
         {/* Header */}
         <div className="text-center mb-8">
-          <h1 className="text-2xl font-bold text-gray-800">{t('dashboard.title')}</h1>
+          <h1 className="text-2xl font-bold text-gray-800">Commercial Business Planner</h1>
           <p className="text-gray-500 mt-2">
             {isLogin ? t('auth.loginTitle') : t('auth.registerTitle')}
           </p>

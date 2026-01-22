@@ -213,8 +213,10 @@ export function calculateYTDSummary(
 /**
  * Berechnet OTE-Projektionen für verschiedene Zielerreichungs-Szenarien
  * Zeigt erwartete Provision bei 100-110%, 110-120%, 120%+ Zielerreichung
+ * @param settings AE Settings
+ * @param plannedTerminals Optional: Anzahl der geplanten Pay Terminals (für Penetration-Berechnung)
  */
-export function calculateOTEProjections(settings: AESettings): OTEProjection[] {
+export function calculateOTEProjections(settings: AESettings, plannedTerminals?: number): OTEProjection[] {
   // Alle 7 Stufen aus den Provisions-Tabellen
   const scenarios = [
     { scenario: '< 50%', factor: 0.25, tierMin: 0, tierMax: 0.5 },
@@ -232,6 +234,10 @@ export function calculateOTEProjections(settings: AESettings): OTEProjection[] {
 
   const subsTiers = settings.subs_tiers || DEFAULT_SUBS_TIERS;
   const payTiers = settings.pay_tiers || DEFAULT_PAY_TIERS;
+  
+  // Terminal-Provision: Basierend auf Penetration pro Szenario
+  const terminals = plannedTerminals !== undefined ? plannedTerminals : yearlyGoLives;
+  const penetrationThreshold = settings.terminal_penetration_threshold || 0.75;
 
   return scenarios.map(({ scenario, factor, tierMin, tierMax }) => {
     // Erwarteter ARR bei dieser Zielerreichung
@@ -246,8 +252,13 @@ export function calculateOTEProjections(settings: AESettings): OTEProjection[] {
     // Berechne Provisionen
     const subsProvision = expectedSubsArr * subsRate;
     
-    // Terminal-Provision (angenommen 70% Penetration → Bonus-Rate)
-    const terminalProvision = yearlyGoLives * settings.terminal_bonus;
+    // Terminal-Provision: Skalierte Anzahl Terminals × Rate
+    // Die Terminal-Anzahl wird mit dem Szenario-Faktor skaliert
+    // Die Rate (Basis/Bonus) wird pro Szenario basierend auf der skalierten Penetration berechnet
+    const scaledTerminals = Math.round(terminals * factor);
+    const scaledPenetration = yearlyGoLives > 0 ? (scaledTerminals / yearlyGoLives) : 0;
+    const terminalRate = scaledPenetration >= penetrationThreshold ? settings.terminal_bonus : settings.terminal_base;
+    const terminalProvision = scaledTerminals * terminalRate;
     
     const payProvision = expectedPayArr * payRate;
     const totalProvision = subsProvision + terminalProvision + payProvision;
@@ -273,14 +284,16 @@ export function calculateOTEProjections(settings: AESettings): OTEProjection[] {
 /**
  * Validiert ob die Einstellungen zum OTE passen
  * Returns: { valid: boolean, message: string, expectedProvision: number }
+ * @param settings AE Settings
+ * @param plannedTerminals Optional: Anzahl der geplanten Pay Terminals
  */
-export function validateOTESettings(settings: AESettings): { 
+export function validateOTESettings(settings: AESettings, plannedTerminals?: number): { 
   valid: boolean; 
   message: string; 
   expectedProvision: number;
   deviation: number;
 } {
-  const projections = calculateOTEProjections(settings);
+  const projections = calculateOTEProjections(settings, plannedTerminals);
   // Index 4 ist jetzt 100-110% (nach Erweiterung auf 7 Stufen)
   const baseProjection = projections[4]; // 100-110% Szenario
 

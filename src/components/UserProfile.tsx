@@ -74,7 +74,13 @@ export default function UserProfile({
   const possibleManagers = useMemo(() => {
     return allUsers.filter(u => 
       u.id !== user.id && 
-      (u.role === 'line_manager' || u.role === 'country_manager')
+      (u.role === 'country_manager' || 
+       u.role === 'dlt_member' ||
+       u.role === 'line_manager_new_business' ||
+       u.role === 'commercial_director' ||
+       u.role === 'head_of_partnerships' ||
+       u.role === 'head_of_expanding_revenue' ||
+       u.role === 'head_of_marketing')
     );
   }, [user.id, allUsers]);
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { User, GoLive, AESettings, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, Challenge } from '@/lib/types';
+import { User, GoLive, AESettings, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, Challenge, BusinessArea, BUSINESS_AREA_LABELS } from '@/lib/types';
 import { useAllUsers, useSettingsForUser, useGoLivesForUser, useMultiUserData, updateGoLiveUniversal, deleteGoLiveUniversal, useChallenges, calculateChallengeProgress } from '@/lib/hooks';
 import { useLanguage } from '@/lib/LanguageContext';
 import { useDataSource } from '@/lib/DataSourceContext';
@@ -43,11 +43,13 @@ import { supabase } from '@/lib/supabase';
 interface DashboardProps {
   user: User;
   onSignOut: () => void;
+  selectedArea?: BusinessArea;
+  onBackToAreaSelector?: () => void;
 }
 
-type View = 'dashboard' | 'month' | 'year' | 'add' | 'admin' | 'settings' | 'leaderboard' | 'profile' | 'pipeline' | 'golive_import';
+type View = 'dashboard' | 'month' | 'year' | 'add' | 'settings' | 'leaderboard' | 'profile' | 'pipeline' | 'golive_import';
 
-export default function Dashboard({ user, onSignOut }: DashboardProps) {
+export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaSelector }: DashboardProps) {
   const { t } = useLanguage();
   const { dataSource, setDataSource, isDemo, scenarioLabel } = useDataSource();
   const permissions = getPermissions(user.role);
@@ -338,8 +340,26 @@ export default function Dashboard({ user, onSignOut }: DashboardProps) {
       <div className="max-w-7xl mx-auto px-4">
         <div className="flex items-center justify-between h-16">
           <div className="flex items-center space-x-4">
-            <h1 className="text-xl font-bold text-gray-800">{t('dashboard.title')}</h1>
-            <span className="text-sm text-gray-500">{settings.year} • {settings.region}</span>
+            {/* Zurück-Button zur Bereichsauswahl */}
+            {onBackToAreaSelector && (
+              <button
+                onClick={onBackToAreaSelector}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                title="Zurück zur Bereichsauswahl"
+              >
+                <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+            )}
+            <div>
+              <h1 className="text-xl font-bold text-gray-800">{t('dashboard.title')}</h1>
+              <p className="text-xs text-gray-500">
+                {selectedArea && <span className="font-medium text-blue-600">{BUSINESS_AREA_LABELS[selectedArea]}</span>}
+                {selectedArea && ' • '}
+                {settings.year} • {settings.region}
+              </p>
+            </div>
           </div>
           
           <div className="flex items-center space-x-2">
@@ -387,16 +407,7 @@ export default function Dashboard({ user, onSignOut }: DashboardProps) {
                 {t('nav.addGoLive')}
               </button>
             )}
-            {permissions.hasAdminAccess && !isDemo && (
-              <button
-                onClick={() => setCurrentView('admin')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
-                  currentView === 'admin' ? 'bg-purple-100 text-purple-700' : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                {t('nav.admin')}
-              </button>
-            )}
+            {/* Admin-Button wurde in den Startbildschirm verschoben */}
             {permissions.editSettings && !isDemo && (
               <button
                 onClick={() => setCurrentView('settings')}
@@ -494,17 +505,7 @@ export default function Dashboard({ user, onSignOut }: DashboardProps) {
     );
   }
 
-  // Admin View
-  if (currentView === 'admin' && permissions.hasAdminAccess) {
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <Navigation />
-        <main className="max-w-7xl mx-auto px-4 py-8">
-          <AdminPanel currentUser={user} onBack={() => setCurrentView('dashboard')} />
-        </main>
-      </div>
-    );
-  }
+  // Admin-View wurde in den Startbildschirm verschoben
 
   // Leaderboard View
   if (currentView === 'leaderboard') {
@@ -570,31 +571,11 @@ export default function Dashboard({ user, onSignOut }: DashboardProps) {
       <div className="min-h-screen bg-gray-50">
         <Navigation />
         <main className="max-w-7xl mx-auto px-4 py-8">
-          {/* User Selector for Settings - nur AEs */}
-          {permissions.viewAllUsers && selectableAEs.length > 0 && (
-            <div className="bg-white rounded-xl shadow-sm p-4 mb-6">
-              <UserSelector
-                users={selectableAEs}
-                selectedUserIds={[selectedUserId]}
-                onSelectionChange={(ids) => setSelectedUserId(ids[0])}
-                currentUser={user}
-                mode="single"
-                label={t('userSelector.settingsFor')}
-              />
-              {selectedUserId !== user.id && (
-                <p className="mt-2 text-sm text-blue-600">
-                  📝 {t('userSelector.editingSettingsOf')} <strong>{selectedUser.name}</strong>
-                </p>
-              )}
-            </div>
-          )}
-          
           <SettingsPanel 
             settings={settings} 
             onSave={updateSettings}
             onBack={() => setCurrentView('dashboard')}
             currentUser={user}
-            selectedUser={selectedUser}
           />
         </main>
       </div>
@@ -768,8 +749,8 @@ export default function Dashboard({ user, onSignOut }: DashboardProps) {
               onBack={() => setCurrentView('dashboard')}
               title={isAllSelected ? 'GESAMT - Alle User' : (!isViewingPlannable && selectedUser ? `${selectedUser.name} (nur ARR)` : undefined)}
               canEdit={
-                // AE und SDR dürfen in GESAMT-Ansicht nicht bearbeiten
-                (user.role === 'ae' || user.role === 'sdr') 
+                // Nur AE-Rollen ohne erweiterte Rechte dürfen in GESAMT-Ansicht nicht bearbeiten
+                (user.role === 'ae_subscription_sales' || user.role === 'ae_payments' || user.role === 'cs_sdr') 
                   ? false 
                   : (permissions.enterGoLivesForOthers || permissions.enterOwnGoLives)
               }

@@ -70,8 +70,8 @@ export default function Leaderboard({
   const { t } = useLanguage();
   const permissions = getPermissions(currentUser.role);
   
-  // Provision darf nur von Country Manager und Line Manager gesehen werden
-  const canViewProvision = currentUser.role === 'country_manager' || currentUser.role === 'line_manager';
+  // Provision darf nur von bestimmten Rollen gesehen werden
+  const canViewProvision = permissions.viewAllReports;
   
   const [filterPeriod, setFilterPeriod] = useState<FilterPeriod>('ytd');
   const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth() + 1);
@@ -121,8 +121,14 @@ export default function Leaderboard({
   const leaderboardData = useMemo((): LeaderboardEntry[] => {
     const entries: LeaderboardEntry[] = [];
 
-    // Nur AEs und Line Manager für Leaderboard
-    const eligibleUsers = users.filter(u => u.role === 'ae' || u.role === 'line_manager');
+    // Planbare Rollen und Manager für Leaderboard (alle, die Provisions-Tracking haben)
+    const eligibleUsers = users.filter(u => 
+      u.role === 'ae_subscription_sales' || 
+      u.role === 'ae_payments' || 
+      u.role === 'line_manager_new_business' ||
+      u.role === 'cs_account_executive' ||
+      u.role === 'cs_account_manager'
+    );
 
     for (const user of eligibleUsers) {
       const settings = settingsMap.get(user.id);

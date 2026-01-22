@@ -25,9 +25,22 @@ export default function UserSelector({
   const { t } = useLanguage();
 
   const getRoleColor = (role: string) => {
+    // Superuser
     if (role === 'country_manager') return 'bg-purple-100 text-purple-700';
-    if (role === 'line_manager') return 'bg-blue-100 text-blue-700';
-    if (role === 'ae') return 'bg-green-100 text-green-700';
+    // DLT
+    if (role === 'dlt_member') return 'bg-indigo-100 text-indigo-700';
+    // Directors/Heads
+    if (role === 'commercial_director' || role === 'head_of_expanding_revenue' || role === 'head_of_marketing' || role === 'head_of_partnerships') return 'bg-blue-100 text-blue-700';
+    // Line Managers
+    if (role === 'line_manager_new_business') return 'bg-sky-100 text-sky-700';
+    // AEs
+    if (role === 'ae_subscription_sales' || role === 'ae_payments' || role === 'cs_account_executive') return 'bg-green-100 text-green-700';
+    // Marketing
+    if (role === 'marketing_specialist' || role === 'marketing_executive' || role === 'demand_generation_specialist') return 'bg-orange-100 text-orange-700';
+    // Account Managers & SDRs
+    if (role === 'cs_account_manager' || role === 'cs_sdr') return 'bg-teal-100 text-teal-700';
+    // Sonstige
+    if (role === 'sonstiges') return 'bg-amber-100 text-amber-700';
     return 'bg-gray-100 text-gray-700';
   };
 

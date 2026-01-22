@@ -12,6 +12,7 @@ import {
   GoLiveFilters,
   GoLiveCountry,
   Partner,
+  SubscriptionPackage,
   UserOption,
   OpportunityOption,
   GoLiveImportResult,
@@ -498,6 +499,60 @@ export async function deletePartner(id: string): Promise<void> {
   if (error) {
     console.error('Fehler beim Löschen des Partners:', error);
     throw new Error(`Partner konnte nicht gelöscht werden: ${error.message}`);
+  }
+}
+
+// ============================================================================
+// SUBSCRIPTION PACKAGES CRUD
+// ============================================================================
+
+/**
+ * Lädt alle Subscription Packages
+ */
+export async function loadSubscriptionPackages(): Promise<SubscriptionPackage[]> {
+  const { data, error } = await supabase
+    .from('subscription_packages')
+    .select('*')
+    .order('name');
+
+  if (error) {
+    console.error('Fehler beim Laden der Subscription Packages:', error);
+    return [];
+  }
+
+  return data || [];
+}
+
+/**
+ * Erstellt ein neues Subscription Package
+ */
+export async function createSubscriptionPackage(name: string): Promise<SubscriptionPackage | null> {
+  const { data, error } = await supabase
+    .from('subscription_packages')
+    .insert({ name: name.trim() })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Fehler beim Anlegen des Subscription Packages:', error);
+    throw new Error(`Subscription Package konnte nicht angelegt werden: ${error.message}`);
+  }
+
+  return data;
+}
+
+/**
+ * Löscht ein Subscription Package
+ */
+export async function deleteSubscriptionPackage(id: string): Promise<void> {
+  const { error } = await supabase
+    .from('subscription_packages')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    console.error('Fehler beim Löschen des Subscription Packages:', error);
+    throw new Error(`Subscription Package konnte nicht gelöscht werden: ${error.message}`);
   }
 }
 

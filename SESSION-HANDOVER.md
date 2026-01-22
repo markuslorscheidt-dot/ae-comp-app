@@ -1,61 +1,107 @@
-# Session-Übergabe - AE Kompensationsmodell App
+# Session-Übergabe - Commercial Business Planner
 
-**Datum:** 15.01.2026  
-**Projekt:** AE Kompensationsmodell (Sales Compensation Dashboard)
+**Datum:** 22.01.2026  
+**Projekt:** Commercial Business Planner (ehemals AE Kompensationsmodell)
 
 ---
 
-## ✅ Erledigte Features (v3.16.24 → v3.16.26)
+## ✅ Erledigte Features (v3.16.30 → v3.18.0)
 
-### v3.16.24: Zeilen-Klick für Opportunities
-Klick auf Opportunity-Zeile öffnet Bearbeiten-Formular (löst Aktionen-Spalte Bug).
+### v3.17.0: Major Refactoring - Multi-Area Business Planner
 
-### v3.16.25: Leads Archivieren (Soft Delete)
-Konsistente Archiv-Logik für Leads und Opportunities.
+**App Umbenennung:**
+- Von "AE Kompensation" zu **"Commercial Business Planner"**
 
-### v3.16.26: Salesforce als führendes System für Stages (StageChangeDialog)
-**Stage ändern Dialog** überarbeitet:
-- **Standard:** Hinweis "Stage wird über Salesforce Import aktualisiert"
-- **Salesforce Link:** Button "☁️ In Salesforce öffnen" (wenn sfid vorhanden)
-- **Manager Override:** Nur `line_manager` und `country_manager` können Stage manuell ändern
+**Neue Business Areas:**
+- DLT (Digital Leadership Team)
+- New Business
+- Expanding Business
+- Marketing
 
-### v3.16.27: Salesforce-Logik auch im OpportunityForm
-**Opportunity bearbeiten Formular** überarbeitet:
-- **AEs:** Stage ist read-only (nur Anzeige, keine Auswahl)
-- **Manager:** Können Stage ändern
-- **Neue Opportunities:** Stage kann von jedem gesetzt werden
-- Konsistent mit StageChangeDialog
+**Erweitertes Rollen-System (6 → 15 Rollen):**
+| Rolle | Bereich | Beschreibung |
+|-------|---------|--------------|
+| `country_manager` | Global | Superuser, Zugang zu allem |
+| `dlt_member` | DLT | Leadership, sieht alle Bereiche |
+| `line_manager_new_business` | New Business | Manager für New Business |
+| `line_manager_expanding_business` | Expanding | Manager für Expanding |
+| `line_manager_marketing` | Marketing | Manager für Marketing |
+| `head_of_partnerships` | New Business | Partnerships-Verantwortlicher |
+| `ae_new_business` | New Business | Account Executive |
+| `ae_expanding_business` | Expanding | Account Executive |
+| `marketing_specialist` | Marketing | Marketing-Mitarbeiter |
+| `bdr` | New Business | Business Development |
+| `sdr` | New Business | Sales Development |
+| `sales_support` | New Business | Sales Support |
+| `onboarding_specialist` | New Business | Onboarding |
+| `viewer` | Global | Nur Lesezugriff |
 
-### v3.16.28: Bugfix - Pipeline Settings 406 Error
-**Problem:** `usePipelineSettings` Hook verwendete `.single()` was einen 406-Fehler wirft wenn kein Datensatz existiert.
-**Lösung:** Geändert zu `.maybeSingle()` - gibt `null` zurück statt Fehler.
+**Neue Komponenten:**
+- `AreaSelector.tsx` - Bereichsauswahl nach Login
+- `AreaPlaceholder.tsx` - Platzhalter für noch nicht implementierte Bereiche
 
-### v3.16.29: Analytics Filter-Modus (Erstelldatum vs. Close-Datum)
-**Problem:** Im Conversion Funnel konnten mehr Closed Lost als SQL angezeigt werden, weil unterschiedliche Datumsfelder verwendet wurden.
-**Lösung:** Zwei Filter-Modi zur Auswahl.
+### v3.17.x: Business Targets & AE-Verteilung
 
-### v3.16.30: SF Erstelldatum (sf_created_date)
-**Problem:** Der Erstelldatum-Filter funktionierte nicht, weil `created_at` das Import-Datum in die App ist, nicht das Salesforce-Erstelldatum.
-**Lösung:** 
-- Neues DB-Feld `sf_created_date` für das Original-Salesforce-Erstelldatum
-- Import-Logik speichert jetzt das SF Erstelldatum aus der CSV
-- Filter verwendet `sf_created_date` statt `created_at`
+**Go-Live Planung komplett überarbeitet:**
+- **Business Targets (100%):** Globale monatliche Ziele für Inbound, Outbound, Partnerships
+- **AE-Verteilung:** Prozentuale Zuweisung pro AE (z.B. 60%/40%)
+- **Manuelle Feinsteuerung:** Berechnete Werte können manuell angepasst werden
+- **Validierung:** Summe der AE-Prozentsätze muss 100% ergeben
 
-**WICHTIG:** Nach dem Deploy:
-1. SQL-Migration ausführen: `supabase-sf-created-date.sql`
-2. CSV neu importieren, damit `sf_created_date` befüllt wird
+**Neue Kategorien:**
+- **Terminal Sales:** Prozent der Go-Lives (z.B. 75%)
+- **Tipping:** Prozent der Terminal Sales (z.B. 24%)
+- **Pay Terminals (Hardware):** Mit Penetrations-Berechnung
 
-**Warum?** Salesforce ist Single Source of Truth. Daten-Konsistenz zwischen SF und der App.
+### v3.17.x: Provisionsmodell & OTE Validierung
+
+**AE-spezifische Provision:**
+- Terminal Base/Bonus Raten (€30/€50 je nach Penetration)
+- Subs ARR Tiers (pro AE konfigurierbar)
+- Pay ARR Tiers (pro AE konfigurierbar)
+
+**OTE Validierung:**
+- Szenarien: 75%, 100%, 120%
+- Dynamische Terminal-Provision je Szenario
+- Validierungs-Ampel (Grün/Gelb/Rot)
+
+### v3.17.x: Partner-Verwaltung & Go-Live Erweiterungen
+
+**Partner-Verwaltung:**
+- Neue Sektion in Einstellungen
+- Partner anlegen, anzeigen, löschen
+
+**Go-Live Erweiterungen:**
+- **Partnership:** Dropdown zur Partner-Zuordnung
+- **Filialunternehmen:** Checkbox für Unternehmen mit ≥5 Filialen
+- Beide Felder werden intern dem Head-of-Partnerships zugeordnet
+
+### v3.18.0: Subscription-Paketverwaltung (22.01.2026)
+
+**Neue Komponente:** `SubscriptionPackageManagement.tsx`
+- Pakete anlegen, anzeigen, löschen
+- Standard-Pakete: Kickstart, Power, Power Plus
+
+**Go-Live Integration:**
+- Neues Dropdown "Subscription Paket" in:
+  - Go-Live Erfassungsmaske
+  - Bearbeiten-Dialog (Jahresübersicht)
+  - Bearbeiten-Dialog (Monatliche Übersicht)
 
 ---
 
 ## 📋 Projekt-Übersicht
 
 ### Was ist die App?
-Sales Compensation Dashboard für Account Executives im DACH-Markt. Bildet das Kompensationsmodell ab:
-- Subs ARR Provision (M0)
-- Terminal Provision (M0)
-- Pay ARR Provision (M3)
+**Commercial Business Planner** - Multi-Area Sales Dashboard für den DACH-Markt.
+
+Kernfunktionen:
+- Go-Live Tracking & Planung
+- Kompensationsmodell (Subs ARR, Terminal, Pay ARR)
+- Business Targets & AE-Verteilung
+- OTE Validierung mit Szenarien
+- Leaderboard
+- Multi-Area Support (DLT, New Business, Expanding, Marketing)
 
 ### Tech Stack
 - **Frontend:** Next.js 14, React 18, TypeScript, Tailwind CSS
@@ -71,76 +117,54 @@ Sales Compensation Dashboard für Account Executives im DACH-Markt. Bildet das K
 
 | Datei | Zweck |
 |-------|-------|
-| `DOCUMENTATION.md` | Vollständige technische Dokumentation |
-| `src/components/Pipeline.tsx` | Hauptkomponente für Pipeline (Bug hier!) |
-| `src/components/OpportunityForm.tsx` | Formular mit Archivieren-Button |
-| `src/lib/pipeline-hooks.ts` | Supabase-Queries für Pipeline |
-| `src/lib/import-hooks.ts` | Salesforce Import-Logik |
+| `src/app/page.tsx` | Hauptseite mit Area-Routing |
+| `src/components/AreaSelector.tsx` | Bereichsauswahl nach Login |
+| `src/components/Dashboard.tsx` | Haupt-Dashboard |
+| `src/components/SettingsPanel.tsx` | Einstellungen (inkl. Business Targets, AE-Verteilung, OTE) |
+| `src/components/GoLiveForm.tsx` | Go-Live Erfassung |
+| `src/components/PartnerManagement.tsx` | Partner-Verwaltung |
+| `src/components/SubscriptionPackageManagement.tsx` | Subscription-Pakete |
+| `src/lib/types.ts` | TypeScript Interfaces |
+| `src/lib/hooks.ts` | Supabase-Queries |
+| `src/lib/permissions.ts` | Rollen & Berechtigungen |
+| `src/lib/i18n.ts` | Übersetzungen (DE, EN, Kölsch) |
 
 ---
 
-## 🔄 Letzte Session (14.-15.01.2026)
+## 🗄️ Ausstehende SQL-Migrationen
 
-### Implementierte Features (v3.16.12 → v3.16.23)
+**Diese Skripte müssen in Supabase ausgeführt werden:**
 
-| Version | Feature |
-|---------|---------|
-| v3.16.15 | **Archive/Restore Feature** - Soft Delete statt Hard Delete |
-| v3.16.18 | **Inhaber-Spalte** - sf_owner_name für Ex-Mitarbeiter |
-| v3.16.19 | **Closed Stages Auto-Import** - Kein Konflikt bei Ex-MA |
-| v3.16.20 | **Progress-Balken** mit Zeitschätzung |
-| v3.16.22 | **Turbo-Import** - 100er Batch Chunks (59 Min → 1-2 Min) |
-| v3.16.23 | **Pipeline Overview** Stage-Details + Archivieren-Button Fix |
-
-### Datenbank-Änderungen (bereits in Supabase ausgeführt)
-```sql
--- Archive Feature
-ALTER TABLE opportunities ADD COLUMN archived BOOLEAN DEFAULT false;
-ALTER TABLE opportunities ADD COLUMN archived_at TIMESTAMPTZ;
-ALTER TABLE leads ADD COLUMN archived BOOLEAN DEFAULT false;
-ALTER TABLE leads ADD COLUMN archived_at TIMESTAMPTZ;
-
--- Owner Feature
-ALTER TABLE opportunities ADD COLUMN sf_owner_name VARCHAR(255);
-
--- Nullable user_id für Ex-Mitarbeiter Import
-ALTER TABLE leads ALTER COLUMN user_id DROP NOT NULL;
-ALTER TABLE opportunities ALTER COLUMN user_id DROP NOT NULL;
-```
+| Datei | Beschreibung |
+|-------|--------------|
+| `supabase-roles-migration-v4.sql` | Neue Rollen (6 → 15) |
+| `supabase-avg-pay-bill-tipping.sql` | avg_pay_bill_tipping + target_percentage Felder |
+| `supabase-partners-rls-fix.sql` | RLS Fix für Partner-Tabelle |
+| `supabase-subscription-packages.sql` | Subscription-Pakete Tabelle + Go-Live Feld |
 
 ---
 
 ## 🎯 Nächste Schritte
 
-1. ~~**Bug fixen:** Aktionen-Spalte~~ ✅ (v3.16.24)
-2. ~~**Leads Archivieren:** Soft Delete~~ ✅ (v3.16.25)
-3. ~~**Salesforce führend:** StageChangeDialog~~ ✅ (v3.16.26)
-4. ~~**Salesforce führend:** OpportunityForm~~ ✅ (v3.16.27)
-5. ~~**Bugfix:** Pipeline Settings 406~~ ✅ (v3.16.28)
-6. ~~**Analytics Filter-Modus**~~ ✅ (v3.16.29)
-7. ~~**SF Erstelldatum (sf_created_date)**~~ ✅ (v3.16.30)
-8. **Nach Deploy:** SQL-Migration + CSV Re-Import
+1. **SQL-Migrationen ausführen** (siehe oben)
+2. **DLT-Bereich:** Leaderboards für alle Bereiche
+3. **Expanding Business:** Dashboard & Features
+4. **Marketing:** Dashboard & Features
+5. **Go-Live Import:** CSV-Import aus Salesforce erweitern
 
 ---
 
 ## 💡 Kontext für Claude
 
-- User heißt **Sonja**
+- User heißt **Markus**
 - Spricht **Deutsch**, Dokumentation auf Deutsch
-- Lernt noch Programmieren, will gut erklärte Lösungen
+- Worktree: `/Users/markuslorscheidt/.cursor/worktrees/ae-comp-app/ken`
 - Deployment über GitHub → Vercel
-- ZIP-Dateien werden für jede Version erstellt
-
-### Deployment-Befehl (Standard)
-```bash
-cd ~/Downloads && rm -rf ae-comp-app && unzip ae-comp-app-vX.X.X.zip -d ae-comp-app && cd ae-comp-app && git init && git add . && git commit -m "vX.X.X - Beschreibung" && git remote add origin https://github.com/markuslorscheidt-dot/ae-comp-app.git && git push -u origin main --force
-```
 
 ---
 
 ## 📦 Aktuelles Paket
 
-Die Datei `ae-comp-app-v3.16.30.zip` enthält den kompletten, aktuellen Stand inkl. dieser Übergabe-Dokumentation.
-
-**Version:** 3.16.30  
-**Status:** ✅ Lauffähig, SF Erstelldatum (Migration + Re-Import erforderlich)
+**Version:** 3.18.0  
+**Status:** ✅ Lauffähig (SQL-Migrationen erforderlich)
+**Letzte Änderung:** Subscription-Paketverwaltung
