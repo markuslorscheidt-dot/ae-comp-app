@@ -58,6 +58,11 @@ export default function MonthDetail({
   const [saving, setSaving] = useState(false);
   const [partners, setPartners] = useState<Partner[]>([]);
   const [subscriptionPackages, setSubscriptionPackages] = useState<SubscriptionPackage[]>([]);
+  
+  // Sortierung für Go-Lives Tabelle
+  type SortField = 'customer_name' | 'go_live_date' | 'subs_arr' | 'has_terminal' | 'pay_arr' | 'commission_relevant' | 'total_arr';
+  const [sortField, setSortField] = useState<SortField>('go_live_date');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
   // Partner und Subscription Packages laden
   useEffect(() => {
@@ -67,6 +72,56 @@ export default function MonthDetail({
 
   // User die Go-Lives erhalten können
   const goLiveReceivers = allUsers.filter(u => canReceiveGoLives(u.role));
+
+  // Sortierte Go-Lives
+  const sortedGoLives = [...goLives].sort((a, b) => {
+    let comparison = 0;
+    switch (sortField) {
+      case 'customer_name':
+        comparison = a.customer_name.localeCompare(b.customer_name, 'de');
+        break;
+      case 'go_live_date':
+        comparison = new Date(a.go_live_date).getTime() - new Date(b.go_live_date).getTime();
+        break;
+      case 'subs_arr':
+        comparison = a.subs_arr - b.subs_arr;
+        break;
+      case 'has_terminal':
+        comparison = (a.has_terminal ? 1 : 0) - (b.has_terminal ? 1 : 0);
+        break;
+      case 'pay_arr':
+        comparison = (a.pay_arr || 0) - (b.pay_arr || 0);
+        break;
+      case 'commission_relevant':
+        comparison = (a.commission_relevant !== false ? 1 : 0) - (b.commission_relevant !== false ? 1 : 0);
+        break;
+      case 'total_arr':
+        comparison = (a.subs_arr + (a.pay_arr || 0)) - (b.subs_arr + (b.pay_arr || 0));
+        break;
+    }
+    return sortDirection === 'asc' ? comparison : -comparison;
+  });
+
+  // Sortierung umschalten
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
+
+  // Sortier-Icon Komponente
+  const SortIcon = ({ field }: { field: SortField }) => (
+    <span className="ml-1 inline-block">
+      {sortField === field ? (
+        sortDirection === 'asc' ? '▲' : '▼'
+      ) : (
+        <span className="text-gray-300">⇅</span>
+      )}
+    </span>
+  );
 
   const handleDelete = async (id: string) => {
     if (confirm(t('goLive.deleteConfirm'))) {
@@ -243,18 +298,53 @@ export default function MonthDetail({
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">
-                  <th className="text-left py-3 px-2 font-medium text-gray-500">{t('monthDetail.customer')}</th>
-                  <th className="text-left py-3 px-2 font-medium text-gray-500">{t('common.date')}</th>
-                  <th className="text-right py-3 px-2 font-medium text-green-600">{t('monthDetail.subsArr')}</th>
-                  <th className="text-center py-3 px-2 font-medium text-blue-600">Terminal</th>
-                  <th className="text-right py-3 px-2 font-medium text-orange-600">{t('goLive.payArr')}</th>
-                  <th className="text-center py-3 px-2 font-medium text-amber-600">💰</th>
-                  <th className="text-right py-3 px-2 font-medium text-gray-500">{t('monthDetail.totalArr')}</th>
+                  <th 
+                    className="text-left py-3 px-2 font-medium text-gray-500 cursor-pointer hover:bg-gray-100 select-none"
+                    onClick={() => handleSort('customer_name')}
+                  >
+                    {t('monthDetail.customer')}<SortIcon field="customer_name" />
+                  </th>
+                  <th 
+                    className="text-left py-3 px-2 font-medium text-gray-500 cursor-pointer hover:bg-gray-100 select-none"
+                    onClick={() => handleSort('go_live_date')}
+                  >
+                    {t('common.date')}<SortIcon field="go_live_date" />
+                  </th>
+                  <th 
+                    className="text-right py-3 px-2 font-medium text-green-600 cursor-pointer hover:bg-gray-100 select-none"
+                    onClick={() => handleSort('subs_arr')}
+                  >
+                    {t('monthDetail.subsArr')}<SortIcon field="subs_arr" />
+                  </th>
+                  <th 
+                    className="text-center py-3 px-2 font-medium text-blue-600 cursor-pointer hover:bg-gray-100 select-none"
+                    onClick={() => handleSort('has_terminal')}
+                  >
+                    Terminal<SortIcon field="has_terminal" />
+                  </th>
+                  <th 
+                    className="text-right py-3 px-2 font-medium text-orange-600 cursor-pointer hover:bg-gray-100 select-none"
+                    onClick={() => handleSort('pay_arr')}
+                  >
+                    {t('goLive.payArr')}<SortIcon field="pay_arr" />
+                  </th>
+                  <th 
+                    className="text-center py-3 px-2 font-medium text-amber-600 cursor-pointer hover:bg-gray-100 select-none"
+                    onClick={() => handleSort('commission_relevant')}
+                  >
+                    💰<SortIcon field="commission_relevant" />
+                  </th>
+                  <th 
+                    className="text-right py-3 px-2 font-medium text-gray-500 cursor-pointer hover:bg-gray-100 select-none"
+                    onClick={() => handleSort('total_arr')}
+                  >
+                    {t('monthDetail.totalArr')}<SortIcon field="total_arr" />
+                  </th>
                   <th className="py-3 px-2"></th>
                 </tr>
               </thead>
               <tbody>
-                {goLives.map(gl => (
+                {sortedGoLives.map(gl => (
                   <tr key={gl.id} className={`border-b hover:bg-gray-50 ${gl.commission_relevant === false ? 'bg-gray-50 opacity-70' : ''}`}>
                     <td className="py-3 px-2 font-medium text-gray-800">{gl.customer_name}</td>
                     <td className="py-3 px-2 text-gray-600">

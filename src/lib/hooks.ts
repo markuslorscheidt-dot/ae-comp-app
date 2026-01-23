@@ -634,6 +634,7 @@ export function useAllGoLives(year: number = 2026) {
             commission_relevant: gl.commission_relevant ?? true,
             partner_id: gl.partner_id || null,
             is_enterprise: gl.is_enterprise || false,
+            subscription_package_id: gl.subscription_package_id || null,
             notes: gl.notes,
             created_at: gl.created_at,
             updated_at: gl.updated_at
@@ -1040,6 +1041,9 @@ export function useMultiUserData(userIds: string[], year: number = 2026, plannab
           has_terminal: gl.has_terminal || false,
           pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
           commission_relevant: gl.commission_relevant ?? true,
+          partner_id: gl.partner_id || null,
+          is_enterprise: gl.is_enterprise || false,
+          subscription_package_id: gl.subscription_package_id || null,
           notes: gl.notes,
           created_at: gl.created_at,
           updated_at: gl.updated_at
@@ -1137,6 +1141,9 @@ export function useMultiUserData(userIds: string[], year: number = 2026, plannab
         has_terminal: gl.has_terminal || false,
         pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
         commission_relevant: gl.commission_relevant ?? true,
+        partner_id: gl.partner_id || null,
+        is_enterprise: gl.is_enterprise || false,
+        subscription_package_id: gl.subscription_package_id || null,
         notes: gl.notes,
         created_at: gl.created_at,
         updated_at: gl.updated_at
@@ -1675,6 +1682,13 @@ export async function updateGoLiveUniversal(id: string, updates: Partial<GoLive>
   if (updates.pay_arr !== undefined) updateData.pay_arr = updates.pay_arr;
   if (updates.notes !== undefined) updateData.notes = updates.notes;
   if (updates.commission_relevant !== undefined) updateData.commission_relevant = updates.commission_relevant;
+  // NEU: Partnership & Enterprise
+  if (updates.partner_id !== undefined) updateData.partner_id = updates.partner_id;
+  if (updates.is_enterprise !== undefined) updateData.is_enterprise = updates.is_enterprise;
+  // NEU: Subscription Package
+  if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
+  // NEU: Monat (bei Datumsänderung)
+  if (updates.month !== undefined) updateData.month = updates.month;
 
   const { error } = await supabase
     .from('go_lives')

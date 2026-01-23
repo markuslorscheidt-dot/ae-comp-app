@@ -52,6 +52,11 @@ export default function YearOverview({
   const [saving, setSaving] = useState(false);
   const [partners, setPartners] = useState<Partner[]>([]);
   const [subscriptionPackages, setSubscriptionPackages] = useState<SubscriptionPackage[]>([]);
+  
+  // Sortierung für Go-Lives Tabelle
+  type SortField = 'oak_id' | 'customer_name' | 'go_live_date' | 'subs_monthly' | 'subs_arr' | 'has_terminal' | 'pay_arr' | 'commission_relevant';
+  const [sortField, setSortField] = useState<SortField>('go_live_date');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
   // Partner und Subscription Packages laden
   useEffect(() => {
@@ -66,6 +71,59 @@ export default function YearOverview({
   const monthGoLives = selectedMonth 
     ? goLives.filter(gl => gl.month === selectedMonth)
     : [];
+
+  // Sortierte Go-Lives
+  const sortedMonthGoLives = [...monthGoLives].sort((a, b) => {
+    let comparison = 0;
+    switch (sortField) {
+      case 'oak_id':
+        comparison = (a.oak_id || 0) - (b.oak_id || 0);
+        break;
+      case 'customer_name':
+        comparison = a.customer_name.localeCompare(b.customer_name, 'de');
+        break;
+      case 'go_live_date':
+        comparison = new Date(a.go_live_date).getTime() - new Date(b.go_live_date).getTime();
+        break;
+      case 'subs_monthly':
+        comparison = a.subs_monthly - b.subs_monthly;
+        break;
+      case 'subs_arr':
+        comparison = a.subs_arr - b.subs_arr;
+        break;
+      case 'has_terminal':
+        comparison = (a.has_terminal ? 1 : 0) - (b.has_terminal ? 1 : 0);
+        break;
+      case 'pay_arr':
+        comparison = (a.pay_arr || 0) - (b.pay_arr || 0);
+        break;
+      case 'commission_relevant':
+        comparison = (a.commission_relevant !== false ? 1 : 0) - (b.commission_relevant !== false ? 1 : 0);
+        break;
+    }
+    return sortDirection === 'asc' ? comparison : -comparison;
+  });
+
+  // Sortierung umschalten
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
+
+  // Sortier-Icon Komponente
+  const SortIcon = ({ field }: { field: SortField }) => (
+    <span className="ml-1 inline-block">
+      {sortField === field ? (
+        sortDirection === 'asc' ? '▲' : '▼'
+      ) : (
+        <span className="text-gray-300">⇅</span>
+      )}
+    </span>
+  );
 
   const openEditModal = (gl: GoLive) => {
     setEditingGoLive(gl);
@@ -355,19 +413,59 @@ export default function YearOverview({
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b-2 bg-gray-50">
-                        <th className="text-left py-3 px-3 font-bold text-gray-700">{t('goLive.oakId')}</th>
-                        <th className="text-left py-3 px-3 font-bold text-gray-700">{t('monthDetail.customer')}</th>
-                        <th className="text-left py-3 px-3 font-bold text-gray-700">{t('goLive.goLiveDate')}</th>
-                        <th className="text-right py-3 px-3 font-bold text-green-700">{t('goLive.subsMonthly')}</th>
-                        <th className="text-right py-3 px-3 font-bold text-green-700">{t('goLive.subsArr')}</th>
-                        <th className="text-center py-3 px-3 font-bold text-blue-700">{t('goLive.hasTerminal')}</th>
-                        <th className="text-right py-3 px-3 font-bold text-orange-700">{t('goLive.payArr')}</th>
-                        <th className="text-center py-3 px-3 font-bold text-amber-700">💰</th>
+                        <th 
+                          className="text-left py-3 px-3 font-bold text-gray-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('oak_id')}
+                        >
+                          {t('goLive.oakId')}<SortIcon field="oak_id" />
+                        </th>
+                        <th 
+                          className="text-left py-3 px-3 font-bold text-gray-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('customer_name')}
+                        >
+                          {t('monthDetail.customer')}<SortIcon field="customer_name" />
+                        </th>
+                        <th 
+                          className="text-left py-3 px-3 font-bold text-gray-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('go_live_date')}
+                        >
+                          {t('goLive.goLiveDate')}<SortIcon field="go_live_date" />
+                        </th>
+                        <th 
+                          className="text-right py-3 px-3 font-bold text-green-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('subs_monthly')}
+                        >
+                          {t('goLive.subsMonthly')}<SortIcon field="subs_monthly" />
+                        </th>
+                        <th 
+                          className="text-right py-3 px-3 font-bold text-green-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('subs_arr')}
+                        >
+                          {t('goLive.subsArr')}<SortIcon field="subs_arr" />
+                        </th>
+                        <th 
+                          className="text-center py-3 px-3 font-bold text-blue-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('has_terminal')}
+                        >
+                          {t('goLive.hasTerminal')}<SortIcon field="has_terminal" />
+                        </th>
+                        <th 
+                          className="text-right py-3 px-3 font-bold text-orange-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('pay_arr')}
+                        >
+                          {t('goLive.payArr')}<SortIcon field="pay_arr" />
+                        </th>
+                        <th 
+                          className="text-center py-3 px-3 font-bold text-amber-700 cursor-pointer hover:bg-gray-100 select-none"
+                          onClick={() => handleSort('commission_relevant')}
+                        >
+                          💰<SortIcon field="commission_relevant" />
+                        </th>
                         {canEdit && <th className="py-3 px-3"></th>}
                       </tr>
                     </thead>
                     <tbody>
-                      {monthGoLives.map((gl) => (
+                      {sortedMonthGoLives.map((gl) => (
                         <tr key={gl.id} className={`border-b hover:bg-gray-50 ${gl.commission_relevant === false ? 'bg-gray-50 opacity-70' : ''}`}>
                           <td className="py-3 px-3 text-gray-500">{gl.oak_id || '-'}</td>
                           <td className="py-3 px-3 font-medium">{gl.customer_name}</td>
@@ -412,21 +510,21 @@ export default function YearOverview({
                     </tbody>
                     <tfoot>
                       <tr className="bg-gray-100 font-bold border-t-2">
-                        <td className="py-3 px-3" colSpan={3}>{t('common.total')} ({monthGoLives.length} Go-Lives)</td>
+                        <td className="py-3 px-3" colSpan={3}>{t('common.total')} ({sortedMonthGoLives.length} Go-Lives)</td>
                         <td className="py-3 px-3 text-right text-green-600">
-                          {formatCurrency(monthGoLives.reduce((sum, gl) => sum + gl.subs_monthly, 0))}
+                          {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + gl.subs_monthly, 0))}
                         </td>
                         <td className="py-3 px-3 text-right text-green-700">
-                          {formatCurrency(monthGoLives.reduce((sum, gl) => sum + gl.subs_arr, 0))}
+                          {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + gl.subs_arr, 0))}
                         </td>
                         <td className="py-3 px-3 text-center text-blue-600">
-                          {monthGoLives.filter(gl => gl.has_terminal).length}
+                          {sortedMonthGoLives.filter(gl => gl.has_terminal).length}
                         </td>
                         <td className="py-3 px-3 text-right text-orange-600">
-                          {formatCurrency(monthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || 0), 0))}
+                          {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || 0), 0))}
                         </td>
                         <td className="py-3 px-3 text-center text-amber-600">
-                          {monthGoLives.filter(gl => gl.commission_relevant !== false).length}
+                          {sortedMonthGoLives.filter(gl => gl.commission_relevant !== false).length}
                         </td>
                         {canEdit && <td></td>}
                       </tr>

@@ -1,11 +1,11 @@
 # Session-Übergabe - Commercial Business Planner
 
-**Datum:** 22.01.2026  
+**Datum:** 23.01.2026  
 **Projekt:** Commercial Business Planner (ehemals AE Kompensationsmodell)
 
 ---
 
-## ✅ Erledigte Features (v3.16.30 → v3.18.0)
+## ✅ Erledigte Features (v3.16.30 → v3.18.1)
 
 ### v3.17.0: Major Refactoring - Multi-Area Business Planner
 
@@ -88,6 +88,24 @@
   - Bearbeiten-Dialog (Jahresübersicht)
   - Bearbeiten-Dialog (Monatliche Übersicht)
 
+### v3.18.1: Sortierbare Tabellen & Bugfixes (23.01.2026)
+
+**Sortierbare Spalten in Go-Lives Tabellen:**
+- **YearOverview.tsx** (Jahresübersicht → Monatliche Übersicht):
+  - OAK ID, Kunde, Go-Live Datum, Subs €/Monat, Subs ARR, Terminal, Pay ARR, 💰
+- **MonthDetail.tsx** (Monatliche Detailansicht):
+  - Kunde, Datum, Subs ARR, Terminal, Pay ARR, 💰, Gesamt ARR
+- Klick auf Spaltenüberschrift = Sortierung (▲ aufsteigend / ▼ absteigend)
+
+**Kritische Bugfixes - Persistenz:**
+- `is_enterprise`, `partner_id`, `subscription_package_id` wurden nicht korrekt geladen/gespeichert
+- **6 Stellen in `hooks.ts` gefixt:**
+  - `useGoLives` - Transformation
+  - `useAllGoLives` - Transformation
+  - `useGoLivesForUser` - Transformation
+  - `useMultiUserData` - Transformation (2x: initial load + refetch)
+  - `updateGoLiveUniversal` - Update-Funktion erweitert
+
 ---
 
 ## 📋 Projekt-Übersicht
@@ -124,8 +142,10 @@ Kernfunktionen:
 | `src/components/GoLiveForm.tsx` | Go-Live Erfassung |
 | `src/components/PartnerManagement.tsx` | Partner-Verwaltung |
 | `src/components/SubscriptionPackageManagement.tsx` | Subscription-Pakete |
+| `src/components/YearOverview.tsx` | Jahresübersicht mit sortierbaren Tabellen |
+| `src/components/MonthDetail.tsx` | Monatsdetails mit sortierbaren Tabellen |
 | `src/lib/types.ts` | TypeScript Interfaces |
-| `src/lib/hooks.ts` | Supabase-Queries |
+| `src/lib/hooks.ts` | Supabase-Queries (alle Go-Live Transformationen) |
 | `src/lib/permissions.ts` | Rollen & Berechtigungen |
 | `src/lib/i18n.ts` | Übersetzungen (DE, EN, Kölsch) |
 
@@ -135,18 +155,18 @@ Kernfunktionen:
 
 **Diese Skripte müssen in Supabase ausgeführt werden:**
 
-| Datei | Beschreibung |
-|-------|--------------|
-| `supabase-roles-migration-v4.sql` | Neue Rollen (6 → 15) |
-| `supabase-avg-pay-bill-tipping.sql` | avg_pay_bill_tipping + target_percentage Felder |
-| `supabase-partners-rls-fix.sql` | RLS Fix für Partner-Tabelle |
-| `supabase-subscription-packages.sql` | Subscription-Pakete Tabelle + Go-Live Feld |
+| Datei | Beschreibung | Status |
+|-------|--------------|--------|
+| `supabase-roles-migration-v4.sql` | Neue Rollen (6 → 15) | ⚠️ Prüfen |
+| `supabase-avg-pay-bill-tipping.sql` | avg_pay_bill_tipping + target_percentage | ⚠️ Prüfen |
+| `supabase-partners-rls-fix.sql` | RLS Fix für Partner-Tabelle | ⚠️ Prüfen |
+| `supabase-subscription-packages.sql` | Subscription-Pakete Tabelle + Go-Live Feld | ⚠️ Ausstehend |
 
 ---
 
 ## 🎯 Nächste Schritte
 
-1. **SQL-Migrationen ausführen** (siehe oben)
+1. **SQL-Migrationen prüfen/ausführen** (siehe oben)
 2. **DLT-Bereich:** Leaderboards für alle Bereiche
 3. **Expanding Business:** Dashboard & Features
 4. **Marketing:** Dashboard & Features
@@ -160,11 +180,36 @@ Kernfunktionen:
 - Spricht **Deutsch**, Dokumentation auf Deutsch
 - Worktree: `/Users/markuslorscheidt/.cursor/worktrees/ae-comp-app/ken`
 - Deployment über GitHub → Vercel
+- **MacBook für unterwegs:** Projekt von GitHub klonen
+
+---
+
+## 🚀 Setup auf neuem Rechner (MacBook)
+
+```bash
+# 1. Repository klonen
+git clone https://github.com/markuslorscheidt-dot/ae-comp-app.git
+cd ae-comp-app
+
+# 2. Dependencies installieren
+npm install
+
+# 3. Environment-Datei erstellen (.env.local)
+# Kopiere die Supabase-Credentials aus dem iMac oder Supabase Dashboard:
+# NEXT_PUBLIC_SUPABASE_URL=https://xxx.supabase.co
+# NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx
+
+# 4. Dev-Server starten
+npm run dev
+
+# 5. Browser öffnen
+# http://localhost:3000
+```
 
 ---
 
 ## 📦 Aktuelles Paket
 
-**Version:** 3.18.0  
-**Status:** ✅ Lauffähig (SQL-Migrationen erforderlich)
-**Letzte Änderung:** Subscription-Paketverwaltung
+**Version:** 3.18.1  
+**Status:** ✅ Lauffähig (SQL-Migrationen prüfen)  
+**Letzte Änderung:** Sortierbare Tabellen & Persistenz-Bugfixes (23.01.2026)
