@@ -98,9 +98,8 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
   const [profileUserId, setProfileUserId] = useState<string>(user.id);
   
   // Selected users for Year Overview (alle Go-Live Empfänger + GESAMT für AEs)
-  const [selectedViewUserIds, setSelectedViewUserIds] = useState<string[]>(
-    canReceiveGoLives(user.role) ? [user.id] : (goLiveReceivers[0]?.id ? [goLiveReceivers[0].id] : [])
-  );
+  // Default: 'all' für GESAMT-Ansicht
+  const [selectedViewUserIds, setSelectedViewUserIds] = useState<string[]>(['all']);
 
   // Bei Demo-Modus Wechsel: User-IDs auf Demo-User setzen
   useEffect(() => {
@@ -283,7 +282,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
   // Challenge-Benachrichtigungen aktivieren
   useChallengeNotifications(activeChallenges, challengeProgressMap);
 
-  const [currentView, setCurrentView] = useState<View>('dashboard');
+  const [currentView, setCurrentView] = useState<View>('year');
   const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth() + 1);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -338,13 +337,12 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
   // Navigation Component - Responsive
   const Navigation = () => {
     const navItems = [
-      { view: 'dashboard' as View, label: t('nav.dashboard'), icon: '📊', show: true },
       { view: 'year' as View, label: t('nav.yearOverview'), icon: '📅', show: true },
-      { view: 'pipeline' as View, label: 'Pipeline', icon: '📊', show: !isDemo },
-      { view: 'golive_import' as View, label: 'Go-Live Import', icon: '📥', show: !isDemo && permissions.hasAdminAccess },
+      { view: 'dashboard' as View, label: t('nav.dashboard'), icon: '📊', show: true },
+      { view: 'pipeline' as View, label: t('nav.pipeline'), icon: '📈', show: !isDemo },
+      { view: 'leaderboard' as View, label: t('nav.leaderboard'), icon: '🏆', show: true },
       { view: 'add' as View, label: t('nav.addGoLive'), icon: '➕', show: (permissions.enterOwnGoLives || permissions.enterGoLivesForOthers) && !isDemo, highlight: true },
       { view: 'settings' as View, label: t('nav.settings'), icon: '⚙️', show: permissions.editSettings && !isDemo },
-      { view: 'leaderboard' as View, label: t('nav.leaderboard'), icon: '🏆', show: true },
     ].filter(item => item.show);
 
     return (
@@ -570,7 +568,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
         <Navigation />
         <main className="max-w-7xl mx-auto px-4 py-8">
           <GoLiveImport 
-            onBack={() => setCurrentView('dashboard')}
+            onBack={() => setCurrentView('add')}
             onImportComplete={(count) => {
               // Refresh Go-Lives nach erfolgreichem Import
               refetchGoLives();
@@ -594,7 +592,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             users={selectableAEs}
             settingsMap={multiSettings}
             goLivesMap={multiGoLives}
-            onBack={() => setCurrentView('dashboard')}
+            onBack={() => setCurrentView('year')}
             challenges={challenges}
             isDemo={isDemo}
           />
@@ -632,7 +630,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             settings={profileSettings}
             goLives={profileGoLives}
             allUsers={allUsers}
-            onBack={() => setCurrentView('dashboard')}
+            onBack={() => setCurrentView('year')}
             onSave={canEditProfile ? handleSaveProfile : undefined}
             canEdit={canEditProfile}
           />
@@ -650,7 +648,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
           <SettingsPanel 
             settings={settings} 
             onSave={updateSettings}
-            onBack={() => setCurrentView('dashboard')}
+            onBack={() => setCurrentView('year')}
             currentUser={user}
           />
         </main>
@@ -690,10 +688,23 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
               )}
             </div>
           )}
+
+          {/* Go-Live Import Button für Admins */}
+          {permissions.hasAdminAccess && !isDemo && (
+            <div className="mb-6">
+              <button
+                onClick={() => setCurrentView('golive_import')}
+                className="w-full px-4 py-3 bg-purple-50 border border-purple-200 text-purple-700 rounded-xl hover:bg-purple-100 transition-colors flex items-center justify-center gap-2"
+              >
+                <span>📥</span>
+                <span className="font-medium">Go-Live Import (Salesforce/CSV)</span>
+              </button>
+            </div>
+          )}
           
           <GoLiveForm 
             onSubmit={handleAddGoLive}
-            onCancel={() => setCurrentView('dashboard')}
+            onCancel={() => setCurrentView('year')}
             defaultMonth={currentMonth}
             canEnterPayARR={permissions.enterPayARR}
             defaultCommissionRelevant={getDefaultCommissionRelevant(goLiveTargetUser.role)}
@@ -717,7 +728,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             goLives={goLives.filter(gl => gl.month === selectedMonth)}
             allUsers={allUsers}
             currentUser={user}
-            onBack={() => setCurrentView('dashboard')}
+            onBack={() => setCurrentView('year')}
             onUpdateGoLive={handleUniversalUpdate}
             onDeleteGoLive={handleUniversalDelete}
             onAddGoLive={() => setCurrentView('add')}
@@ -812,7 +823,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
               users={selectableForView.filter(u => selectedViewUserIds.includes(u.id))}
               settingsMap={multiSettings}
               goLivesMap={multiGoLives}
-              onBack={() => setCurrentView('dashboard')}
+              onBack={() => setCurrentView('year')}
             />
           ) : (
             <YearOverview 
@@ -822,7 +833,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
               allUsers={allUsers}
               onUpdateGoLive={handleUniversalUpdate}
               onDeleteGoLive={handleUniversalDelete}
-              onBack={() => setCurrentView('dashboard')}
+              onBack={() => setCurrentView('year')}
               title={isAllSelected ? 'GESAMT - Alle User' : (!isViewingPlannable && selectedUser ? `${selectedUser.name} (nur ARR)` : undefined)}
               canEdit={
                 // Nur AE-Rollen ohne erweiterte Rechte dürfen in GESAMT-Ansicht nicht bearbeiten

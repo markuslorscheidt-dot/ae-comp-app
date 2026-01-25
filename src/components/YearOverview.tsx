@@ -339,7 +339,7 @@ export default function YearOverview({
               </div>
               <div className="grid grid-cols-3 gap-2 text-xs">
                 <div>
-                  <span className="text-gray-500 block">GL</span>
+                  <span className="text-gray-500 block">Go-Lives</span>
                   <span className="font-medium">{r.go_lives_count}</span>
                 </div>
                 <div>
@@ -361,7 +361,7 @@ export default function YearOverview({
             </div>
             <div className="grid grid-cols-3 gap-2 text-xs">
               <div>
-                <span className="text-gray-500 block">GL</span>
+                <span className="text-gray-500 block">Go-Lives</span>
                 <span className="font-bold">{yearSummary.total_go_lives}</span>
               </div>
               <div>
@@ -385,13 +385,13 @@ export default function YearOverview({
           <thead>
             <tr className="border-b-2">
               <th className="text-left py-2 md:py-3 px-1 md:px-2 font-bold text-gray-700">{t('common.month')}</th>
-              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-gray-700">GL</th>
-              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-gray-700">T</th>
-              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-green-700">S Plan</th>
-              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-green-700">S IST</th>
+              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-gray-700">Go-Lives</th>
+              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-gray-700">Terminals</th>
+              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-green-700">Subs Plan</th>
+              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-green-700">Subs IST</th>
               <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-green-700">%</th>
-              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-orange-700">P Plan</th>
-              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-orange-700">P IST</th>
+              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-orange-700">Pay Plan</th>
+              <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-orange-700">Pay IST</th>
               <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-orange-700">%</th>
               <th className="text-right py-2 md:py-3 px-1 md:px-2 font-bold text-purple-700">Prov.</th>
             </tr>

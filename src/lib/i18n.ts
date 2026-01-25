@@ -86,7 +86,7 @@ export const translations: Record<Language, Record<string, any>> = {
     },
 
     nav: {
-      dashboard: 'Dashboard',
+      dashboard: 'Sales Rangliste',
       yearOverview: 'Jahresübersicht',
       addGoLive: '+ Go-Live',
       admin: 'Admin',
@@ -889,7 +889,7 @@ export const translations: Record<Language, Record<string, any>> = {
     },
 
     nav: {
-      dashboard: 'Dashboard',
+      dashboard: 'Sales Ranking',
       yearOverview: 'Year Overview',
       addGoLive: '+ Go-Live',
       admin: 'Admin',
@@ -1691,7 +1691,7 @@ export const translations: Record<Language, Record<string, any>> = {
     },
 
     nav: {
-      dashboard: 'Övversich',
+      dashboard: 'Sales Rangliß',
       yearOverview: 'Johreskick',
       addGoLive: '+ Go-Live',
       admin: 'Admin',
