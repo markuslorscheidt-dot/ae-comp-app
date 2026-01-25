@@ -99,7 +99,7 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
   };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
+    <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-4 md:p-6">
       {/* DEBUG PANEL */}
       {currentUser && (
         <DebugPanel 
@@ -122,104 +122,104 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
         />
       )}
 
-      <h2 className="text-xl font-bold text-gray-800 mb-6">
+      <h2 className="text-lg md:text-xl font-bold text-gray-800 mb-4 md:mb-6">
         {initialData ? t('goLive.editTitle') : t('goLive.title')}
       </h2>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {/* Monat */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            {t('common.month')}
-          </label>
-          <select
-            value={month}
-            onChange={(e) => setMonth(parseInt(e.target.value))}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-          >
-            {[1,2,3,4,5,6,7,8,9,10,11,12].map(m => (
-              <option key={m} value={m}>{t(`months.${m}`)}</option>
-            ))}
-          </select>
+      <form onSubmit={handleSubmit} className="space-y-3 md:space-y-4">
+        {/* Monat + Datum Row */}
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
+              {t('common.month')}
+            </label>
+            <select
+              value={month}
+              onChange={(e) => setMonth(parseInt(e.target.value))}
+              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+            >
+              {[1,2,3,4,5,6,7,8,9,10,11,12].map(m => (
+                <option key={m} value={m}>{t(`months.${m}`)}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
+              {t('goLive.goLiveDate')}
+            </label>
+            <input
+              type="date"
+              value={goLiveDate}
+              onChange={(e) => setGoLiveDate(e.target.value)}
+              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              required
+            />
+          </div>
         </div>
 
         {/* Kundenname */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
             {t('goLive.customerName')}
           </label>
           <input
             type="text"
             value={customerName}
             onChange={(e) => setCustomerName(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
             placeholder={t('goLive.customerPlaceholder')}
             required
           />
         </div>
 
-        {/* OAK ID */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            {t('goLive.oakId')}
-          </label>
-          <input
-            type="number"
-            value={oakId}
-            onChange={(e) => setOakId(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-            placeholder={t('goLive.oakIdPlaceholder')}
-            min="0"
-          />
-        </div>
-
-        {/* Go-Live Datum */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            {t('goLive.goLiveDate')}
-          </label>
-          <input
-            type="date"
-            value={goLiveDate}
-            onChange={(e) => setGoLiveDate(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-            required
-          />
-        </div>
-
-        {/* Subs €/Monat */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            {t('goLive.subsMonthly')}
-          </label>
-          <input
-            type="number"
-            value={subsMonthly}
-            onChange={(e) => setSubsMonthly(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-            placeholder={t('goLive.subsMonthlyPlaceholder')}
-            min="0"
-            step="0.01"
-            required
-          />
-          {subsArr > 0 && (
-            <p className="text-sm text-green-600 mt-1">
-              {t('goLive.subsArr')}: {formatCurrency(subsArr)}
-            </p>
-          )}
+        {/* OAK ID + Subs Monat Row */}
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
+              {t('goLive.oakId')}
+            </label>
+            <input
+              type="number"
+              value={oakId}
+              onChange={(e) => setOakId(e.target.value)}
+              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              placeholder={t('goLive.oakIdPlaceholder')}
+              min="0"
+            />
+          </div>
+          <div>
+            <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
+              {t('goLive.subsMonthly')}
+            </label>
+            <input
+              type="number"
+              value={subsMonthly}
+              onChange={(e) => setSubsMonthly(e.target.value)}
+              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              placeholder="€/Monat"
+              min="0"
+              step="0.01"
+              required
+            />
+            {subsArr > 0 && (
+              <p className="text-[10px] md:text-xs text-green-600 mt-0.5">
+                ARR: {formatCurrency(subsArr)}
+              </p>
+            )}
+          </div>
         </div>
 
         {/* Subscription Package */}
-        <div className="p-3 bg-green-50 rounded-lg border border-green-200">
-          <label className="block text-sm font-medium text-green-700 mb-2">
-            📦 Subscription Paket
+        <div className="p-2.5 md:p-3 bg-green-50 rounded-lg border border-green-200">
+          <label className="block text-xs md:text-sm font-medium text-green-700 mb-1.5 md:mb-2">
+            📦 {t('goLive.subscriptionPackage')}
           </label>
           <select
             value={subscriptionPackageId || ''}
             onChange={(e) => setSubscriptionPackageId(e.target.value || null)}
-            className="w-full px-3 py-2 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 bg-white"
+            className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 bg-white"
           >
-            <option value="">Kein Paket (Standard)</option>
+            <option value="">{t('goLive.noPackage')}</option>
             {subscriptionPackages.map(pkg => (
               <option key={pkg.id} value={pkg.id}>
                 {pkg.name}
@@ -228,46 +228,58 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
           </select>
         </div>
 
-        {/* Terminal */}
-        <div className="flex items-center">
-          <input
-            type="checkbox"
-            id="hasTerminal"
-            checked={hasTerminal}
-            onChange={(e) => setHasTerminal(e.target.checked)}
-            className="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-          />
-          <label htmlFor="hasTerminal" className="ml-2 text-sm font-medium text-gray-700">
-            {t('goLive.hasTerminal')}
-          </label>
+        {/* Checkboxes Row */}
+        <div className="grid grid-cols-2 gap-3">
+          {/* Terminal */}
+          <div className="flex items-center p-2.5 bg-blue-50 rounded-lg border border-blue-200">
+            <input
+              type="checkbox"
+              id="hasTerminal"
+              checked={hasTerminal}
+              onChange={(e) => setHasTerminal(e.target.checked)}
+              className="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+            />
+            <label htmlFor="hasTerminal" className="ml-2 text-xs md:text-sm font-medium text-gray-700">
+              {t('goLive.hasTerminal')}
+            </label>
+          </div>
+
+          {/* Provisions-relevant */}
+          <div className="flex items-center p-2.5 bg-amber-50 rounded-lg border border-amber-200">
+            <input
+              type="checkbox"
+              id="commissionRelevant"
+              checked={commissionRelevant}
+              onChange={(e) => setCommissionRelevant(e.target.checked)}
+              className="w-5 h-5 text-amber-600 border-gray-300 rounded focus:ring-amber-500"
+            />
+            <label htmlFor="commissionRelevant" className="ml-2 text-xs md:text-sm font-medium text-gray-700">
+              {t('goLive.commissionRelevant')} ✓
+            </label>
+          </div>
         </div>
 
         {/* Partnership */}
-        <div className="p-3 bg-purple-50 rounded-lg border border-purple-200">
-          <label className="block text-sm font-medium text-purple-700 mb-2">
-            🤝 Partnership
+        <div className="p-2.5 md:p-3 bg-purple-50 rounded-lg border border-purple-200">
+          <label className="block text-xs md:text-sm font-medium text-purple-700 mb-1.5 md:mb-2">
+            🤝 {t('goLive.partnership')}
           </label>
           <select
             value={partnerId || ''}
             onChange={(e) => setPartnerId(e.target.value || null)}
-            className="w-full px-3 py-2 border border-purple-300 rounded-lg focus:ring-2 focus:ring-purple-500 bg-white"
+            className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-purple-300 rounded-lg focus:ring-2 focus:ring-purple-500 bg-white"
           >
-            <option value="">Kein Partner (Standard)</option>
+            <option value="">{t('goLive.noPartner')}</option>
             {partners.map(partner => (
               <option key={partner.id} value={partner.id}>
                 {partner.name}
               </option>
             ))}
           </select>
-          {partnerId && (
-            <p className="text-xs text-purple-600 mt-1">
-              ℹ️ Wird intern Head of Partnerships zugeordnet
-            </p>
-          )}
         </div>
 
-        {/* Filialunternehmen */}
-        <div className="flex items-center p-3 bg-indigo-50 rounded-lg border border-indigo-200">
+        {/* Enterprise / Filialunternehmen */}
+        <div className="flex items-center p-2.5 md:p-3 bg-indigo-50 rounded-lg border border-indigo-200">
           <input
             type="checkbox"
             id="isEnterprise"
@@ -275,45 +287,23 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
             onChange={(e) => setIsEnterprise(e.target.checked)}
             className="w-5 h-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
           />
-          <label htmlFor="isEnterprise" className="ml-2 text-sm font-medium text-gray-700">
-            🏢 Filialunternehmen (≥5 Filialen)
+          <label htmlFor="isEnterprise" className="ml-2 text-xs md:text-sm font-medium text-gray-700">
+            🏢 {t('goLive.enterprise')}
           </label>
-        </div>
-        {isEnterprise && (
-          <p className="text-xs text-indigo-600 -mt-2 ml-3">
-            ℹ️ Wird intern Head of Partnerships zugeordnet
-          </p>
-        )}
-
-        {/* Provisions-relevant */}
-        <div className="flex items-center p-3 bg-amber-50 rounded-lg border border-amber-200">
-          <input
-            type="checkbox"
-            id="commissionRelevant"
-            checked={commissionRelevant}
-            onChange={(e) => setCommissionRelevant(e.target.checked)}
-            className="w-5 h-5 text-amber-600 border-gray-300 rounded focus:ring-amber-500"
-          />
-          <label htmlFor="commissionRelevant" className="ml-2 text-sm font-medium text-gray-700">
-            {t('goLive.commissionRelevant')}
-          </label>
-          <span className="ml-2 text-xs text-gray-500">
-            ({t('goLive.commissionRelevantHint')})
-          </span>
         </div>
 
         {/* Pay ARR (nur für Manager) */}
         {canEnterPayARR && (
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
               {t('goLive.payArr')}
-              <span className="text-gray-400 font-normal ml-2">• {t('goLive.payArrHint')}</span>
+              <span className="text-gray-400 font-normal ml-1 text-[10px] md:text-xs">({t('goLive.payArrHint')})</span>
             </label>
             <input
               type="number"
               value={payArr}
               onChange={(e) => setPayArr(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
               placeholder={t('goLive.payArrPlaceholder')}
               min="0"
               step="0.01"
@@ -323,21 +313,21 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
 
         {/* Vorschau */}
         {(subsArr > 0 || hasTerminal) && (
-          <div className="p-4 bg-gray-50 rounded-lg">
-            <h3 className="text-sm font-medium text-gray-700 mb-2">{t('goLive.preview')}</h3>
-            <div className="grid grid-cols-2 gap-2 text-sm">
+          <div className="p-3 md:p-4 bg-gray-50 rounded-lg">
+            <h3 className="text-xs md:text-sm font-medium text-gray-700 mb-2">{t('goLive.preview')}</h3>
+            <div className="grid grid-cols-3 gap-2 text-xs md:text-sm">
               <div>
-                <span className="text-gray-500">{t('goLive.subsArr')}:</span>
-                <span className="ml-2 font-medium text-green-600">{formatCurrency(subsArr)}</span>
+                <span className="text-gray-500 block text-[10px] md:text-xs">{t('goLive.subsArr')}</span>
+                <span className="font-medium text-green-600">{formatCurrency(subsArr)}</span>
               </div>
               <div>
-                <span className="text-gray-500">Terminal:</span>
-                <span className="ml-2 font-medium">{hasTerminal ? t('common.yes') : t('common.no')}</span>
+                <span className="text-gray-500 block text-[10px] md:text-xs">Terminal</span>
+                <span className="font-medium">{hasTerminal ? '✓' : '-'}</span>
               </div>
               {payArr && (
                 <div>
-                  <span className="text-gray-500">{t('goLive.payArr')}:</span>
-                  <span className="ml-2 font-medium text-orange-600">{formatCurrency(parseFloat(payArr))}</span>
+                  <span className="text-gray-500 block text-[10px] md:text-xs">{t('goLive.payArr')}</span>
+                  <span className="font-medium text-orange-600">{formatCurrency(parseFloat(payArr))}</span>
                 </div>
               )}
             </div>
@@ -346,31 +336,31 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
 
         {/* Erfolgsmeldung */}
         {successMessage && (
-          <div className="p-3 bg-green-50 border border-green-200 text-green-700 rounded-lg text-sm flex items-center">
+          <div className="p-2.5 md:p-3 bg-green-50 border border-green-200 text-green-700 rounded-lg text-xs md:text-sm flex items-center">
             <span className="mr-2">✅</span>
             {successMessage}
           </div>
         )}
 
         {error && (
-          <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
+          <div className="p-2.5 md:p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs md:text-sm">
             {error}
           </div>
         )}
 
         {/* Buttons */}
-        <div className="flex space-x-4 pt-4">
+        <div className="flex space-x-3 md:space-x-4 pt-3 md:pt-4">
           <button
             type="button"
             onClick={onCancel}
-            className="flex-1 py-3 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition"
+            className="flex-1 py-3 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50 transition text-sm md:text-base"
           >
             {t('common.cancel')}
           </button>
           <button
             type="submit"
             disabled={loading}
-            className="flex-1 py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition disabled:opacity-50"
+            className="flex-1 py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition disabled:opacity-50 text-sm md:text-base"
           >
             {loading ? t('common.loading') : t('common.save')}
           </button>

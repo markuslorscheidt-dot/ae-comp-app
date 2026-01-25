@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Lead, Competitor, LeadSource, LEAD_SOURCES } from '@/lib/pipeline-types';
+import { useLanguage } from '@/lib/LanguageContext';
 
 interface LeadFormProps {
   lead: Lead | null;
@@ -12,6 +13,7 @@ interface LeadFormProps {
 }
 
 export default function LeadForm({ lead, competitors, onSave, onCancel, onArchive }: LeadFormProps) {
+  const { t } = useLanguage();
   const [formData, setFormData] = useState({
     company_name: lead?.company_name || '',
     contact_name: lead?.contact_name || '',
@@ -215,7 +217,7 @@ export default function LeadForm({ lead, competitors, onSave, onCancel, onArchiv
                 })}
                 className="w-5 h-5 rounded border-gray-300 text-blue-600"
               />
-              <span className="text-sm text-gray-700">Nutzt bereits Salon-Software</span>
+              <span className="text-sm text-gray-700">{t('pipeline.usesSalonSoftware')}</span>
             </label>
             
             {formData.has_existing_software && (
@@ -254,7 +256,7 @@ export default function LeadForm({ lead, competitors, onSave, onCancel, onArchiv
                 onClick={onArchive}
                 className="px-4 py-2 text-orange-600 hover:bg-orange-50 rounded-lg"
               >
-                📦 Archivieren
+                📦 {t('pipeline.archive')}
               </button>
             ) : (
               <div></div>
@@ -265,14 +267,14 @@ export default function LeadForm({ lead, competitors, onSave, onCancel, onArchiv
                 onClick={onCancel}
                 className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
               >
-                Abbrechen
+                {t('common.cancel')}
               </button>
               <button
                 type="submit"
                 disabled={saving}
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
-                {saving ? 'Speichern...' : (lead ? 'Speichern' : 'Lead erstellen')}
+                {saving ? t('common.saving') : (lead ? t('common.save') : t('pipeline.createLead'))}
               </button>
             </div>
           </div>

@@ -11,6 +11,7 @@ import {
   getDefaultProbability,
   formatDate,
 } from '@/lib/pipeline-types';
+import { useLanguage } from '@/lib/LanguageContext';
 
 interface StageChangeDialogProps {
   opportunity: Opportunity;
@@ -39,6 +40,7 @@ export default function StageChangeDialog({
   onConfirm, 
   onCancel 
 }: StageChangeDialogProps) {
+  const { t } = useLanguage();
   const [selectedStage, setSelectedStage] = useState<OpportunityStage>(opportunity.stage as OpportunityStage);
   const [lostReasonId, setLostReasonId] = useState('');
   const [lostReasonNotes, setLostReasonNotes] = useState('');
@@ -154,7 +156,7 @@ export default function StageChangeDialog({
                       }}
                       className="text-xs text-gray-500 hover:text-gray-700"
                     >
-                      Abbrechen
+                      {t('common.cancel')}
                     </button>
                   </div>
                   
@@ -194,7 +196,7 @@ export default function StageChangeDialog({
                               <div className="text-xs opacity-75">
                                 {stage === 'close_won' && 'Deal gewonnen → Go-Live erstellen'}
                                 {stage === 'close_lost' && 'Deal verloren'}
-                                {stage === 'nurture' && 'Zurückgestellt'}
+                                {stage === 'nurture' && t('pipeline.nurture')}
                                 {!['close_won', 'close_lost', 'nurture'].includes(stage) && 
                                   `${Math.round(config.defaultProbability * 100)}% Probability`
                                 }
@@ -285,7 +287,7 @@ export default function StageChangeDialog({
             onClick={onCancel}
             className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
           >
-            {showManualOverride ? 'Abbrechen' : 'Schließen'}
+            {showManualOverride ? t('common.cancel') : t('common.close')}
           </button>
           {showManualOverride && canManuallyChangeStage && (
             <button
@@ -299,7 +301,7 @@ export default function StageChangeDialog({
                   : 'bg-orange-600 text-white hover:bg-orange-700'
               }`}
             >
-              {saving ? 'Speichern...' : 'Stage ändern (Override)'}
+              {saving ? t('common.saving') : t('pipeline.changeStage')}
             </button>
           )}
         </div>

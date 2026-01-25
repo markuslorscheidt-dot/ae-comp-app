@@ -21,39 +21,44 @@ function GlobalAdminWrapper({ user, onBack, onSignOut }: { user: User; onBack: (
   
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
+      {/* Header - Responsive */}
       <header className="bg-white shadow-sm border-b sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={onBack}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Zurück zur Bereichsauswahl"
-            >
-              <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-            </button>
-            <div>
-              <h1 className="text-xl font-bold text-gray-800">Commercial Business Planner</h1>
-              <p className="text-xs text-gray-500">Admin-Bereich • {user.name}</p>
+        <div className="max-w-7xl mx-auto px-4 py-3 md:py-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 md:gap-4 min-w-0">
+              <button
+                onClick={onBack}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
+                title="Zurück zur Bereichsauswahl"
+              >
+                <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+              <div className="min-w-0">
+                <h1 className="text-base md:text-xl font-bold text-gray-800 truncate">Commercial Business Planner</h1>
+                <p className="text-xs text-gray-500 truncate">Admin-Bereich • {user.name}</p>
+              </div>
             </div>
-          </div>
-          
-          <div className="flex items-center gap-4">
-            <LanguageSelector />
-            <button
-              onClick={onSignOut}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
-            >
-              {t('auth.logout')}
-            </button>
+            
+            <div className="flex items-center gap-2 md:gap-4 flex-shrink-0">
+              <div className="hidden sm:block">
+                <LanguageSelector />
+              </div>
+              <button
+                onClick={onSignOut}
+                className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <span className="hidden sm:inline">{t('auth.logout')}</span>
+                <span className="sm:hidden">🚪</span>
+              </button>
+            </div>
           </div>
         </div>
       </header>
 
-      {/* Admin Panel */}
-      <main className="max-w-7xl mx-auto px-4 py-8">
+      {/* Admin Panel - Responsive Padding */}
+      <main className="max-w-7xl mx-auto px-4 py-4 md:py-8">
         <AdminPanel currentUser={user} onBack={onBack} />
       </main>
     </div>

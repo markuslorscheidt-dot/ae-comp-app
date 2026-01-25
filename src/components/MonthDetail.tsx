@@ -496,14 +496,14 @@ export default function MonthDetail({
                 {/* Subscription Package */}
                 <div className="p-3 bg-green-50 rounded-lg border border-green-200">
                   <label className="block text-sm font-medium text-green-700 mb-2">
-                    📦 Subscription Paket
+                    📦 {t('goLive.subscriptionPackage')}
                   </label>
                   <select
                     value={editForm.subscription_package_id || ''}
                     onChange={(e) => setEditForm({ ...editForm, subscription_package_id: e.target.value || null })}
                     className="w-full px-3 py-2 border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 bg-white"
                   >
-                    <option value="">Kein Paket (Standard)</option>
+                    <option value="">{t('goLive.noPackage')}</option>
                     {subscriptionPackages.map(pkg => (
                       <option key={pkg.id} value={pkg.id}>
                         {pkg.name}
@@ -543,14 +543,14 @@ export default function MonthDetail({
                 {/* Partnership */}
                 <div className="p-3 bg-purple-50 rounded-lg border border-purple-200">
                   <label className="block text-sm font-medium text-purple-700 mb-2">
-                    🤝 Partnership
+                    🤝 {t('goLive.partnership')}
                   </label>
                   <select
                     value={editForm.partner_id || ''}
                     onChange={(e) => setEditForm({ ...editForm, partner_id: e.target.value || null })}
                     className="w-full px-3 py-2 border border-purple-300 rounded-lg focus:ring-2 focus:ring-purple-500 bg-white"
                   >
-                    <option value="">Kein Partner (Standard)</option>
+                    <option value="">{t('goLive.noPartner')}</option>
                     {partners.map(partner => (
                       <option key={partner.id} value={partner.id}>
                         {partner.name}
@@ -559,12 +559,12 @@ export default function MonthDetail({
                   </select>
                   {editForm.partner_id && (
                     <p className="text-xs text-purple-600 mt-1">
-                      ℹ️ Wird intern Head of Partnerships zugeordnet
+                      ℹ️ {t('goLive.partnerHint')}
                     </p>
                   )}
                 </div>
 
-                {/* Filialunternehmen */}
+                {/* Enterprise / Filialunternehmen */}
                 <div className="flex items-center p-3 bg-indigo-50 rounded-lg border border-indigo-200">
                   <input
                     type="checkbox"
@@ -574,12 +574,12 @@ export default function MonthDetail({
                     className="w-5 h-5 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
                   />
                   <label htmlFor="edit_isEnterprise" className="ml-2 text-sm font-medium text-gray-700">
-                    🏢 Filialunternehmen (≥5 Filialen)
+                    🏢 {t('goLive.enterprise')}
                   </label>
                 </div>
                 {editForm.is_enterprise && (
                   <p className="text-xs text-indigo-600 -mt-2 ml-3">
-                    ℹ️ Wird intern Head of Partnerships zugeordnet
+                    ℹ️ {t('goLive.enterpriseHint')}
                   </p>
                 )}
 

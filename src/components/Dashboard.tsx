@@ -285,6 +285,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
 
   const [currentView, setCurrentView] = useState<View>('dashboard');
   const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth() + 1);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   const currentMonth = new Date().getMonth() + 1;
 
@@ -334,146 +335,221 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
     return result;
   };
 
-  // Navigation Component
-  const Navigation = () => (
-    <nav className="bg-white shadow-sm border-b sticky top-0 z-10">
-      <div className="max-w-7xl mx-auto px-4">
-        <div className="flex items-center justify-between h-16">
-          <div className="flex items-center space-x-4">
-            {/* Zurück-Button zur Bereichsauswahl */}
-            {onBackToAreaSelector && (
-              <button
-                onClick={onBackToAreaSelector}
-                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-                title="Zurück zur Bereichsauswahl"
+  // Navigation Component - Responsive
+  const Navigation = () => {
+    const navItems = [
+      { view: 'dashboard' as View, label: t('nav.dashboard'), icon: '📊', show: true },
+      { view: 'year' as View, label: t('nav.yearOverview'), icon: '📅', show: true },
+      { view: 'pipeline' as View, label: 'Pipeline', icon: '📊', show: !isDemo },
+      { view: 'golive_import' as View, label: 'Go-Live Import', icon: '📥', show: !isDemo && permissions.hasAdminAccess },
+      { view: 'add' as View, label: t('nav.addGoLive'), icon: '➕', show: (permissions.enterOwnGoLives || permissions.enterGoLivesForOthers) && !isDemo, highlight: true },
+      { view: 'settings' as View, label: t('nav.settings'), icon: '⚙️', show: permissions.editSettings && !isDemo },
+      { view: 'leaderboard' as View, label: t('nav.leaderboard'), icon: '🏆', show: true },
+    ].filter(item => item.show);
+
+    return (
+      <nav className="bg-white shadow-sm border-b sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4">
+          <div className="flex items-center justify-between h-14 md:h-16">
+            {/* Left: Back Button + Title */}
+            <div className="flex items-center space-x-2 md:space-x-4 min-w-0 flex-1">
+              {onBackToAreaSelector && (
+                <button
+                  onClick={onBackToAreaSelector}
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
+                  title={t('ui.backToAreaSelector')}
+                >
+                  <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+              )}
+              <div className="min-w-0">
+                <h1 className="text-base md:text-xl font-bold text-gray-800 truncate">{t('dashboard.title')}</h1>
+                <p className="text-xs text-gray-500 truncate hidden sm:block">
+                  {selectedArea && <span className="font-medium text-blue-600">{BUSINESS_AREA_LABELS[selectedArea]}</span>}
+                  {selectedArea && ' • '}
+                  {settings.year} • {settings.region}
+                </p>
+              </div>
+            </div>
+            
+            {/* Center: Desktop Navigation */}
+            <div className="hidden lg:flex items-center space-x-1 xl:space-x-2">
+              {navItems.map(item => (
+                <button
+                  key={item.view}
+                  onClick={() => setCurrentView(item.view)}
+                  className={`px-2 xl:px-3 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap ${
+                    item.highlight 
+                      ? 'bg-green-600 text-white hover:bg-green-700'
+                      : currentView === item.view 
+                        ? 'bg-blue-100 text-blue-700' 
+                        : 'text-gray-600 hover:bg-gray-100'
+                  }`}
+                >
+                  <span className="hidden xl:inline">{item.icon} </span>{item.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Right: User Controls */}
+            <div className="flex items-center space-x-2 md:space-x-4 flex-shrink-0">
+              {/* Language - hidden on mobile */}
+              <div className="hidden md:block">
+                <LanguageSelector variant="buttons" />
+              </div>
+              
+              {/* Demo Dropdown - hidden on mobile */}
+              {canAccessDemo && (
+                <select
+                  value={dataSource}
+                  onChange={(e) => setDataSource(e.target.value as DataSource)}
+                  className={`hidden md:block text-sm px-2 py-1.5 rounded-lg border transition ${
+                    isDemo 
+                      ? 'bg-orange-100 border-orange-300 text-orange-700' 
+                      : 'bg-gray-100 border-gray-300 text-gray-700'
+                  }`}
+                >
+                  <option value="production">🔴 Prod</option>
+                  <option value="demo-75">🟡 75%</option>
+                  <option value="demo-100">🟢 100%</option>
+                  <option value="demo-120">🚀 120%</option>
+                </select>
+              )}
+              
+              {/* User Profile - simplified on mobile */}
+              <button 
+                onClick={() => {
+                  setProfileUserId(user.id);
+                  setCurrentView('profile');
+                  setMobileMenuOpen(false);
+                }}
+                className="hidden sm:block text-right hover:bg-gray-100 rounded-lg p-2 transition"
               >
-                <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
+                <div className="text-sm font-medium text-gray-700 truncate max-w-[100px] lg:max-w-none">{user.name}</div>
+                <div className="text-xs text-gray-500 hidden lg:block">{t(`roles.${user.role}`)}</div>
               </button>
-            )}
-            <div>
-              <h1 className="text-xl font-bold text-gray-800">{t('dashboard.title')}</h1>
-              <p className="text-xs text-gray-500">
-                {selectedArea && <span className="font-medium text-blue-600">{BUSINESS_AREA_LABELS[selectedArea]}</span>}
-                {selectedArea && ' • '}
-                {settings.year} • {settings.region}
-              </p>
+              
+              {/* Logout - hidden on mobile */}
+              <button onClick={onSignOut} className="hidden md:block text-sm text-gray-500 hover:text-gray-700 px-2 py-1">
+                {t('auth.logout')}
+              </button>
+              
+              {/* Mobile Menu Button */}
+              <button
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                className="lg:hidden p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                aria-label={t('ui.openMenu')}
+              >
+                {mobileMenuOpen ? (
+                  <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                ) : (
+                  <svg className="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                  </svg>
+                )}
+              </button>
             </div>
           </div>
-          
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={() => setCurrentView('dashboard')}
-              className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
-                currentView === 'dashboard' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              {t('nav.dashboard')}
-            </button>
-            <button
-              onClick={() => setCurrentView('year')}
-              className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
-                currentView === 'year' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              {t('nav.yearOverview')}
-            </button>
-            {!isDemo && (
-              <button
-                onClick={() => setCurrentView('pipeline')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
-                  currentView === 'pipeline' ? 'bg-indigo-100 text-indigo-700' : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                📊 Pipeline
-              </button>
-            )}
-            {!isDemo && permissions.hasAdminAccess && (
-              <button
-                onClick={() => setCurrentView('golive_import')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
-                  currentView === 'golive_import' ? 'bg-teal-100 text-teal-700' : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                📥 Go-Live Import
-              </button>
-            )}
-            {(permissions.enterOwnGoLives || permissions.enterGoLivesForOthers) && !isDemo && (
-              <button
-                onClick={() => setCurrentView('add')}
-                className="px-3 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700 transition"
-              >
-                {t('nav.addGoLive')}
-              </button>
-            )}
-            {/* Admin-Button wurde in den Startbildschirm verschoben */}
-            {permissions.editSettings && !isDemo && (
-              <button
-                onClick={() => setCurrentView('settings')}
-                className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
-                  currentView === 'settings' ? 'bg-orange-100 text-orange-700' : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                ⚙️ {t('nav.settings')}
-              </button>
-            )}
-            <button
-              onClick={() => setCurrentView('leaderboard')}
-              className={`px-3 py-2 rounded-lg text-sm font-medium transition ${
-                currentView === 'leaderboard' ? 'bg-amber-100 text-amber-700' : 'text-gray-600 hover:bg-gray-100'
-              }`}
-            >
-              🏆 {t('nav.leaderboard')}
-            </button>
-          </div>
-
-          <div className="flex items-center space-x-4">
-            <LanguageSelector variant="buttons" />
-            
-            {/* Demo-Modus Dropdown (nur für Admins) */}
-            {canAccessDemo && (
-              <select
-                value={dataSource}
-                onChange={(e) => setDataSource(e.target.value as DataSource)}
-                className={`text-sm px-3 py-1.5 rounded-lg border transition ${
-                  isDemo 
-                    ? 'bg-orange-100 border-orange-300 text-orange-700' 
-                    : 'bg-gray-100 border-gray-300 text-gray-700'
-                }`}
-              >
-                <option value="production">🔴 Produktion</option>
-                <option value="demo-75">🟡 Demo 75%</option>
-                <option value="demo-100">🟢 Demo 100%</option>
-                <option value="demo-120">🚀 Demo 120%</option>
-              </select>
-            )}
-            
-            <button 
-              onClick={() => {
-                setProfileUserId(user.id);
-                setCurrentView('profile');
-              }}
-              className="text-right hover:bg-gray-100 rounded-lg p-2 transition"
-            >
-              <div className="text-sm font-medium text-gray-700">{user.name}</div>
-              <div className="text-xs text-gray-500">{t(`roles.${user.role}`)}</div>
-            </button>
-            <button onClick={onSignOut} className="text-sm text-gray-500 hover:text-gray-700">
-              {t('auth.logout')}
-            </button>
-          </div>
         </div>
-      </div>
-      
-      {/* Demo-Modus Banner */}
-      {isDemo && (
-        <div className="bg-orange-500 text-white text-center py-2 text-sm font-medium">
-          ⚠️ DEMO-MODUS ({scenarioLabel.label}) - Keine echten Daten
-        </div>
-      )}
-    </nav>
-  );
+        
+        {/* Mobile Menu Overlay */}
+        {mobileMenuOpen && (
+          <div className="lg:hidden fixed inset-0 top-14 bg-black/50 z-30" onClick={() => setMobileMenuOpen(false)}>
+            <div 
+              className="bg-white border-t shadow-lg max-h-[calc(100vh-3.5rem)] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Mobile Navigation Items */}
+              <div className="p-4 space-y-2">
+                {navItems.map(item => (
+                  <button
+                    key={item.view}
+                    onClick={() => {
+                      setCurrentView(item.view);
+                      setMobileMenuOpen(false);
+                    }}
+                    className={`w-full px-4 py-3 rounded-lg text-left font-medium transition flex items-center space-x-3 ${
+                      item.highlight 
+                        ? 'bg-green-600 text-white'
+                        : currentView === item.view 
+                          ? 'bg-blue-100 text-blue-700' 
+                          : 'text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    <span className="text-xl">{item.icon}</span>
+                    <span>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+              
+              {/* Mobile User Section */}
+              <div className="border-t p-4 space-y-3">
+                <button 
+                  onClick={() => {
+                    setProfileUserId(user.id);
+                    setCurrentView('profile');
+                    setMobileMenuOpen(false);
+                  }}
+                  className="w-full px-4 py-3 rounded-lg text-left hover:bg-gray-100 transition flex items-center space-x-3"
+                >
+                  <span className="text-xl">👤</span>
+                  <div>
+                    <div className="font-medium text-gray-700">{user.name}</div>
+                    <div className="text-xs text-gray-500">{t(`roles.${user.role}`)}</div>
+                  </div>
+                </button>
+                
+                {/* Language Selector Mobile */}
+                <div className="px-4 py-2">
+                  <LanguageSelector variant="buttons" />
+                </div>
+                
+                {/* Demo Dropdown Mobile */}
+                {canAccessDemo && (
+                  <div className="px-4 py-2">
+                    <label className="block text-sm text-gray-500 mb-1">Modus</label>
+                    <select
+                      value={dataSource}
+                      onChange={(e) => setDataSource(e.target.value as DataSource)}
+                      className={`w-full text-sm px-3 py-2 rounded-lg border transition ${
+                        isDemo 
+                          ? 'bg-orange-100 border-orange-300 text-orange-700' 
+                          : 'bg-gray-100 border-gray-300 text-gray-700'
+                      }`}
+                    >
+                      <option value="production">🔴 Produktion</option>
+                      <option value="demo-75">🟡 Demo 75%</option>
+                      <option value="demo-100">🟢 Demo 100%</option>
+                      <option value="demo-120">🚀 Demo 120%</option>
+                    </select>
+                  </div>
+                )}
+                
+                <button 
+                  onClick={onSignOut}
+                  className="w-full px-4 py-3 rounded-lg text-left text-red-600 hover:bg-red-50 transition flex items-center space-x-3"
+                >
+                  <span className="text-xl">🚪</span>
+                  <span>{t('auth.logout')}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {/* Demo-Modus Banner */}
+        {isDemo && (
+          <div className="bg-orange-500 text-white text-center py-1.5 md:py-2 text-xs md:text-sm font-medium">
+            ⚠️ DEMO-MODUS ({scenarioLabel.label})
+          </div>
+        )}
+      </nav>
+    );
+  };
 
   // Pipeline View
   if (currentView === 'pipeline') {
@@ -803,46 +879,48 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
           </div>
         )}
 
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <div className="bg-white rounded-xl shadow-sm p-6 border-l-4 border-green-500">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-gray-500">{t('dashboard.ytdSubsArr')}</span>
-              <span className={`text-xs px-2 py-1 rounded-full ${getAchievementBgColor(ytdSummary.total_subs_achievement)}`}>
+        {/* Stats Cards - Responsive */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-6 mb-6 md:mb-8">
+          <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-6 border-l-4 border-green-500">
+            <div className="flex items-center justify-between mb-1 md:mb-2">
+              <span className="text-xs md:text-sm font-medium text-gray-500 truncate">{t('dashboard.ytdSubsArr')}</span>
+              <span className={`text-[10px] md:text-xs px-1.5 md:px-2 py-0.5 md:py-1 rounded-full ${getAchievementBgColor(ytdSummary.total_subs_achievement)}`}>
                 {formatPercent(ytdSummary.total_subs_achievement)}
               </span>
             </div>
-            <p className="text-2xl font-bold text-gray-800">{formatCurrency(ytdSummary.total_subs_actual)}</p>
-            <p className="text-sm text-gray-500 mt-1">{t('common.target')}: {formatCurrency(ytdSummary.total_subs_target)}</p>
+            <p className="text-lg md:text-2xl font-bold text-gray-800">{formatCurrency(ytdSummary.total_subs_actual)}</p>
+            <p className="text-xs md:text-sm text-gray-500 mt-1 truncate">{t('common.target')}: {formatCurrency(ytdSummary.total_subs_target)}</p>
           </div>
 
-          <div className="bg-white rounded-xl shadow-sm p-6 border-l-4 border-orange-500">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-gray-500">{t('dashboard.ytdPayArr')}</span>
-              <span className={`text-xs px-2 py-1 rounded-full ${getAchievementBgColor(ytdSummary.total_pay_achievement)}`}>
+          <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-6 border-l-4 border-orange-500">
+            <div className="flex items-center justify-between mb-1 md:mb-2">
+              <span className="text-xs md:text-sm font-medium text-gray-500 truncate">{t('dashboard.ytdPayArr')}</span>
+              <span className={`text-[10px] md:text-xs px-1.5 md:px-2 py-0.5 md:py-1 rounded-full ${getAchievementBgColor(ytdSummary.total_pay_achievement)}`}>
                 {formatPercent(ytdSummary.total_pay_achievement)}
               </span>
             </div>
-            <p className="text-2xl font-bold text-gray-800">{formatCurrency(ytdSummary.total_pay_actual)}</p>
-            <p className="text-sm text-gray-500 mt-1">{t('common.target')}: {formatCurrency(ytdSummary.total_pay_target)}</p>
+            <p className="text-lg md:text-2xl font-bold text-gray-800">{formatCurrency(ytdSummary.total_pay_actual)}</p>
+            <p className="text-xs md:text-sm text-gray-500 mt-1 truncate">{t('common.target')}: {formatCurrency(ytdSummary.total_pay_target)}</p>
           </div>
 
-          <div className="bg-white rounded-xl shadow-sm p-6 border-l-4 border-blue-500">
-            <span className="text-sm font-medium text-gray-500">{t('dashboard.ytdGoLives')}</span>
-            <p className="text-2xl font-bold text-gray-800 mt-2">{ytdSummary.total_go_lives}</p>
-            <p className="text-sm text-gray-500 mt-1">{t('dashboard.terminals')}: {ytdSummary.total_terminals}</p>
+          <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-6 border-l-4 border-blue-500">
+            <span className="text-xs md:text-sm font-medium text-gray-500">{t('dashboard.ytdGoLives')}</span>
+            <p className="text-lg md:text-2xl font-bold text-gray-800 mt-1 md:mt-2">{ytdSummary.total_go_lives}</p>
+            <p className="text-xs md:text-sm text-gray-500 mt-1">{t('dashboard.terminals')}: {ytdSummary.total_terminals}</p>
           </div>
 
-          <div className="bg-white rounded-xl shadow-sm p-6 border-l-4 border-purple-500">
-            <span className="text-sm font-medium text-gray-500">{t('dashboard.ytdProvision')}</span>
-            <p className="text-2xl font-bold text-green-600 mt-2">{formatCurrency(ytdSummary.total_provision)}</p>
-            <div className="text-xs text-gray-500 mt-1 space-y-1">
+          <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-6 border-l-4 border-purple-500">
+            <span className="text-xs md:text-sm font-medium text-gray-500">{t('dashboard.ytdProvision')}</span>
+            <p className="text-lg md:text-2xl font-bold text-green-600 mt-1 md:mt-2">{formatCurrency(ytdSummary.total_provision)}</p>
+            <div className="text-[10px] md:text-xs text-gray-500 mt-1 space-y-0.5 md:space-y-1">
               <div className="flex justify-between">
-                <span>{t('dashboard.m0Provision')}:</span>
+                <span className="hidden sm:inline">{t('dashboard.m0Provision')}:</span>
+                <span className="sm:hidden">M0:</span>
                 <span className="text-green-600">{formatCurrency(ytdSummary.total_m0_provision)}</span>
               </div>
               <div className="flex justify-between">
-                <span>{t('dashboard.m3Provision')}:</span>
+                <span className="hidden sm:inline">{t('dashboard.m3Provision')}:</span>
+                <span className="sm:hidden">M3:</span>
                 <span className="text-orange-600">{formatCurrency(ytdSummary.total_m3_provision)}</span>
               </div>
             </div>
@@ -859,22 +937,22 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
           />
         </div>
 
-        {/* Active Challenges Widget */}
+        {/* Active Challenges Widget - Responsive */}
         {activeChallenges.length > 0 && (
-          <div className="mb-8">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold text-gray-800 flex items-center">
+          <div className="mb-6 md:mb-8">
+            <div className="flex items-center justify-between mb-3 md:mb-4">
+              <h2 className="text-base md:text-lg font-bold text-gray-800 flex items-center">
                 <span className="mr-2">🎯</span>
                 {t('dashboard.activeChallenges')}
               </h2>
               <button
                 onClick={() => setCurrentView('leaderboard')}
-                className="text-sm text-blue-600 hover:text-blue-800"
+                className="text-xs md:text-sm text-blue-600 hover:text-blue-800 px-2 py-1"
               >
                 {t('dashboard.viewAll')} →
               </button>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-4">
               {activeChallenges.slice(0, 3).map(challenge => {
                 const allGoLivesForProgress = Array.from(multiGoLives.values()).flat();
                 const progress = calculateChallengeProgress(challenge, allGoLivesForProgress);
@@ -882,24 +960,24 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
                 return (
                   <div 
                     key={challenge.id} 
-                    className="bg-white rounded-xl shadow-sm p-4 border-l-4 border-emerald-500 hover:shadow-md transition cursor-pointer"
+                    className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-emerald-500 hover:shadow-md transition cursor-pointer active:bg-gray-50"
                     onClick={() => setCurrentView('leaderboard')}
                   >
-                    <div className="flex items-center space-x-3 mb-2">
-                      <span className="text-2xl">{challenge.icon}</span>
+                    <div className="flex items-center space-x-2 md:space-x-3 mb-2">
+                      <span className="text-xl md:text-2xl">{challenge.icon}</span>
                       <div className="flex-1 min-w-0">
-                        <h4 className="font-bold text-gray-800 truncate">{challenge.name}</h4>
-                        <p className="text-xs text-gray-500">{progress.days_remaining} {t('challenges.days')} {t('challenges.timeLeft').toLowerCase()}</p>
+                        <h4 className="font-bold text-gray-800 truncate text-sm md:text-base">{challenge.name}</h4>
+                        <p className="text-[10px] md:text-xs text-gray-500">{progress.days_remaining} {t('challenges.days')} {t('challenges.timeLeft').toLowerCase()}</p>
                       </div>
                     </div>
                     <div className="mb-2">
-                      <div className="flex justify-between text-xs mb-1">
+                      <div className="flex justify-between text-[10px] md:text-xs mb-1">
                         <span className="text-gray-600">{t('challenges.progress')}</span>
                         <span className="font-bold text-emerald-600">{Math.round(progress.progress_percent)}%</span>
                       </div>
-                      <div className="w-full bg-gray-200 rounded-full h-2">
+                      <div className="w-full bg-gray-200 rounded-full h-1.5 md:h-2">
                         <div 
-                          className="h-2 rounded-full bg-emerald-500 transition-all"
+                          className="h-1.5 md:h-2 rounded-full bg-emerald-500 transition-all"
                           style={{ width: `${Math.min(progress.progress_percent, 100)}%` }}
                         />
                       </div>
@@ -911,85 +989,79 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
           </div>
         )}
 
-        {/* Monthly Grid */}
-        <h2 className="text-lg font-bold text-gray-800 mb-4">{t('dashboard.months')} {settings.year}</h2>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
+        {/* Monthly Grid - Responsive */}
+        <h2 className="text-base md:text-lg font-bold text-gray-800 mb-3 md:mb-4">{t('dashboard.months')} {settings.year}</h2>
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-12 gap-2 md:gap-3 mb-6 md:mb-8">
           {yearSummary.monthly_results.map((result) => (
             <button
               key={result.month}
               onClick={() => { setSelectedMonth(result.month); setCurrentView('month'); }}
-              className={`bg-white rounded-xl shadow-sm p-4 text-left hover:shadow-md transition ${
+              className={`bg-white rounded-lg shadow-sm p-2 md:p-3 text-left hover:shadow-md transition active:bg-gray-50 ${
                 result.month === currentMonth ? 'ring-2 ring-blue-500' : ''
               }`}
             >
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-medium text-gray-800">{t(`months.${result.month}`)}</span>
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-medium text-gray-800 text-xs md:text-sm">{t(`months.${result.month}`).substring(0, 3)}</span>
                 {result.month === currentMonth && (
-                  <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded">{t('common.current')}</span>
+                  <span className="w-2 h-2 bg-blue-500 rounded-full"></span>
                 )}
               </div>
-              <div className="text-sm text-gray-600 mb-1">{result.go_lives_count} {t('dashboard.goLives')}</div>
-              <div className="text-lg font-bold text-green-600">{formatCurrency(result.total_provision)}</div>
-              <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                <div>
-                  <span className="text-gray-500">Subs:</span>
-                  <span className={`ml-1 ${getAchievementColor(result.subs_achievement)}`}>
-                    {formatPercent(result.subs_achievement)}
-                  </span>
+              <div className="text-[10px] md:text-xs text-gray-500 mb-0.5">{result.go_lives_count} GL</div>
+              <div className="text-xs md:text-sm font-bold text-green-600">{formatCurrency(result.total_provision)}</div>
+              <div className="mt-1 text-[9px] md:text-[10px] hidden sm:block">
+                <div className={getAchievementColor(result.subs_achievement)}>
+                  S: {formatPercent(result.subs_achievement)}
                 </div>
-                <div>
-                  <span className="text-gray-500">Pay:</span>
-                  <span className={`ml-1 ${getAchievementColor(result.pay_achievement)}`}>
-                    {formatPercent(result.pay_achievement)}
-                  </span>
+                <div className={getAchievementColor(result.pay_achievement)}>
+                  P: {formatPercent(result.pay_achievement)}
                 </div>
               </div>
             </button>
           ))}
         </div>
 
-        {/* Provision Tiers */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
-              <span className="w-3 h-3 bg-green-500 rounded-full mr-2"></span>
+        {/* Provision Tiers - Responsive */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+          <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-4 md:p-6">
+            <h3 className="text-sm md:text-lg font-bold text-gray-800 mb-3 md:mb-4 flex items-center">
+              <span className="w-2 h-2 md:w-3 md:h-3 bg-green-500 rounded-full mr-2"></span>
               {t('dashboard.subsProvisionTiers')}
             </h3>
-            <table className="w-full text-sm">
+            <table className="w-full text-xs md:text-sm">
               <thead>
                 <tr className="border-b">
-                  <th className="text-left py-2 text-gray-500">{t('dashboard.achievement')}</th>
-                  <th className="text-right py-2 text-gray-500">{t('dashboard.rate')}</th>
+                  <th className="text-left py-1.5 md:py-2 text-gray-500">{t('dashboard.achievement')}</th>
+                  <th className="text-right py-1.5 md:py-2 text-gray-500">{t('dashboard.rate')}</th>
                 </tr>
               </thead>
               <tbody>
                 {settings.subs_tiers.map((tier, i) => (
                   <tr key={i} className="border-b">
-                    <td className="py-2">{tier.label}</td>
-                    <td className="py-2 text-right font-medium">{formatPercent(tier.rate)}</td>
+                    <td className="py-1.5 md:py-2">{tier.label}</td>
+                    <td className="py-1.5 md:py-2 text-right font-medium">{formatPercent(tier.rate)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center">
-              <span className="w-3 h-3 bg-orange-500 rounded-full mr-2"></span>
+          <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-4 md:p-6">
+            <h3 className="text-sm md:text-lg font-bold text-gray-800 mb-3 md:mb-4 flex items-center">
+              <span className="w-2 h-2 md:w-3 md:h-3 bg-orange-500 rounded-full mr-2"></span>
               {t('dashboard.payProvisionTiers')}
             </h3>
-            <table className="w-full text-sm">
+            <table className="w-full text-xs md:text-sm">
               <thead>
                 <tr className="border-b">
-                  <th className="text-left py-2 text-gray-500">{t('dashboard.achievement')}</th>
-                  <th className="text-right py-2 text-gray-500">{t('dashboard.rate')}</th>
+                  <th className="text-left py-1.5 md:py-2 text-gray-500">{t('dashboard.achievement')}</th>
+                  <th className="text-right py-1.5 md:py-2 text-gray-500">{t('dashboard.rate')}</th>
                 </tr>
               </thead>
               <tbody>
                 {settings.pay_tiers.map((tier, i) => (
                   <tr key={i} className="border-b">
-                    <td className="py-2">{tier.label}</td>
-                    <td className="py-2 text-right font-medium">{formatPercent(tier.rate)}</td>
+                    <td className="py-1.5 md:py-2">{tier.label}</td>
+                    <td className="py-1.5 md:py-2 text-right font-medium">{formatPercent(tier.rate)}</td>
                   </tr>
                 ))}
               </tbody>

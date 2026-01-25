@@ -9,8 +9,11 @@
 import { useState, useEffect } from 'react';
 import { SubscriptionPackage } from '@/lib/golive-types';
 import { loadSubscriptionPackages, createSubscriptionPackage, deleteSubscriptionPackage } from '@/lib/golive-import-hooks';
+import { useLanguage } from '@/lib/LanguageContext';
 
 export default function SubscriptionPackageManagement() {
+  const { t } = useLanguage();
+  
   // ========== STATE ==========
   const [packages, setPackages] = useState<SubscriptionPackage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -79,9 +82,9 @@ export default function SubscriptionPackageManagement() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-semibold">📦 Subscription-Paketverwaltung</h2>
+          <h2 className="text-xl font-semibold">📦 {t('subscriptionPackages.title')}</h2>
           <p className="text-sm text-gray-600">
-            Subscription-Pakete (Kickstart, Power, Power Plus, etc.)
+            {t('subscriptionPackages.description')}
           </p>
         </div>
       </div>
@@ -190,7 +193,7 @@ export default function SubscriptionPackageManagement() {
                       onClick={() => handleDeletePackage(pkg.id, pkg.name)}
                       className="text-red-600 hover:text-red-900 hover:underline"
                     >
-                      Löschen
+                      {t('common.delete')}
                     </button>
                   </td>
                 </tr>

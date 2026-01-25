@@ -60,6 +60,14 @@ export const translations: Record<Language, Record<string, any>> = {
       current: 'Aktuell',
       for: 'für',
       saving: 'Speichern...',
+      creating: 'Anlegen...',
+      create: 'Anlegen',
+      newEntry: 'Neuen Eintrag anlegen',
+      packageName: 'Paket-Name',
+      createdAt: 'Erstellt am',
+      noData: 'Keine Daten vorhanden',
+      loadingData: 'Lade Daten...',
+      note: 'Hinweis',
     },
     
     auth: {
@@ -382,6 +390,18 @@ export const translations: Record<Language, Record<string, any>> = {
       deleteConfirm: 'Möchten Sie diesen Go-Live wirklich löschen?',
       selectMonth: 'Monat auswählen',
       notes: 'Notizen',
+      // Subscription Package
+      subscriptionPackage: 'Subscription Paket',
+      noPackage: 'Kein Paket (Standard)',
+      // Partnership
+      partnership: 'Partnership',
+      noPartner: 'Kein Partner (Standard)',
+      partnerHint: 'Wird intern Head of Partnerships zugeordnet',
+      // Enterprise
+      enterprise: 'Filialunternehmen (≥5 Filialen)',
+      enterpriseHint: 'Wird intern Head of Partnerships zugeordnet',
+      // Tooltips
+      notCommissionRelevant: 'Nicht provisions-relevant',
     },
 
     monthDetail: {
@@ -732,6 +752,64 @@ export const translations: Record<Language, Record<string, any>> = {
       all: 'Alle',
     },
 
+    pipeline: {
+      showArchive: 'Archiv anzeigen',
+      archive: 'Archivieren',
+      archiving: 'Archiviere...',
+      restore: 'Wiederherstellen',
+      restoring: 'Wiederherstellen...',
+      newOpportunity: 'Neue Opportunity',
+      editLead: 'Lead bearbeiten',
+      editOpportunity: 'Opportunity bearbeiten',
+      changeStage: 'Stage ändern',
+      openInSalesforce: 'In Salesforce öffnen',
+      archived: 'Archiviert',
+      notAssigned: 'Nicht zugewiesen',
+      alreadyImported: 'Bereits importiert',
+      readyToImport: 'Bereit zum Import',
+      missingData: 'Daten fehlen',
+      createOpportunity: 'Opportunity erstellen',
+      createLead: 'Lead erstellen',
+      nurture: 'Zurückgestellt',
+      // Lead Form
+      companyName: 'Firmenname',
+      contactName: 'Ansprechpartner',
+      usesSalonSoftware: 'Nutzt bereits Salon-Software',
+      // Import
+      noPartnerSelected: 'Kein Partner',
+      backToList: 'Zurück zur Liste',
+    },
+
+    subscriptionPackages: {
+      title: 'Subscription-Paketverwaltung',
+      description: 'Subscription-Pakete (Kickstart, Power, Power Plus, etc.)',
+      standardPackages: 'Standard-Pakete: Kickstart, Power, Power Plus',
+      deleteNote: 'Beim Löschen bleiben bestehende Zuordnungen erhalten',
+    },
+
+    partners: {
+      title: 'Partner-Verwaltung',
+      description: 'Partner für Partnership-Deals (L\'Oréal, Wella, etc.)',
+      partnerNote: 'Partner-Deals zählen zum ARR-Target von Head of Partnerships',
+      deleteNote: 'Beim Löschen bleiben bestehende Zuordnungen erhalten',
+    },
+
+    notifications: {
+      settings: 'Einstellungen',
+      settingsTitle: 'Benachrichtigungs-Einstellungen',
+    },
+
+    ui: {
+      backToAreaSelector: 'Zurück zur Bereichsauswahl',
+      openMenu: 'Menu öffnen',
+      closeMenu: 'Menu schließen',
+      resetToCalculation: 'Zurücksetzen auf Berechnung',
+      resetFilter: 'Filter zurücksetzen',
+      saveAll: 'Alle speichern',
+      errorSaving: 'Fehler beim Speichern',
+      allSettingsSaved: 'Alle Einstellungen erfolgreich gespeichert!',
+    },
+
     errors: {
       loadingSettings: 'Fehler beim Laden der Einstellungen',
       loadingGoLives: 'Fehler beim Laden der Go-Lives',
@@ -779,6 +857,14 @@ export const translations: Record<Language, Record<string, any>> = {
       current: 'Current',
       for: 'for',
       saving: 'Saving...',
+      creating: 'Creating...',
+      create: 'Create',
+      newEntry: 'Create new entry',
+      packageName: 'Package Name',
+      createdAt: 'Created at',
+      noData: 'No data available',
+      loadingData: 'Loading data...',
+      note: 'Note',
     },
     
     auth: {
@@ -1101,6 +1187,18 @@ export const translations: Record<Language, Record<string, any>> = {
       deleteConfirm: 'Are you sure you want to delete this Go-Live?',
       selectMonth: 'Select month',
       notes: 'Notes',
+      // Subscription Package
+      subscriptionPackage: 'Subscription Package',
+      noPackage: 'No Package (Standard)',
+      // Partnership
+      partnership: 'Partnership',
+      noPartner: 'No Partner (Standard)',
+      partnerHint: 'Will be assigned to Head of Partnerships internally',
+      // Enterprise
+      enterprise: 'Enterprise (≥5 locations)',
+      enterpriseHint: 'Will be assigned to Head of Partnerships internally',
+      // Tooltips
+      notCommissionRelevant: 'Not commission relevant',
     },
 
     monthDetail: {
@@ -1450,6 +1548,64 @@ export const translations: Record<Language, Record<string, any>> = {
       all: 'All',
     },
 
+    pipeline: {
+      showArchive: 'Show Archive',
+      archive: 'Archive',
+      archiving: 'Archiving...',
+      restore: 'Restore',
+      restoring: 'Restoring...',
+      newOpportunity: 'New Opportunity',
+      editLead: 'Edit Lead',
+      editOpportunity: 'Edit Opportunity',
+      changeStage: 'Change Stage',
+      openInSalesforce: 'Open in Salesforce',
+      archived: 'Archived',
+      notAssigned: 'Not assigned',
+      alreadyImported: 'Already imported',
+      readyToImport: 'Ready to import',
+      missingData: 'Missing data',
+      createOpportunity: 'Create Opportunity',
+      createLead: 'Create Lead',
+      nurture: 'Nurture',
+      // Lead Form
+      companyName: 'Company Name',
+      contactName: 'Contact Person',
+      usesSalonSoftware: 'Already uses salon software',
+      // Import
+      noPartnerSelected: 'No Partner',
+      backToList: 'Back to list',
+    },
+
+    subscriptionPackages: {
+      title: 'Subscription Package Management',
+      description: 'Subscription packages (Kickstart, Power, Power Plus, etc.)',
+      standardPackages: 'Standard packages: Kickstart, Power, Power Plus',
+      deleteNote: 'Deleting preserves existing assignments',
+    },
+
+    partners: {
+      title: 'Partner Management',
+      description: 'Partners for partnership deals (L\'Oréal, Wella, etc.)',
+      partnerNote: 'Partner deals count towards Head of Partnerships ARR target',
+      deleteNote: 'Deleting preserves existing assignments',
+    },
+
+    notifications: {
+      settings: 'Settings',
+      settingsTitle: 'Notification Settings',
+    },
+
+    ui: {
+      backToAreaSelector: 'Back to area selection',
+      openMenu: 'Open menu',
+      closeMenu: 'Close menu',
+      resetToCalculation: 'Reset to calculation',
+      resetFilter: 'Reset filter',
+      saveAll: 'Save all',
+      errorSaving: 'Error saving',
+      allSettingsSaved: 'All settings saved successfully!',
+    },
+
     errors: {
       loadingSettings: 'Error loading settings',
       loadingGoLives: 'Error loading Go-Lives',
@@ -1497,6 +1653,14 @@ export const translations: Record<Language, Record<string, any>> = {
       current: 'Jetz',
       for: 'för',
       saving: 'Am Speichere...',
+      creating: 'Am Aanlääje...',
+      create: 'Aanlääje',
+      newEntry: 'Neue Endrag aanlääje',
+      packageName: 'Paket-Name',
+      createdAt: 'Aanjelaat am',
+      noData: 'Kein Date do',
+      loadingData: 'Lade Date...',
+      note: 'Hinweis',
     },
     
     auth: {
@@ -1798,8 +1962,11 @@ export const translations: Record<Language, Record<string, any>> = {
     goLive: {
       title: 'Go-Live erfasse',
       editTitle: 'Go-Live ändere',
+      assignedTo: 'Zujeordnet aan',
       customerName: 'Kundenname',
       customerPlaceholder: 'z.B. Salon Schönheit',
+      oakId: 'OAK ID',
+      oakIdPlaceholder: 'z.B. 12345',
       goLiveDate: 'Go-Live Datum',
       subsMonthly: 'Subs €/Monat',
       subsMonthlyPlaceholder: 'z.B. 190',
@@ -1808,11 +1975,26 @@ export const translations: Record<Language, Record<string, any>> = {
       payArr: 'Pay ARR (€)',
       payArrHint: 'Noh 3 Monate endrage',
       payArrPlaceholder: 'z.B. 1200',
+      commissionRelevant: 'Provisjohn-relevant',
+      commissionRelevantHint: 'Weed för Provisjohn jeräschnet',
+      nonPlannableHint: 'Dä User hät kein Planung - nur ARR-Tracking',
       preview: 'Vörschau',
       addSuccess: 'Go-Live es drin!',
       deleteConfirm: 'Wellste dä Go-Live werklich fottschmieße?',
       selectMonth: 'Monat ussöke',
       notes: 'Notize',
+      // Subscription Package
+      subscriptionPackage: 'Subscription Paket',
+      noPackage: 'Kei Paket (Standard)',
+      // Partnership
+      partnership: 'Partnership',
+      noPartner: 'Kei Partner (Standard)',
+      partnerHint: 'Weed intern Head of Partnerships zujeordnet',
+      // Enterprise
+      enterprise: 'Filialunternehme (≥5 Filiale)',
+      enterpriseHint: 'Weed intern Head of Partnerships zujeordnet',
+      // Tooltips
+      notCommissionRelevant: 'Nit provisjohn-relevant',
     },
 
     monthDetail: {
@@ -2160,6 +2342,64 @@ export const translations: Record<Language, Record<string, any>> = {
       overdue: 'Övverfällich',
       stuck: 'Am Hänge',
       all: 'All',
+    },
+
+    pipeline: {
+      showArchive: 'Archiv zeije',
+      archive: 'Archiviere',
+      archiving: 'Am Archiviere...',
+      restore: 'Zeröckholle',
+      restoring: 'Am Zeröckholle...',
+      newOpportunity: 'Neue Opportunity',
+      editLead: 'Lead ändere',
+      editOpportunity: 'Opportunity ändere',
+      changeStage: 'Stage ändere',
+      openInSalesforce: 'En Salesforce öffne',
+      archived: 'Archiviert',
+      notAssigned: 'Nit zujeordnet',
+      alreadyImported: 'Ald importiert',
+      readyToImport: 'Bereit zom Import',
+      missingData: 'Date fähle',
+      createOpportunity: 'Opportunity aanlääje',
+      createLead: 'Lead aanlääje',
+      nurture: 'Zeröckjestellt',
+      // Lead Form
+      companyName: 'Firmaname',
+      contactName: 'Aanspräschpartner',
+      usesSalonSoftware: 'Hätt ald Salon-Software',
+      // Import
+      noPartnerSelected: 'Kei Partner',
+      backToList: 'Zeröck zor Liß',
+    },
+
+    subscriptionPackages: {
+      title: 'Subscription-Paketverwaltung',
+      description: 'Subscription-Pakete (Kickstart, Power, Power Plus, etc.)',
+      standardPackages: 'Standard-Pakete: Kickstart, Power, Power Plus',
+      deleteNote: 'Beim Fottschmieße blieve Zuordnunge erhalde',
+    },
+
+    partners: {
+      title: 'Partner-Verwaltung',
+      description: 'Partner för Partnership-Deals (L\'Oréal, Wella, etc.)',
+      partnerNote: 'Partner-Deals zähle zum ARR-Target vun Head of Partnerships',
+      deleteNote: 'Beim Fottschmieße blieve Zuordnunge erhalde',
+    },
+
+    notifications: {
+      settings: 'Enstellunge',
+      settingsTitle: 'Benachrichtijungs-Enstellunge',
+    },
+
+    ui: {
+      backToAreaSelector: 'Zeröck zor Bereichsauswahl',
+      openMenu: 'Menu öffne',
+      closeMenu: 'Menu zomache',
+      resetToCalculation: 'Zeröcksetze op Beräschnung',
+      resetFilter: 'Filter zeröcksetze',
+      saveAll: 'All speichere',
+      errorSaving: 'Fähler beim Speichere',
+      allSettingsSaved: 'All Enstellunge sin jespeichert!',
     },
 
     errors: {

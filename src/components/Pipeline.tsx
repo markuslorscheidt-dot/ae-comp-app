@@ -514,7 +514,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                 className="w-4 h-4 text-orange-600 rounded focus:ring-orange-500"
               />
               <span className={`text-sm ${showArchived ? 'text-orange-600 font-medium' : 'text-gray-500'}`}>
-                📦 Archiv anzeigen
+                📦 {t('pipeline.showArchive')}
               </span>
             </label>
             
@@ -662,7 +662,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                       </span>
                       <div>
                         <div className="flex items-center gap-2">
-                          {isArchived && <span className="text-orange-500" title="Archiviert">📦</span>}
+                          {isArchived && <span className="text-orange-500" title={t('pipeline.archived')}>📦</span>}
                           <h3 className={`font-medium ${isArchived ? 'text-gray-500' : 'text-gray-800'}`}>{lead.company_name}</h3>
                           <span className={`px-2 py-0.5 rounded text-xs ${
                             lead.lead_source === 'enterprise' ? 'bg-purple-100 text-purple-700' :
@@ -698,7 +698,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                             }
                           }}
                           className="px-3 py-1.5 text-sm bg-orange-100 text-orange-700 hover:bg-orange-200 rounded"
-                          title="Wiederherstellen"
+                          title={t('pipeline.restore')}
                         >
                           ♻️ Restore
                         </button>
@@ -713,7 +713,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                               setShowOpportunityForm(true);
                             }}
                             className="p-2 text-blue-600 hover:bg-blue-50 rounded"
-                            title="Neue Opportunity"
+                            title={t('pipeline.newOpportunity')}
                           >
                             ➕
                           </button>
@@ -724,7 +724,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                               setShowLeadForm(true);
                             }}
                             className="p-2 text-gray-400 hover:bg-gray-100 rounded"
-                            title="Lead bearbeiten"
+                            title={t('pipeline.editLead')}
                           >
                             ✏️
                           </button>
@@ -865,7 +865,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                     >
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
-                          {opp.archived && <span className="text-orange-500" title="Archiviert">📦</span>}
+                          {opp.archived && <span className="text-orange-500" title={t('pipeline.archived')}>📦</span>}
                           <span className={`font-medium ${opp.archived ? 'text-gray-500' : 'text-gray-800'}`}>{opp.name}</span>
                         </div>
                         <div className="text-sm text-gray-500 flex items-center gap-2">
@@ -883,7 +883,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                           <div className="text-gray-700 text-sm">{opp.assigned_user.name}</div>
                         ) : opp.sf_owner_name ? (
                           <div className="flex items-center gap-1">
-                            <span className="text-orange-500" title="Nicht zugewiesen">⚠️</span>
+                            <span className="text-orange-500" title={t('pipeline.notAssigned')}>⚠️</span>
                             <span className="text-gray-500 text-sm italic">{opp.sf_owner_name}</span>
                           </div>
                         ) : (
@@ -916,7 +916,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-blue-500 hover:text-blue-700"
-                            title="In Salesforce öffnen"
+                            title={t('pipeline.openInSalesforce')}
                           >
                             ☁️
                           </a>
@@ -935,7 +935,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                                 }
                               }}
                               className="px-2 py-1 text-xs bg-orange-100 text-orange-700 hover:bg-orange-200 rounded"
-                              title="Wiederherstellen"
+                              title={t('pipeline.restore')}
                             >
                               ♻️ Restore
                             </button>
@@ -945,7 +945,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                               <button
                                 onClick={() => setStageChangeOpp(opp)}
                                 className="p-1.5 text-gray-400 hover:bg-gray-100 rounded"
-                                title="Stage ändern"
+                                title={t('pipeline.changeStage')}
                               >
                                 →
                               </button>
@@ -956,7 +956,7 @@ export default function Pipeline({ user, allUsers }: PipelineProps) {
                                   setShowOpportunityForm(true);
                                 }}
                                 className="p-1.5 text-gray-400 hover:bg-gray-100 rounded"
-                                title="Bearbeiten"
+                                title={t('common.edit')}
                               >
                                 ✏️
                               </button>
