@@ -552,6 +552,12 @@ export const translations: Record<Language, Record<string, any>> = {
       selectAreaSubtitle: 'Wähle deinen Arbeitsbereich',
       comingSoon: 'Bereich in Entwicklung',
       comingSoonDesc: 'Dieser Bereich wird bald verfügbar sein.',
+      // Area Descriptions
+      dltDescription: 'Leadership Dashboards & Übersichten',
+      newBusinessDescription: 'Go-Lives, Pipeline, Provision & mehr',
+      expandingBusinessDescription: 'Customer Success & Revenue Expansion',
+      marketingDescription: 'Leadgenerierung & Kampagnen',
+      accessInfo: 'Du hast Zugriff auf {accessible} von {total} Bereichen',
     },
 
     roles: {
@@ -1348,6 +1354,12 @@ export const translations: Record<Language, Record<string, any>> = {
       selectAreaSubtitle: 'Choose your work area',
       comingSoon: 'Area in Development',
       comingSoonDesc: 'This area will be available soon.',
+      // Area Descriptions
+      dltDescription: 'Leadership Dashboards & Overviews',
+      newBusinessDescription: 'Go-Lives, Pipeline, Commission & more',
+      expandingBusinessDescription: 'Customer Success & Revenue Expansion',
+      marketingDescription: 'Lead Generation & Campaigns',
+      accessInfo: 'You have access to {accessible} of {total} areas',
     },
 
     roles: {
@@ -2144,6 +2156,12 @@ export const translations: Record<Language, Record<string, any>> = {
       selectAreaSubtitle: 'Wähl dinge Arbeitsbereich',
       comingSoon: 'Bereich kütt noch',
       comingSoonDesc: 'Dä Bereich kütt bald.',
+      // Area Descriptions
+      dltDescription: 'Leadership Dashboards & Övversichte',
+      newBusinessDescription: 'Go-Lives, Pipeline, Provisjohn & mieh',
+      expandingBusinessDescription: 'Customer Success & Revenue Expansion',
+      marketingDescription: 'Leadjenerierung & Kampagne',
+      accessInfo: 'Do häss Zogriff op {accessible} vun {total} Bereiche',
     },
 
     roles: {

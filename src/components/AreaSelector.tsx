@@ -145,10 +145,10 @@ export default function AreaSelector({ user, onSelectArea, onOpenAdmin, onSignOu
                 
                 {/* Description based on area */}
                 <p className={`text-xs md:text-sm ${isAccessible ? 'text-gray-600' : 'text-gray-400'}`}>
-                  {area === 'dlt' && 'Leadership Dashboards & Übersichten'}
-                  {area === 'new_business' && 'Go-Lives, Pipeline, Provision & mehr'}
-                  {area === 'expanding_business' && 'Customer Success & Revenue Expansion'}
-                  {area === 'marketing' && 'Leadgenerierung & Kampagnen'}
+                  {area === 'dlt' && t('areas.dltDescription')}
+                  {area === 'new_business' && t('areas.newBusinessDescription')}
+                  {area === 'expanding_business' && t('areas.expandingBusinessDescription')}
+                  {area === 'marketing' && t('areas.marketingDescription')}
                 </p>
 
                 {/* Lock indicator for inaccessible areas */}
@@ -175,7 +175,7 @@ export default function AreaSelector({ user, onSelectArea, onOpenAdmin, onSignOu
 
         {/* Info Text */}
         <p className="text-center text-blue-200/60 mt-6 md:mt-8 text-xs md:text-sm">
-          Du hast Zugriff auf {accessibleAreas.length} von {BUSINESS_AREAS.length} Bereichen
+          {t('areas.accessInfo', { accessible: accessibleAreas.length, total: BUSINESS_AREAS.length })}
         </p>
       </main>
     </div>
