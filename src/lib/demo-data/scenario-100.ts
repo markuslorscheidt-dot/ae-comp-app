@@ -10,6 +10,10 @@ const SALON_NAMES = [
   'Coiffeur Royal', 'Hair Expert', 'Beauty Deluxe', 'Salon Premium', 'Style Master',
 ];
 
+// Avg Pay Bill Terminal aus Settings (€50/Monat → €600/Jahr ARR Target)
+const AVG_PAY_BILL_TERMINAL = 50;
+const PAY_ARR_TARGET_PER_TERMINAL = AVG_PAY_BILL_TERMINAL * 12;
+
 function generateGoLives(
   userId: string,
   monthlySubsTargets: number[],
@@ -43,13 +47,29 @@ function generateGoLives(
         : Math.round(1800 + Math.random() * 1400);
       remainingSubsArr -= subsArr;
       
-      const hasPayArr = month <= 9 && Math.random() > 0.25;
-      const payArr = hasPayArr 
-        ? Math.round(Math.min(remainingPayArr / (numGoLives - i), 1000 + Math.random() * 1500))
-        : 0;
-      if (hasPayArr) remainingPayArr -= payArr;
-      
       const hasTerminal = Math.random() > 0.35;
+      
+      // Pay ARR Target wird bei Terminal gesetzt (aus Settings avg_pay_bill × 12)
+      const payArrTarget = hasTerminal ? PAY_ARR_TARGET_PER_TERMINAL : null;
+      
+      // Pay ARR Ist: Nach 3 Monaten haben wir Ist-Daten (Monate 1-9 haben Ist-Werte)
+      // Variation: Manchmal unter Target (Clawback), manchmal über Target, manchmal genau Target
+      const hasPayArr = month <= 9 && hasTerminal;
+      let payArr: number | null = null;
+      if (hasPayArr) {
+        // 60% erreichen Target oder mehr, 40% unter Target (führt zu Clawback)
+        const payVariation = Math.random();
+        if (payVariation < 0.4) {
+          // Unter Target: 50-95% vom Target
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (0.5 + Math.random() * 0.45));
+        } else if (payVariation < 0.8) {
+          // Target erreicht oder leicht drüber: 100-120%
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (1.0 + Math.random() * 0.2));
+        } else {
+          // Deutlich über Target: 120-180%
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (1.2 + Math.random() * 0.6));
+        }
+      }
       
       const day = Math.min(28, Math.floor(1 + Math.random() * 27));
       const dateStr = `2026-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -65,8 +85,12 @@ function generateGoLives(
         subs_monthly: Math.round(subsArr / 12),
         subs_arr: Math.round(subsArr),
         has_terminal: hasTerminal,
-        pay_arr: payArr || null,
+        pay_arr_target: payArrTarget,
+        pay_arr: payArr,
         commission_relevant: true,
+        partner_id: null,
+        is_enterprise: false,
+        subscription_package_id: null,
         notes: null,
         created_at: dateStr + 'T10:00:00Z',
         updated_at: dateStr + 'T10:00:00Z',

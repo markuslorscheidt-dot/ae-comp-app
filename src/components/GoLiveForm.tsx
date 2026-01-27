@@ -17,9 +17,10 @@ interface GoLiveFormProps {
   defaultCommissionRelevant?: boolean; // Default basierend auf Rolle des Empfängers
   currentUser?: User; // Für DebugPanel
   targetUserId?: string; // User für den der Go-Live angelegt wird
+  avgPayBillTerminal?: number; // NEU: Avg Pay Bill Terminal aus Einstellungen für Target-Berechnung
 }
 
-export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialData, canEnterPayARR = false, defaultCommissionRelevant = true, currentUser, targetUserId }: GoLiveFormProps) {
+export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialData, canEnterPayARR = false, defaultCommissionRelevant = true, currentUser, targetUserId, avgPayBillTerminal = 0 }: GoLiveFormProps) {
   const { t } = useLanguage();
   const [month, setMonth] = useState(initialData?.month || defaultMonth);
   const [customerName, setCustomerName] = useState(initialData?.customer_name || '');
@@ -27,7 +28,17 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
   const [goLiveDate, setGoLiveDate] = useState(initialData?.go_live_date || '');
   const [subsMonthly, setSubsMonthly] = useState(initialData?.subs_monthly?.toString() || '');
   const [hasTerminal, setHasTerminal] = useState(initialData?.has_terminal || false);
-  const [payArr, setPayArr] = useState(initialData?.pay_arr?.toString() || '');
+  // Pay monatlich Target (editierbar, Default aus Einstellungen)
+  // Bei Edit: aus pay_arr_target berechnen, sonst aus Settings
+  const [payMonthlyTarget, setPayMonthlyTarget] = useState(
+    initialData?.pay_arr_target 
+      ? (initialData.pay_arr_target / 12).toString() 
+      : avgPayBillTerminal > 0 ? avgPayBillTerminal.toString() : ''
+  );
+  // Pay ARR Target wird aus dem editierbaren Wert berechnet
+  const payArrTarget = hasTerminal && payMonthlyTarget ? parseFloat(payMonthlyTarget) * 12 : null;
+  // Pay monatlich Ist (nach 3 Monaten eintragen), wird als ARR (×12) gespeichert
+  const [payMonthly, setPayMonthly] = useState(initialData?.pay_arr ? (initialData.pay_arr / 12).toString() : '');
   const [commissionRelevant, setCommissionRelevant] = useState(initialData?.commission_relevant ?? defaultCommissionRelevant);
   // NEU: Partnership & Enterprise
   const [partnerId, setPartnerId] = useState<string | null>(initialData?.partner_id || null);
@@ -63,7 +74,8 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
         go_live_date: goLiveDate,
         subs_monthly: parseFloat(subsMonthly) || 0,
         has_terminal: hasTerminal,
-        pay_arr: payArr ? parseFloat(payArr) : null,
+        pay_arr_target: payArrTarget,  // NEU: Pay ARR Target aus Einstellungen
+        pay_arr: payMonthly ? parseFloat(payMonthly) * 12 : null,  // Pay ARR Ist (nach 3 Monaten)
         commission_relevant: commissionRelevant,
         // NEU: Partnership & Enterprise
         partner_id: partnerId,
@@ -82,7 +94,8 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
         setGoLiveDate('');
         setSubsMonthly('');
         setHasTerminal(false);
-        setPayArr('');
+        setPayMonthlyTarget(avgPayBillTerminal > 0 ? avgPayBillTerminal.toString() : '');  // Auf Default aus Settings zurücksetzen
+        setPayMonthly('');
         setPartnerId(null);
         setIsEnterprise(false);
         setSubscriptionPackageId(null);
@@ -259,6 +272,29 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
           </div>
         </div>
 
+        {/* Pay monatlich Target (erscheint wenn Terminal aktiviert) */}
+        {hasTerminal && (
+          <div className="p-2.5 md:p-3 bg-orange-50 rounded-lg border border-orange-200">
+            <label className="block text-xs md:text-sm font-medium text-orange-700 mb-1.5 md:mb-2">
+              💳 Pay monatlich Target (€)
+            </label>
+            <input
+              type="number"
+              value={payMonthlyTarget}
+              onChange={(e) => setPayMonthlyTarget(e.target.value)}
+              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-orange-300 rounded-lg focus:ring-2 focus:ring-orange-500 bg-white"
+              placeholder={`Default: €${avgPayBillTerminal}`}
+              min="0"
+              step="0.01"
+            />
+            {payArrTarget && payArrTarget > 0 && (
+              <p className="text-[10px] md:text-xs text-orange-600 mt-1">
+                → Pay ARR Target: <strong>{formatCurrency(payArrTarget)}</strong> (€{payMonthlyTarget} × 12)
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Partnership */}
         <div className="p-2.5 md:p-3 bg-purple-50 rounded-lg border border-purple-200">
           <label className="block text-xs md:text-sm font-medium text-purple-700 mb-1.5 md:mb-2">
@@ -292,19 +328,19 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
           </label>
         </div>
 
-        {/* Pay ARR (nur für Manager) */}
+        {/* Pay monatlich (nur für Manager) - wird als ARR (×12) gespeichert */}
         {canEnterPayARR && (
           <div>
             <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
-              {t('goLive.payArr')}
+              Pay monatlich (€)
               <span className="text-gray-400 font-normal ml-1 text-[10px] md:text-xs">({t('goLive.payArrHint')})</span>
             </label>
             <input
               type="number"
-              value={payArr}
-              onChange={(e) => setPayArr(e.target.value)}
+              value={payMonthly}
+              onChange={(e) => setPayMonthly(e.target.value)}
               className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-              placeholder={t('goLive.payArrPlaceholder')}
+              placeholder="z.B. 100"
               min="0"
               step="0.01"
             />
@@ -324,13 +360,33 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
                 <span className="text-gray-500 block text-[10px] md:text-xs">Terminal</span>
                 <span className="font-medium">{hasTerminal ? '✓' : '-'}</span>
               </div>
-              {payArr && (
+              {payArrTarget && payArrTarget > 0 && (
                 <div>
-                  <span className="text-gray-500 block text-[10px] md:text-xs">{t('goLive.payArr')}</span>
-                  <span className="font-medium text-orange-600">{formatCurrency(parseFloat(payArr))}</span>
+                  <span className="text-gray-500 block text-[10px] md:text-xs">Pay ARR Target</span>
+                  <span className="font-medium text-orange-600">{formatCurrency(payArrTarget)}</span>
+                  <span className="text-[9px] text-gray-400 block">(€{payMonthlyTarget}×12)</span>
                 </div>
               )}
             </div>
+            {/* Pay Ist (optional, nach 3 Monaten) */}
+            {payMonthly && (
+              <div className="mt-2 pt-2 border-t border-gray-200">
+                <div className="grid grid-cols-3 gap-2 text-xs md:text-sm">
+                  <div>
+                    <span className="text-gray-500 block text-[10px] md:text-xs">Pay ARR Ist</span>
+                    <span className="font-medium text-orange-600">{formatCurrency(parseFloat(payMonthly) * 12)}</span>
+                  </div>
+                  {payArrTarget && (
+                    <div>
+                      <span className="text-gray-500 block text-[10px] md:text-xs">Differenz</span>
+                      <span className={`font-medium ${(payArrTarget - parseFloat(payMonthly) * 12) > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {formatCurrency(payArrTarget - parseFloat(payMonthly) * 12)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

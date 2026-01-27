@@ -11,6 +11,10 @@ const SALON_NAMES = [
   'Glamour Hair', 'Top Cut', 'Friseur Exklusiv', 'Beauty Star', 'Hair Heaven',
 ];
 
+// Avg Pay Bill Terminal aus Settings (€50/Monat → €600/Jahr ARR Target)
+const AVG_PAY_BILL_TERMINAL = 50;
+const PAY_ARR_TARGET_PER_TERMINAL = AVG_PAY_BILL_TERMINAL * 12;
+
 function generateGoLives(
   userId: string,
   monthlySubsTargets: number[],
@@ -41,15 +45,28 @@ function generateGoLives(
         : Math.round(2000 + Math.random() * 1800);
       remainingSubsArr -= subsArr;
       
-      // Höhere Pay ARR bei Top-Performern
-      const hasPayArr = month <= 9 && Math.random() > 0.2;
-      const payArr = hasPayArr 
-        ? Math.round(Math.min(remainingPayArr / (numGoLives - i), 1200 + Math.random() * 1800))
-        : 0;
-      if (hasPayArr) remainingPayArr -= payArr;
-      
       // Höhere Terminal-Rate bei Überperformern
       const hasTerminal = Math.random() > 0.3;
+      
+      // Pay ARR Target wird bei Terminal gesetzt
+      const payArrTarget = hasTerminal ? PAY_ARR_TARGET_PER_TERMINAL : null;
+      
+      // Pay ARR Ist: Top-Performer erreichen oder übertreffen Target meistens
+      const hasPayArr = month <= 9 && hasTerminal;
+      let payArr: number | null = null;
+      if (hasPayArr) {
+        const payVariation = Math.random();
+        if (payVariation < 0.2) {
+          // Selten unter Target: 80-98% (wenig Clawback bei 120% Szenario)
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (0.8 + Math.random() * 0.18));
+        } else if (payVariation < 0.5) {
+          // Target erreicht oder leicht drüber: 100-130%
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (1.0 + Math.random() * 0.3));
+        } else {
+          // Deutlich über Target: 130-200% (Top-Performer)
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (1.3 + Math.random() * 0.7));
+        }
+      }
       
       const day = Math.min(28, Math.floor(1 + Math.random() * 27));
       const dateStr = `2026-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -65,8 +82,12 @@ function generateGoLives(
         subs_monthly: Math.round(subsArr / 12),
         subs_arr: Math.round(subsArr),
         has_terminal: hasTerminal,
-        pay_arr: payArr || null,
+        pay_arr_target: payArrTarget,
+        pay_arr: payArr,
         commission_relevant: true,
+        partner_id: null,
+        is_enterprise: false,
+        subscription_package_id: null,
         notes: null,
         created_at: dateStr + 'T10:00:00Z',
         updated_at: dateStr + 'T10:00:00Z',

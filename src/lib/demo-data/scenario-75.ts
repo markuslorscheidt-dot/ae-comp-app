@@ -10,6 +10,10 @@ const SALON_NAMES = [
   'Friseur König', 'Beauty Palace', 'Hair Studio Plus', 'Salon Modern', 'Style Zone',
 ];
 
+// Avg Pay Bill Terminal aus Settings (€50/Monat → €600/Jahr ARR Target)
+const AVG_PAY_BILL_TERMINAL = 50;
+const PAY_ARR_TARGET_PER_TERMINAL = AVG_PAY_BILL_TERMINAL * 12;
+
 function generateGoLives(
   userId: string,
   targetPercentage: number,
@@ -46,15 +50,29 @@ function generateGoLives(
         : Math.round(1500 + Math.random() * 1500);
       remainingSubsArr -= subsArr;
       
-      // Pay ARR (nur für Go-Lives in ersten 9 Monaten, da 3 Monate Verzögerung)
-      const hasPayArr = month <= 9 && Math.random() > 0.3;
-      const payArr = hasPayArr 
-        ? Math.round(Math.min(remainingPayArr / (numGoLives - i), 800 + Math.random() * 1200))
-        : 0;
-      if (hasPayArr) remainingPayArr -= payArr;
-      
       // Terminal (ca. 60% haben Terminal)
       const hasTerminal = Math.random() > 0.4;
+      
+      // Pay ARR Target wird bei Terminal gesetzt
+      const payArrTarget = hasTerminal ? PAY_ARR_TARGET_PER_TERMINAL : null;
+      
+      // Pay ARR Ist: Nach 3 Monaten haben wir Ist-Daten (Monate 1-9)
+      // 75% Szenario: Mehr Clawback (50% unter Target)
+      const hasPayArr = month <= 9 && hasTerminal;
+      let payArr: number | null = null;
+      if (hasPayArr) {
+        const payVariation = Math.random();
+        if (payVariation < 0.5) {
+          // Unter Target: 40-85% vom Target (mehr Clawback bei 75% Szenario)
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (0.4 + Math.random() * 0.45));
+        } else if (payVariation < 0.8) {
+          // Target erreicht: 95-110%
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (0.95 + Math.random() * 0.15));
+        } else {
+          // Leicht über Target: 110-140%
+          payArr = Math.round(PAY_ARR_TARGET_PER_TERMINAL * (1.1 + Math.random() * 0.3));
+        }
+      }
       
       // Zufälliges Datum im Monat
       const day = Math.min(28, Math.floor(1 + Math.random() * 27));
@@ -71,8 +89,12 @@ function generateGoLives(
         subs_monthly: Math.round(subsArr / 12),
         subs_arr: Math.round(subsArr),
         has_terminal: hasTerminal,
-        pay_arr: payArr || null,
+        pay_arr_target: payArrTarget,
+        pay_arr: payArr,
         commission_relevant: true,
+        partner_id: null,
+        is_enterprise: false,
+        subscription_package_id: null,
         notes: null,
         created_at: dateStr + 'T10:00:00Z',
         updated_at: dateStr + 'T10:00:00Z',

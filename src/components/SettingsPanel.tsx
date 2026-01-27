@@ -28,6 +28,7 @@ interface SettingsPanelProps {
   onSave: (updates: Partial<AESettings>) => Promise<{ error: any }>;
   onBack: () => void;
   currentUser?: User;
+  onRefetch?: () => void;  // Callback um Settings nach dem Speichern neu zu laden
 }
 
 interface AEPlanningData {
@@ -44,7 +45,7 @@ interface AEPlanningData {
 
 const MONTHS = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
 
-export default function SettingsPanel({ settings, onSave, onBack, currentUser }: SettingsPanelProps) {
+export default function SettingsPanel({ settings, onSave, onBack, currentUser, onRefetch }: SettingsPanelProps) {
   const { t } = useLanguage();
   const { users } = useAllUsers();
   const { settings: allSettings } = useAllSettings(2026);
@@ -133,6 +134,15 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser }:
   const yearlySubsArr = businessTotal * avgSubsBill * 12;
   
   // ========== INITIALISIERUNG ==========
+  // Settings-Werte synchronisieren wenn sich settings ändert (z.B. nach Navigation)
+  useEffect(() => {
+    if (settings) {
+      setAvgSubsBill(settings.avg_subs_bill || DEFAULT_SETTINGS.avg_subs_bill);
+      setAvgPayBillTerminal(settings.avg_pay_bill || DEFAULT_SETTINGS.avg_pay_bill);
+      setAvgPayBillTipping(settings.avg_pay_bill_tipping || DEFAULT_SETTINGS.avg_pay_bill_tipping);
+    }
+  }, [settings]);
+
   useEffect(() => {
     // Business Pay Terminals, Terminal Sales und Tipping initialisieren
     const payTerms = businessGoLives.map(gl => Math.round(gl * payTerminalsPercent / 100));
@@ -383,6 +393,11 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser }:
       
       setMessage('Alle Einstellungen erfolgreich gespeichert!');
       setTimeout(() => setMessage(''), 3000);
+      
+      // Settings im Dashboard neu laden damit die Änderungen übernommen werden
+      if (onRefetch) {
+        onRefetch();
+      }
     } catch (err: any) {
       setMessage(`Fehler: ${err.message}`);
     } finally {
@@ -770,8 +785,16 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser }:
             </div>
           </div>
         </div>
-        <div className="mt-3 p-3 bg-gray-50 rounded-lg text-sm">
-          <strong>Pay ARR:</strong> ({businessTotalTerminalSales} × €{avgPayBillTerminal} × 12) + ({businessTotalTipping} × €{avgPayBillTipping} × 12) = <strong className="text-orange-600">{formatCurrency(yearlyPayArr)}</strong>
+        <div className="mt-4 p-4 bg-gray-50 rounded-lg text-sm space-y-2">
+          <div>
+            <strong className="text-green-700">Subs ARR:</strong> ({businessTotal} × €{avgSubsBill} × 12) = <strong className="text-green-600">{formatCurrency(yearlySubsArr)}</strong>
+          </div>
+          <div>
+            <strong className="text-orange-700">Pay ARR:</strong> ({businessTotalTerminalSales} × €{avgPayBillTerminal} × 12) + ({businessTotalTipping} × €{avgPayBillTipping} × 12) = <strong className="text-orange-600">{formatCurrency(yearlyPayArr)}</strong>
+          </div>
+          <div className="border-t border-gray-300 pt-2 mt-2">
+            <strong className="text-purple-700">Gesamt ARR:</strong> {formatCurrency(yearlySubsArr)} + {formatCurrency(yearlyPayArr)} = <strong className="text-purple-600 text-base">{formatCurrency(yearlySubsArr + yearlyPayArr)}</strong>
+          </div>
         </div>
       </div>
 

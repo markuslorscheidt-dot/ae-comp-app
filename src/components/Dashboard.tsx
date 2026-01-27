@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { User, GoLive, AESettings, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, Challenge, BusinessArea, BUSINESS_AREA_LABELS } from '@/lib/types';
 import { useAllUsers, useSettingsForUser, useGoLivesForUser, useMultiUserData, updateGoLiveUniversal, deleteGoLiveUniversal, useChallenges, calculateChallengeProgress } from '@/lib/hooks';
 import { useLanguage } from '@/lib/LanguageContext';
@@ -124,7 +124,8 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
     settings: prodSettings, 
     loading: settingsLoading, 
     error: settingsError, 
-    updateSettings 
+    updateSettings,
+    refetch: refetchSettings
   } = useSettingsForUser(isDemo ? undefined : safeSelectedUserId);
   
   const { 
@@ -350,25 +351,21 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
         <div className="max-w-7xl mx-auto px-4">
           <div className="flex items-center justify-between h-14 md:h-16">
             {/* Left: Back Button + Title */}
-            <div className="flex items-center space-x-2 md:space-x-4 min-w-0 flex-1">
-              {onBackToAreaSelector && (
-                <button
-                  onClick={onBackToAreaSelector}
-                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors flex-shrink-0"
-                  title={t('ui.backToAreaSelector')}
-                >
-                  <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                  </svg>
-                </button>
-              )}
-              <div className="min-w-0">
-                <h1 className="text-base md:text-xl font-bold text-gray-800 truncate">{t('dashboard.title')}</h1>
-                <p className="text-xs text-gray-500 truncate hidden sm:block">
-                  {selectedArea && <span className="font-medium text-blue-600">{BUSINESS_AREA_LABELS[selectedArea]}</span>}
-                  {selectedArea && ' • '}
-                  {settings.year} • {settings.region}
-                </p>
+            <div className="flex items-center space-x-2 md:space-x-4 min-w-0 flex-shrink-0">
+              {/* Zurück zur Bereichsauswahl - immer sichtbar */}
+              <button
+                onClick={() => onBackToAreaSelector ? onBackToAreaSelector() : window.location.reload()}
+                className="flex items-center gap-1 text-gray-700 hover:text-blue-600 transition-colors flex-shrink-0"
+                title={t('ui.backToAreaSelector')}
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M15 19l-7-7 7-7" />
+                </svg>
+                <span className="text-lg font-bold hidden sm:inline">Bereiche</span>
+              </button>
+              <div className="hidden md:block border-l border-gray-300 h-6"></div>
+              <div className="min-w-0 hidden md:block">
+                <h1 className="text-base md:text-lg font-bold text-gray-800 truncate">{t('dashboard.title')}</h1>
               </div>
             </div>
             
@@ -650,6 +647,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             onSave={updateSettings}
             onBack={() => setCurrentView('year')}
             currentUser={user}
+            onRefetch={refetchSettings}
           />
         </main>
       </div>
@@ -710,6 +708,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             defaultCommissionRelevant={getDefaultCommissionRelevant(goLiveTargetUser.role)}
             currentUser={user}
             targetUserId={selectedUserId}
+            avgPayBillTerminal={settings?.avg_pay_bill || 0}
           />
         </main>
       </div>
@@ -932,8 +931,17 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
               <div className="flex justify-between">
                 <span className="hidden sm:inline">{t('dashboard.m3Provision')}:</span>
                 <span className="sm:hidden">M3:</span>
-                <span className="text-orange-600">{formatCurrency(ytdSummary.total_m3_provision)}</span>
+                <span className={ytdSummary.total_m3_provision >= 0 ? 'text-blue-600' : 'text-red-600'}>
+                  {ytdSummary.total_m3_provision >= 0 ? '+' : ''}{formatCurrency(ytdSummary.total_m3_provision)}
+                </span>
               </div>
+              {ytdSummary.total_pay_clawback > 0 && (
+                <div className="flex justify-between text-red-500 font-medium">
+                  <span className="hidden sm:inline">Clawback:</span>
+                  <span className="sm:hidden">CB:</span>
+                  <span>-{formatCurrency(ytdSummary.total_pay_clawback)}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1097,6 +1105,7 @@ interface ComparisonYearOverviewProps {
 
 function ComparisonYearOverview({ users, settingsMap, goLivesMap, onBack }: ComparisonYearOverviewProps) {
   const { t } = useLanguage();
+  const [expandedMonth, setExpandedMonth] = useState<number | null>(null);
 
   // Calculate summaries for each user
   const userSummaries = users.map(user => {
@@ -1110,56 +1119,154 @@ function ComparisonYearOverview({ users, settingsMap, goLivesMap, onBack }: Comp
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center space-x-4">
-          <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-lg transition">
-            {t('common.back')}
+      {/* Header - Responsive */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 md:mb-6">
+        <div className="flex items-center space-x-2 md:space-x-4">
+          <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-lg transition flex-shrink-0">
+            <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
           </button>
-          <h2 className="text-2xl font-bold text-gray-800">
-            Vergleich: {users.map(u => u.name).join(' vs ')}
+          <h2 className="text-lg md:text-2xl font-bold text-gray-800 truncate">
+            <span className="hidden sm:inline">Vergleich: </span>
+            {users.map(u => u.name.split(' ')[0]).join(' vs ')}
           </h2>
         </div>
       </div>
 
-      {/* Summary Cards per User */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      {/* Summary Cards per User - Responsive */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6 mb-6 md:mb-8">
         {userSummaries.map(({ user, summary }) => (
-          <div key={user.id} className="bg-white rounded-xl shadow-sm p-6">
-            <h3 className="text-lg font-bold text-gray-800 mb-4">{user.name}</h3>
+          <div key={user.id} className="bg-white rounded-lg md:rounded-xl shadow-sm p-4 md:p-6">
+            <h3 className="text-base md:text-lg font-bold text-gray-800 mb-3 md:mb-4 truncate">{user.name}</h3>
             {summary ? (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3 md:gap-4">
                 <div>
-                  <span className="text-sm text-gray-500">Subs ARR</span>
-                  <p className="text-xl font-bold text-green-600">{formatCurrency(summary.total_subs_actual)}</p>
-                  <p className={`text-sm ${getAchievementColor(summary.total_subs_achievement)}`}>
+                  <span className="text-xs md:text-sm text-gray-500">Subs ARR</span>
+                  <p className="text-lg md:text-xl font-bold text-green-600">{formatCurrency(summary.total_subs_actual)}</p>
+                  <p className={`text-xs md:text-sm ${getAchievementColor(summary.total_subs_achievement)}`}>
                     {formatPercent(summary.total_subs_achievement)}
                   </p>
                 </div>
                 <div>
-                  <span className="text-sm text-gray-500">Pay ARR</span>
-                  <p className="text-xl font-bold text-orange-600">{formatCurrency(summary.total_pay_actual)}</p>
-                  <p className={`text-sm ${getAchievementColor(summary.total_pay_achievement)}`}>
+                  <span className="text-xs md:text-sm text-gray-500">Pay ARR</span>
+                  <p className="text-lg md:text-xl font-bold text-orange-600">{formatCurrency(summary.total_pay_actual)}</p>
+                  <p className={`text-xs md:text-sm ${getAchievementColor(summary.total_pay_achievement)}`}>
                     {formatPercent(summary.total_pay_achievement)}
                   </p>
                 </div>
                 <div>
-                  <span className="text-sm text-gray-500">Go-Lives</span>
-                  <p className="text-xl font-bold text-gray-800">{summary.total_go_lives}</p>
+                  <span className="text-xs md:text-sm text-gray-500">Go-Lives</span>
+                  <p className="text-lg md:text-xl font-bold text-gray-800">{summary.total_go_lives}</p>
                 </div>
                 <div>
-                  <span className="text-sm text-gray-500">Provision</span>
-                  <p className="text-xl font-bold text-purple-600">{formatCurrency(summary.total_provision)}</p>
+                  <span className="text-xs md:text-sm text-gray-500">Provision</span>
+                  <p className="text-lg md:text-xl font-bold text-purple-600">{formatCurrency(summary.total_provision)}</p>
                 </div>
               </div>
             ) : (
-              <p className="text-gray-500">Keine Daten verfügbar</p>
+              <p className="text-gray-500 text-sm">Keine Daten verfügbar</p>
             )}
           </div>
         ))}
       </div>
 
-      {/* Monthly Comparison Table */}
-      <div className="bg-white rounded-xl shadow-sm p-6 overflow-x-auto">
+      {/* Mobile: Monthly Cards (collapsible) */}
+      <div className="md:hidden space-y-2 mb-6">
+        <h3 className="text-base font-bold text-gray-800 mb-3">Monatlicher Vergleich</h3>
+        {months.map(month => {
+          const isExpanded = expandedMonth === month;
+          return (
+            <div key={month} className="bg-white rounded-lg shadow-sm overflow-hidden">
+              <button
+                onClick={() => setExpandedMonth(isExpanded ? null : month)}
+                className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-50 transition"
+              >
+                <span className="font-medium text-gray-800">{t(`months.${month}`)}</span>
+                <div className="flex items-center gap-3">
+                  {/* Quick summary */}
+                  <div className="flex gap-2 text-xs">
+                    {userSummaries.map(({ user, summary }) => {
+                      const monthData = summary?.monthly_results.find(r => r.month === month);
+                      return (
+                        <span key={user.id} className="text-purple-600 font-medium">
+                          {monthData ? formatCurrency(monthData.total_provision) : '-'}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <svg 
+                    className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </div>
+              </button>
+              {isExpanded && (
+                <div className="px-4 pb-4 space-y-3 border-t">
+                  {userSummaries.map(({ user, summary }) => {
+                    const monthData = summary?.monthly_results.find(r => r.month === month);
+                    return (
+                      <div key={user.id} className="pt-3">
+                        <p className="text-sm font-medium text-gray-700 mb-2">{user.name}</p>
+                        <div className="grid grid-cols-3 gap-2 text-xs">
+                          <div>
+                            <span className="text-gray-500 block">Subs</span>
+                            <span className="text-green-600 font-medium">
+                              {monthData ? formatCurrency(monthData.subs_actual) : '-'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 block">Pay</span>
+                            <span className="text-orange-600 font-medium">
+                              {monthData ? formatCurrency(monthData.pay_actual) : '-'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 block">Provision</span>
+                            <span className="text-purple-600 font-bold">
+                              {monthData ? formatCurrency(monthData.total_provision) : '-'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        
+        {/* Mobile: Totals Card */}
+        <div className="bg-gray-100 rounded-lg shadow-sm p-4 mt-4">
+          <h4 className="font-bold text-gray-800 mb-3">{t('common.total').toUpperCase()}</h4>
+          <div className="space-y-3">
+            {userSummaries.map(({ user, summary }) => (
+              <div key={user.id} className="flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-700">{user.name}</span>
+                <div className="flex gap-3 text-xs">
+                  <span className="text-green-700 font-medium">
+                    {summary ? formatCurrency(summary.total_subs_actual) : '-'}
+                  </span>
+                  <span className="text-orange-700 font-medium">
+                    {summary ? formatCurrency(summary.total_pay_actual) : '-'}
+                  </span>
+                  <span className="text-purple-700 font-bold">
+                    {summary ? formatCurrency(summary.total_provision) : '-'}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Desktop: Monthly Comparison Table */}
+      <div className="hidden md:block bg-white rounded-xl shadow-sm p-4 md:p-6 overflow-x-auto">
         <h3 className="text-lg font-bold text-gray-800 mb-4">Monatlicher Vergleich</h3>
         <table className="w-full text-sm">
           <thead>
@@ -1174,11 +1281,11 @@ function ComparisonYearOverview({ users, settingsMap, goLivesMap, onBack }: Comp
             <tr className="border-b">
               <th></th>
               {users.map(user => (
-                <>
-                  <th key={`${user.id}-subs`} className="text-right py-2 px-1 text-xs text-green-600 border-l">Subs</th>
-                  <th key={`${user.id}-pay`} className="text-right py-2 px-1 text-xs text-orange-600">Pay</th>
-                  <th key={`${user.id}-prov`} className="text-right py-2 px-1 text-xs text-purple-600">Prov.</th>
-                </>
+                <React.Fragment key={user.id}>
+                  <th className="text-right py-2 px-1 text-xs text-green-600 border-l">Subs</th>
+                  <th className="text-right py-2 px-1 text-xs text-orange-600">Pay</th>
+                  <th className="text-right py-2 px-1 text-xs text-purple-600">Prov.</th>
+                </React.Fragment>
               ))}
             </tr>
           </thead>
@@ -1189,17 +1296,17 @@ function ComparisonYearOverview({ users, settingsMap, goLivesMap, onBack }: Comp
                 {userSummaries.map(({ user, summary }) => {
                   const monthData = summary?.monthly_results.find(r => r.month === month);
                   return (
-                    <>
-                      <td key={`${user.id}-${month}-subs`} className="py-2 px-1 text-right text-green-600 border-l">
+                    <React.Fragment key={user.id}>
+                      <td className="py-2 px-1 text-right text-green-600 border-l">
                         {monthData ? formatCurrency(monthData.subs_actual) : '-'}
                       </td>
-                      <td key={`${user.id}-${month}-pay`} className="py-2 px-1 text-right text-orange-600">
+                      <td className="py-2 px-1 text-right text-orange-600">
                         {monthData ? formatCurrency(monthData.pay_actual) : '-'}
                       </td>
-                      <td key={`${user.id}-${month}-prov`} className="py-2 px-1 text-right text-purple-600 font-medium">
+                      <td className="py-2 px-1 text-right text-purple-600 font-medium">
                         {monthData ? formatCurrency(monthData.total_provision) : '-'}
                       </td>
-                    </>
+                    </React.Fragment>
                   );
                 })}
               </tr>
@@ -1209,17 +1316,17 @@ function ComparisonYearOverview({ users, settingsMap, goLivesMap, onBack }: Comp
             <tr className="bg-gray-100 font-bold border-t-2">
               <td className="py-3 px-2">{t('common.total').toUpperCase()}</td>
               {userSummaries.map(({ user, summary }) => (
-                <>
-                  <td key={`${user.id}-total-subs`} className="py-3 px-1 text-right text-green-700 border-l">
+                <React.Fragment key={user.id}>
+                  <td className="py-3 px-1 text-right text-green-700 border-l">
                     {summary ? formatCurrency(summary.total_subs_actual) : '-'}
                   </td>
-                  <td key={`${user.id}-total-pay`} className="py-3 px-1 text-right text-orange-700">
+                  <td className="py-3 px-1 text-right text-orange-700">
                     {summary ? formatCurrency(summary.total_pay_actual) : '-'}
                   </td>
-                  <td key={`${user.id}-total-prov`} className="py-3 px-1 text-right text-purple-700">
+                  <td className="py-3 px-1 text-right text-purple-700">
                     {summary ? formatCurrency(summary.total_provision) : '-'}
                   </td>
-                </>
+                </React.Fragment>
               ))}
             </tr>
           </tfoot>

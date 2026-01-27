@@ -284,18 +284,80 @@ export default function YearOverview({
       </div>
 
       {/* Reihe 3: Provisionen - Responsive */}
-      <div className="grid grid-cols-3 gap-2 md:gap-4 mb-4 md:mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 mb-4 md:mb-8">
+        {/* M0 Provision (Subs + Terminal + Pay Target) */}
         <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-green-500">
           <span className="text-xs md:text-sm text-gray-500">{t('yearOverview.m0Provision')}</span>
           <p className="text-base md:text-2xl font-bold text-green-600">{formatCurrency(yearSummary.total_m0_provision)}</p>
+          <div className="text-[10px] md:text-xs text-gray-400 mt-1 space-y-0.5">
+            <div className="flex justify-between">
+              <span>Subs:</span>
+              <span>{formatCurrency(yearSummary.monthly_results.reduce((s, r) => s + r.subs_provision, 0))}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Terminal:</span>
+              <span>{formatCurrency(yearSummary.monthly_results.reduce((s, r) => s + r.terminal_provision, 0))}</span>
+            </div>
+            <div className="flex justify-between text-orange-500">
+              <span>Pay (Target):</span>
+              <span>{formatCurrency(yearSummary.total_pay_m0_provision)}</span>
+            </div>
+          </div>
         </div>
-        <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-orange-500">
+        
+        {/* M3 Anpassung (Pay Ist vs Target) */}
+        <div className={`bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 ${yearSummary.total_m3_provision >= 0 ? 'border-blue-500' : 'border-red-500'}`}>
           <span className="text-xs md:text-sm text-gray-500">{t('yearOverview.m3Provision')}</span>
-          <p className="text-base md:text-2xl font-bold text-orange-600">{formatCurrency(yearSummary.total_m3_provision)}</p>
+          <p className={`text-base md:text-2xl font-bold ${yearSummary.total_m3_provision >= 0 ? 'text-blue-600' : 'text-red-600'}`}>
+            {yearSummary.total_m3_provision >= 0 ? '+' : ''}{formatCurrency(yearSummary.total_m3_provision)}
+          </p>
+          <div className="text-[10px] md:text-xs text-gray-400 mt-1 space-y-0.5">
+            <div className="flex justify-between">
+              <span>Pay Ist:</span>
+              <span className="text-orange-500">{formatCurrency(yearSummary.monthly_results.reduce((s, r) => s + r.pay_provision, 0))}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Pay M0:</span>
+              <span>-{formatCurrency(yearSummary.total_pay_m0_provision)}</span>
+            </div>
+          </div>
         </div>
+        
+        {/* Clawback (wenn vorhanden) */}
+        <div className={`bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 ${yearSummary.total_pay_clawback > 0 ? 'border-red-500 bg-red-50' : 'border-gray-300'}`}>
+          <span className="text-xs md:text-sm text-gray-500">Clawback</span>
+          <p className={`text-base md:text-2xl font-bold ${yearSummary.total_pay_clawback > 0 ? 'text-red-600' : 'text-gray-400'}`}>
+            {yearSummary.total_pay_clawback > 0 ? `-${formatCurrency(yearSummary.total_pay_clawback)}` : '€0'}
+          </p>
+          {yearSummary.total_pay_clawback > 0 && (
+            <div className="text-[10px] md:text-xs text-red-500 mt-1">
+              <div className="flex justify-between">
+                <span>Target-Ist:</span>
+                <span>{formatCurrency(yearSummary.total_pay_clawback_base)}</span>
+              </div>
+            </div>
+          )}
+          {yearSummary.total_pay_clawback === 0 && (
+            <p className="text-[10px] md:text-xs text-gray-400 mt-1">Kein Clawback</p>
+          )}
+        </div>
+        
+        {/* Gesamt */}
         <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-purple-500">
           <span className="text-xs md:text-sm text-gray-500">{t('yearOverview.total')}</span>
           <p className="text-base md:text-2xl font-bold text-purple-600">{formatCurrency(yearSummary.total_provision)}</p>
+          <div className="text-[10px] md:text-xs text-gray-400 mt-1 space-y-0.5">
+            <div className="flex justify-between">
+              <span>M0:</span>
+              <span className="text-green-500">{formatCurrency(yearSummary.total_m0_provision)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>M3:</span>
+              <span className={yearSummary.total_m3_provision >= 0 ? 'text-blue-500' : 'text-red-500'}>
+                {yearSummary.total_m3_provision >= 0 ? '+' : ''}{formatCurrency(yearSummary.total_m3_provision)}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 

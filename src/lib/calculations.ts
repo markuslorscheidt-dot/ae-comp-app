@@ -57,6 +57,11 @@ export function getTerminalRate(
  * Berechnet das Monatsergebnis
  * Für ARR-Tracking: Alle Go-Lives zählen
  * Für Provision: Nur commission_relevant Go-Lives
+ * 
+ * NEU: Pay Provision in M0 (Target) und M3 (Ist) aufgeteilt
+ * - M0: Provision wird auf Basis von pay_arr_target berechnet und sofort ausgezahlt
+ * - M3: Nach 3 Monaten wird pay_arr (Ist) verglichen
+ *       Falls Ist < Target → Clawback (Rückforderung der Differenz)
  */
 export function calculateMonthlyResult(
   month: number,
@@ -78,10 +83,15 @@ export function calculateMonthlyResult(
   const subsActualTotal = monthGoLives.reduce((sum, gl) => sum + (gl.subs_arr || 0), 0);
   const payActualTotal = monthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || 0), 0);
   
+  // Pay ARR Target (Summe der Targets bei Go-Live, alle Go-Lives)
+  const payArrTargetTotal = monthGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || 0), 0);
+  
   // Provision nur für commission_relevant Go-Lives
   const commissionTerminals = commissionGoLives.filter(gl => gl.has_terminal).length;
   const subsActualCommission = commissionGoLives.reduce((sum, gl) => sum + (gl.subs_arr || 0), 0);
   const payActualCommission = commissionGoLives.reduce((sum, gl) => sum + (gl.pay_arr || 0), 0);
+  // Pay ARR Target für commission_relevant Go-Lives
+  const payArrTargetCommission = commissionGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || 0), 0);
   
   // Subs ARR (Zielerreichung basiert auf commission_relevant)
   const subsTarget = settings.monthly_subs_targets?.[month - 1] || 0;
@@ -95,16 +105,38 @@ export function calculateMonthlyResult(
   const terminalRate = getTerminalRate(commissionTerminals, commissionGoLivesCount, settings);
   const terminalProvision = commissionTerminals * terminalRate;
   
-  // Pay ARR (Zielerreichung basiert auf commission_relevant)
+  // Pay ARR Target aus Settings (für Zielerreichung)
   const payTarget = settings.monthly_pay_targets?.[month - 1] || 0;
-  const payAchievement = payTarget > 0 ? payActualCommission / payTarget : 0;
   const payTiers = settings.pay_tiers || DEFAULT_PAY_TIERS;
+  
+  // ========== M0: Pay Provision auf TARGET-Basis ==========
+  // Bei Go-Live wird sofort Provision auf Basis des pay_arr_target gezahlt
+  const payM0Achievement = payTarget > 0 ? payArrTargetCommission / payTarget : 0;
+  const payM0Rate = getProvisionRate(payM0Achievement, payTiers);
+  const payM0Provision = payArrTargetCommission * payM0Rate;
+  
+  // ========== M3: Pay Provision auf IST-Basis & Clawback ==========
+  // Nach 3 Monaten wird der tatsächliche Pay ARR verglichen
+  const payAchievement = payTarget > 0 ? payActualCommission / payTarget : 0;
   const payRate = getProvisionRate(payAchievement, payTiers);
   const payProvision = payActualCommission * payRate;
   
-  // Totals
-  const m0Provision = subsProvision + terminalProvision;
-  const m3Provision = payProvision;
+  // Clawback: Differenz zwischen Target und Ist (nur wenn Target > Ist)
+  const payClawbackBase = Math.max(0, payArrTargetCommission - payActualCommission);
+  // Clawback-Betrag: Die Differenz × die ursprüngliche M0-Rate
+  const payClawback = payClawbackBase * payM0Rate;
+  
+  // ========== TOTALS ==========
+  // M0 Provision: Subs + Terminal + Pay auf Target-Basis
+  const m0Provision = subsProvision + terminalProvision + payM0Provision;
+  
+  // M3 Provision: Differenz zwischen Ist-Provision und M0-Provision
+  // Kann negativ sein (= Clawback), wenn Ist < Target
+  // Positiv wenn Ist > Target (mehr Provision)
+  // Hinweis: Wir berechnen die Netto-Anpassung bei M3
+  const m3Provision = payProvision - payM0Provision;
+  
+  // Total: M0 + M3 (entspricht: Subs + Terminal + tatsächliche Pay Provision)
   const totalProvision = m0Provision + m3Provision;
   
   return {
@@ -115,17 +147,27 @@ export function calculateMonthlyResult(
     terminals_count: terminalsCount,
     terminal_penetration: terminalPenetration,
     subs_target: subsTarget,
-    subs_actual: subsActualTotal, // Zeigt gesamten ARR an
-    subs_achievement: subsAchievement, // Basiert auf commission_relevant
+    subs_actual: subsActualTotal,
+    subs_achievement: subsAchievement,
     subs_rate: subsRate,
     subs_provision: subsProvision,
     terminal_rate: terminalRate,
     terminal_provision: terminalProvision,
+    // Pay M0 (Target)
+    pay_arr_target_total: payArrTargetTotal,
     pay_target: payTarget,
-    pay_actual: payActualTotal, // Zeigt gesamten ARR an
-    pay_achievement: payAchievement, // Basiert auf commission_relevant
+    pay_m0_achievement: payM0Achievement,
+    pay_m0_rate: payM0Rate,
+    pay_m0_provision: payM0Provision,
+    // Pay M3 (Ist)
+    pay_actual: payActualTotal,
+    pay_achievement: payAchievement,
     pay_rate: payRate,
     pay_provision: payProvision,
+    // Clawback
+    pay_clawback_base: payClawbackBase,
+    pay_clawback: payClawback,
+    // Totals
     m0_provision: m0Provision,
     m3_provision: m3Provision,
     total_provision: totalProvision
@@ -152,6 +194,13 @@ export function calculateYearSummary(
   const totalSubsActual = monthlyResults.reduce((sum, r) => sum + r.subs_actual, 0);
   const totalPayTarget = monthlyResults.reduce((sum, r) => sum + r.pay_target, 0);
   const totalPayActual = monthlyResults.reduce((sum, r) => sum + r.pay_actual, 0);
+  // NEU: Pay ARR Target und M0 Provision
+  const totalPayArrTarget = monthlyResults.reduce((sum, r) => sum + r.pay_arr_target_total, 0);
+  const totalPayM0Provision = monthlyResults.reduce((sum, r) => sum + r.pay_m0_provision, 0);
+  // NEU: Clawback
+  const totalPayClawbackBase = monthlyResults.reduce((sum, r) => sum + r.pay_clawback_base, 0);
+  const totalPayClawback = monthlyResults.reduce((sum, r) => sum + r.pay_clawback, 0);
+  // Totals
   const totalM0Provision = monthlyResults.reduce((sum, r) => sum + r.m0_provision, 0);
   const totalM3Provision = monthlyResults.reduce((sum, r) => sum + r.m3_provision, 0);
   
@@ -162,9 +211,17 @@ export function calculateYearSummary(
     total_subs_target: totalSubsTarget,
     total_subs_actual: totalSubsActual,
     total_subs_achievement: totalSubsTarget > 0 ? totalSubsActual / totalSubsTarget : 0,
+    // Pay Target (M0)
+    total_pay_arr_target: totalPayArrTarget,
     total_pay_target: totalPayTarget,
+    total_pay_m0_provision: totalPayM0Provision,
+    // Pay Ist (M3)
     total_pay_actual: totalPayActual,
     total_pay_achievement: totalPayTarget > 0 ? totalPayActual / totalPayTarget : 0,
+    // Clawback
+    total_pay_clawback_base: totalPayClawbackBase,
+    total_pay_clawback: totalPayClawback,
+    // Totals
     total_m0_provision: totalM0Provision,
     total_m3_provision: totalM3Provision,
     total_provision: totalM0Provision + totalM3Provision,
@@ -190,6 +247,13 @@ export function calculateYTDSummary(
   const totalSubsActual = ytdResults.reduce((sum, r) => sum + r.subs_actual, 0);
   const totalPayTarget = ytdResults.reduce((sum, r) => sum + r.pay_target, 0);
   const totalPayActual = ytdResults.reduce((sum, r) => sum + r.pay_actual, 0);
+  // NEU: Pay ARR Target und M0 Provision
+  const totalPayArrTarget = ytdResults.reduce((sum, r) => sum + r.pay_arr_target_total, 0);
+  const totalPayM0Provision = ytdResults.reduce((sum, r) => sum + r.pay_m0_provision, 0);
+  // NEU: Clawback
+  const totalPayClawbackBase = ytdResults.reduce((sum, r) => sum + r.pay_clawback_base, 0);
+  const totalPayClawback = ytdResults.reduce((sum, r) => sum + r.pay_clawback, 0);
+  // Totals
   const totalM0Provision = ytdResults.reduce((sum, r) => sum + r.m0_provision, 0);
   const totalM3Provision = ytdResults.reduce((sum, r) => sum + r.m3_provision, 0);
   
@@ -200,9 +264,17 @@ export function calculateYTDSummary(
     total_subs_target: totalSubsTarget,
     total_subs_actual: totalSubsActual,
     total_subs_achievement: totalSubsTarget > 0 ? totalSubsActual / totalSubsTarget : 0,
+    // Pay Target (M0)
+    total_pay_arr_target: totalPayArrTarget,
     total_pay_target: totalPayTarget,
+    total_pay_m0_provision: totalPayM0Provision,
+    // Pay Ist (M3)
     total_pay_actual: totalPayActual,
     total_pay_achievement: totalPayTarget > 0 ? totalPayActual / totalPayTarget : 0,
+    // Clawback
+    total_pay_clawback_base: totalPayClawbackBase,
+    total_pay_clawback: totalPayClawback,
+    // Totals
     total_m0_provision: totalM0Provision,
     total_m3_provision: totalM3Provision,
     total_provision: totalM0Provision + totalM3Provision,

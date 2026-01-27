@@ -201,7 +201,8 @@ export interface GoLive {
   subs_monthly: number;      // Monatlicher Subs-Betrag
   subs_arr: number;          // = subs_monthly * 12
   has_terminal: boolean;
-  pay_arr: number | null;    // Wird nach 3 Monaten eingetragen
+  pay_arr_target: number | null;  // NEU: Pay ARR Target bei Go-Live (aus avg_pay_bill_terminal × 12)
+  pay_arr: number | null;    // Pay ARR Ist (nach 3 Monaten eintragen)
   commission_relevant: boolean; // Provisions-relevant ja/nein
   // NEU: Partnership & Enterprise Zuordnung
   partner_id: string | null;    // Partner-ID für Partnership-Deals
@@ -230,16 +231,24 @@ export interface MonthlyResult {
   // Terminal
   terminal_rate: number;
   terminal_provision: number;
-  // Pay ARR
-  pay_target: number;
-  pay_actual: number;
-  pay_achievement: number;
-  pay_rate: number;
-  pay_provision: number;
+  // Pay ARR - Target (M0)
+  pay_arr_target_total: number;     // Summe aller pay_arr_target bei Go-Live
+  pay_target: number;               // Monatliches Pay Target aus Settings
+  pay_m0_achievement: number;       // pay_arr_target_total / pay_target
+  pay_m0_rate: number;              // Provisions-Rate für M0
+  pay_m0_provision: number;         // M0 Provision auf Target-Basis
+  // Pay ARR - Ist (M3)
+  pay_actual: number;               // Tatsächlicher Pay ARR (nach 3 Monaten)
+  pay_achievement: number;          // pay_actual / pay_target
+  pay_rate: number;                 // Provisions-Rate für Ist
+  pay_provision: number;            // Volle Provision auf Ist-Basis
+  // Clawback (M3)
+  pay_clawback_base: number;        // Differenz: pay_arr_target_total - pay_actual (wenn positiv)
+  pay_clawback: number;             // Clawback-Betrag: pay_clawback_base × rate
   // Totals
-  m0_provision: number;  // Subs + Terminal
-  m3_provision: number;  // Pay
-  total_provision: number;
+  m0_provision: number;             // Subs + Terminal + Pay M0
+  m3_provision: number;             // Pay Ist - Pay M0 (kann negativ sein = Clawback)
+  total_provision: number;          // m0_provision + m3_provision
 }
 
 export interface YearSummary {
@@ -249,11 +258,19 @@ export interface YearSummary {
   total_subs_target: number;
   total_subs_actual: number;
   total_subs_achievement: number;
-  total_pay_target: number;
+  // Pay Target (M0)
+  total_pay_arr_target: number;     // Summe aller pay_arr_target bei Go-Live
+  total_pay_target: number;         // Summe aller Pay Targets aus Settings
+  total_pay_m0_provision: number;   // M0 Provision auf Target-Basis
+  // Pay Ist (M3)
   total_pay_actual: number;
   total_pay_achievement: number;
-  total_m0_provision: number;
-  total_m3_provision: number;
+  // Clawback
+  total_pay_clawback_base: number;  // Summe der Differenzen (Target - Ist)
+  total_pay_clawback: number;       // Summe aller Clawbacks
+  // Totals
+  total_m0_provision: number;       // Subs + Terminal + Pay M0
+  total_m3_provision: number;       // Pay Ist Differenz (kann negativ = Clawback sein)
   total_provision: number;
   monthly_results: MonthlyResult[];
 }
