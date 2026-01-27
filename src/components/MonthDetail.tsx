@@ -133,6 +133,11 @@ export default function MonthDetail({
 
   const openEditModal = (gl: GoLive) => {
     setEditingGoLive(gl);
+    // Default für Pay monatlich Target: aus Go-Live oder aus Settings (avg_pay_bill)
+    const defaultPayMonthlyTarget = gl.pay_arr_target 
+      ? (gl.pay_arr_target / 12).toString() 
+      : (settings.avg_pay_bill || '').toString();
+    
     setEditForm({
       user_id: gl.user_id,
       customer_name: gl.customer_name,
@@ -140,7 +145,7 @@ export default function MonthDetail({
       go_live_date: gl.go_live_date,
       subs_monthly: gl.subs_monthly.toString(),
       has_terminal: gl.has_terminal,
-      pay_arr_target: gl.pay_arr_target ? (gl.pay_arr_target / 12).toString() : '',  // NEU: Als monatlicher Wert
+      pay_arr_target: defaultPayMonthlyTarget,  // Default aus Settings wenn leer
       pay_arr: gl.pay_arr?.toString() || '',
       commission_relevant: gl.commission_relevant !== false,
       partner_id: gl.partner_id || null,
