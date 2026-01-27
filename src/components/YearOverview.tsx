@@ -95,7 +95,8 @@ export default function YearOverview({
         comparison = (a.has_terminal ? 1 : 0) - (b.has_terminal ? 1 : 0);
         break;
       case 'pay_arr':
-        comparison = (a.pay_arr || 0) - (b.pay_arr || 0);
+        // Sortiere nach pay_arr_target (oder pay_arr wenn vorhanden)
+        comparison = (a.pay_arr_target || a.pay_arr || 0) - (b.pay_arr_target || b.pay_arr || 0);
         break;
       case 'commission_relevant':
         comparison = (a.commission_relevant !== false ? 1 : 0) - (b.commission_relevant !== false ? 1 : 0);
@@ -556,7 +557,7 @@ export default function YearOverview({
                           </div>
                           <div>
                             <span className="text-gray-500 block">Pay</span>
-                            <span className="font-medium text-orange-600">{gl.pay_arr ? formatCurrency(gl.pay_arr) : '-'}</span>
+                            <span className="font-medium text-orange-600">{gl.pay_arr_target || gl.pay_arr ? formatCurrency(gl.pay_arr_target || gl.pay_arr || 0) : '-'}</span>
                           </div>
                           <div>
                             <span className="text-gray-500 block">Terminal</span>
@@ -579,7 +580,7 @@ export default function YearOverview({
                         </div>
                         <div>
                           <span className="text-gray-600 block">Pay ARR</span>
-                          <span className="font-bold text-orange-700">{formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || 0), 0))}</span>
+                          <span className="font-bold text-orange-700">{formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || gl.pay_arr || 0), 0))}</span>
                         </div>
                         <div>
                           <span className="text-gray-600 block">Terminals</span>
@@ -661,7 +662,16 @@ export default function YearOverview({
                               )}
                             </td>
                             <td className="py-3 px-3 text-right text-orange-600">
-                              {gl.pay_arr ? formatCurrency(gl.pay_arr) : '-'}
+                              {gl.pay_arr_target || gl.pay_arr ? (
+                                <div>
+                                  <span>{formatCurrency(gl.pay_arr_target || gl.pay_arr || 0)}</span>
+                                  {gl.pay_arr && gl.pay_arr_target && (
+                                    <span className={`block text-[10px] ${gl.pay_arr >= gl.pay_arr_target ? 'text-green-600' : 'text-red-500'}`}>
+                                      Ist: {formatCurrency(gl.pay_arr)}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : '-'}
                             </td>
                             <td className="py-3 px-3 text-center">
                               {gl.commission_relevant !== false ? (
@@ -702,7 +712,7 @@ export default function YearOverview({
                             {sortedMonthGoLives.filter(gl => gl.has_terminal).length}
                           </td>
                           <td className="py-3 px-3 text-right text-orange-600">
-                            {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || 0), 0))}
+                            {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || gl.pay_arr || 0), 0))}
                           </td>
                           <td className="py-3 px-3 text-center text-amber-600">
                             {sortedMonthGoLives.filter(gl => gl.commission_relevant !== false).length}

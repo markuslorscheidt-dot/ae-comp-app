@@ -90,13 +90,14 @@ export default function MonthDetail({
         comparison = (a.has_terminal ? 1 : 0) - (b.has_terminal ? 1 : 0);
         break;
       case 'pay_arr':
-        comparison = (a.pay_arr || 0) - (b.pay_arr || 0);
+        // Sortiere nach pay_arr_target (oder pay_arr wenn vorhanden)
+        comparison = (a.pay_arr_target || a.pay_arr || 0) - (b.pay_arr_target || b.pay_arr || 0);
         break;
       case 'commission_relevant':
         comparison = (a.commission_relevant !== false ? 1 : 0) - (b.commission_relevant !== false ? 1 : 0);
         break;
       case 'total_arr':
-        comparison = (a.subs_arr + (a.pay_arr || 0)) - (b.subs_arr + (b.pay_arr || 0));
+        comparison = (a.subs_arr + (a.pay_arr_target || a.pay_arr || 0)) - (b.subs_arr + (b.pay_arr_target || b.pay_arr || 0));
         break;
     }
     return sortDirection === 'asc' ? comparison : -comparison;
@@ -326,7 +327,7 @@ export default function MonthDetail({
                     className="text-right py-3 px-2 font-medium text-orange-600 cursor-pointer hover:bg-gray-100 select-none"
                     onClick={() => handleSort('pay_arr')}
                   >
-                    {t('goLive.payArr')}<SortIcon field="pay_arr" />
+                    Pay ARR (€)<SortIcon field="pay_arr" />
                   </th>
                   <th 
                     className="text-center py-3 px-2 font-medium text-amber-600 cursor-pointer hover:bg-gray-100 select-none"
@@ -361,7 +362,16 @@ export default function MonthDetail({
                       )}
                     </td>
                     <td className="py-3 px-2 text-right text-orange-600 font-medium">
-                      {gl.pay_arr ? formatCurrency(gl.pay_arr) : '–'}
+                      {gl.pay_arr_target || gl.pay_arr ? (
+                        <div>
+                          <span>{formatCurrency(gl.pay_arr_target || gl.pay_arr || 0)}</span>
+                          {gl.pay_arr && gl.pay_arr_target && (
+                            <span className={`block text-[10px] ${gl.pay_arr >= gl.pay_arr_target ? 'text-green-600' : 'text-red-500'}`}>
+                              Ist: {formatCurrency(gl.pay_arr)}
+                            </span>
+                          )}
+                        </div>
+                      ) : '–'}
                     </td>
                     <td className="py-3 px-2 text-center">
                       {gl.commission_relevant !== false ? (
@@ -371,7 +381,7 @@ export default function MonthDetail({
                       )}
                     </td>
                     <td className="py-3 px-2 text-right font-medium">
-                      {formatCurrency(gl.subs_arr + (gl.pay_arr || 0))}
+                      {formatCurrency(gl.subs_arr + (gl.pay_arr_target || gl.pay_arr || 0))}
                     </td>
                     <td className="py-3 px-2 text-right space-x-2">
                       {canEditGoLives && (
