@@ -457,6 +457,7 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
         subs_monthly: goLive.subs_monthly || 0,
         subs_arr: subsArr,
         has_terminal: goLive.has_terminal || false,
+        pay_arr_target: goLive.pay_arr_target || null,  // NEU: Pay ARR Target bei Go-Live
         pay_arr: goLive.pay_arr || null,
         commission_relevant: goLive.commission_relevant ?? true,
         // NEU: Partnership & Enterprise
@@ -486,6 +487,7 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
       updateData.subs_arr = updates.subs_monthly * 12;
     }
     if (updates.has_terminal !== undefined) updateData.has_terminal = updates.has_terminal;
+    if (updates.pay_arr_target !== undefined) updateData.pay_arr_target = updates.pay_arr_target;  // NEU
     if (updates.pay_arr !== undefined) updateData.pay_arr = updates.pay_arr;
     if (updates.notes !== undefined) updateData.notes = updates.notes;
     if (updates.commission_relevant !== undefined) updateData.commission_relevant = updates.commission_relevant;
@@ -905,6 +907,7 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
         subs_monthly: goLive.subs_monthly || 0,
         subs_arr: subsArr,
         has_terminal: goLive.has_terminal || false,
+        pay_arr_target: goLive.pay_arr_target || null,  // NEU: Pay ARR Target bei Go-Live
         pay_arr: goLive.pay_arr || null,
         commission_relevant: goLive.commission_relevant ?? true,
         // NEU: Partnership & Enterprise
@@ -934,6 +937,7 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
       updateData.subs_arr = updates.subs_monthly * 12;
     }
     if (updates.has_terminal !== undefined) updateData.has_terminal = updates.has_terminal;
+    if (updates.pay_arr_target !== undefined) updateData.pay_arr_target = updates.pay_arr_target;  // NEU
     if (updates.pay_arr !== undefined) updateData.pay_arr = updates.pay_arr;
     if (updates.notes !== undefined) updateData.notes = updates.notes;
     if (updates.commission_relevant !== undefined) updateData.commission_relevant = updates.commission_relevant;
