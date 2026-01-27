@@ -415,6 +415,7 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
           subs_monthly: Number(gl.subs_monthly) || 0,
           subs_arr: Number(gl.subs_arr) || (Number(gl.subs_monthly) || 0) * 12,
           has_terminal: gl.has_terminal || false,
+          pay_arr_target: gl.pay_arr_target ? Number(gl.pay_arr_target) : null,  // NEU: Pay ARR Target
           pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
           commission_relevant: gl.commission_relevant ?? true,
           partner_id: gl.partner_id || null,
@@ -633,6 +634,7 @@ export function useAllGoLives(year: number = 2026) {
             subs_monthly: Number(gl.subs_monthly) || 0,
             subs_arr: Number(gl.subs_arr) || (Number(gl.subs_monthly) || 0) * 12,
             has_terminal: gl.has_terminal || false,
+            pay_arr_target: gl.pay_arr_target ? Number(gl.pay_arr_target) : null,  // NEU: Pay ARR Target
             pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
             commission_relevant: gl.commission_relevant ?? true,
             partner_id: gl.partner_id || null,
@@ -868,6 +870,7 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
           subs_monthly: Number(gl.subs_monthly) || 0,
           subs_arr: Number(gl.subs_arr) || (Number(gl.subs_monthly) || 0) * 12,
           has_terminal: gl.has_terminal || false,
+          pay_arr_target: gl.pay_arr_target ? Number(gl.pay_arr_target) : null,  // NEU: Pay ARR Target
           pay_arr: gl.pay_arr ? Number(gl.pay_arr) : null,
           commission_relevant: gl.commission_relevant ?? true,
           partner_id: gl.partner_id || null,
