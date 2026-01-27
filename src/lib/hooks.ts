@@ -243,11 +243,12 @@ function parseSettings(data: any): AESettings {
   const avgPayBillTipping = Number(data.avg_pay_bill_tipping) || DEFAULT_SETTINGS.avg_pay_bill_tipping;
   const payArrFactor = Number(data.pay_arr_factor) || DEFAULT_SETTINGS.pay_arr_factor;
   
-  // Subs ARR-Ziele werden aus Go-Lives berechnet
-  const subsTargets = calculateMonthlySubsTargets(goLiveTargets, avgSubsBill);
+  // Subs ARR-Ziele: Aus DB laden ODER aus Go-Lives berechnen (Fallback)
+  const subsTargets = data.monthly_subs_targets || 
+    calculateMonthlySubsTargets(goLiveTargets, avgSubsBill);
   
-  // Pay ARR-Ziele: Direkt aus Sheet ODER berechnet (Legacy)
-  const payTargets = data.monthly_pay_arr_targets || 
+  // Pay ARR-Ziele: Aus DB laden ODER aus Sheet ODER berechnet (Legacy)
+  const payTargets = data.monthly_pay_targets || data.monthly_pay_arr_targets || 
     calculateMonthlyPayTargets(subsTargets, payArrFactor);
 
   return {
