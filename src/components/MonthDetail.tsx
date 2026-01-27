@@ -49,6 +49,7 @@ export default function MonthDetail({
     go_live_date: '',
     subs_monthly: '',
     has_terminal: false,
+    pay_arr_target: '',  // NEU: Pay ARR Target
     pay_arr: '',
     commission_relevant: true,
     partner_id: null as string | null,
@@ -139,6 +140,7 @@ export default function MonthDetail({
       go_live_date: gl.go_live_date,
       subs_monthly: gl.subs_monthly.toString(),
       has_terminal: gl.has_terminal,
+      pay_arr_target: gl.pay_arr_target ? (gl.pay_arr_target / 12).toString() : '',  // NEU: Als monatlicher Wert
       pay_arr: gl.pay_arr?.toString() || '',
       commission_relevant: gl.commission_relevant !== false,
       partner_id: gl.partner_id || null,
@@ -153,6 +155,11 @@ export default function MonthDetail({
     // Monat aus dem Datum extrahieren (YYYY-MM-DD Format)
     const newMonth = editForm.go_live_date ? parseInt(editForm.go_live_date.split('-')[1]) : editingGoLive.month;
     
+    // Pay ARR Target berechnen (monatlich × 12)
+    const payArrTarget = editForm.has_terminal && editForm.pay_arr_target 
+      ? parseFloat(editForm.pay_arr_target) * 12 
+      : null;
+    
     setSaving(true);
     const result = await onUpdateGoLive(editingGoLive.id, {
       user_id: editForm.user_id,
@@ -162,6 +169,7 @@ export default function MonthDetail({
       month: newMonth, // Monat aus Datum aktualisieren
       subs_monthly: parseFloat(editForm.subs_monthly) || 0,
       has_terminal: editForm.has_terminal,
+      pay_arr_target: payArrTarget,  // NEU: Pay ARR Target
       pay_arr: editForm.pay_arr ? parseFloat(editForm.pay_arr) : null,
       commission_relevant: editForm.commission_relevant,
       partner_id: editForm.partner_id,
@@ -593,10 +601,33 @@ export default function MonthDetail({
                   </p>
                 )}
 
-                {/* Pay ARR */}
+                {/* Pay monatlich Target (erscheint wenn Terminal aktiviert) */}
+                {editForm.has_terminal && (
+                  <div className="p-3 bg-orange-50 rounded-lg border border-orange-200">
+                    <label className="block text-sm font-medium text-orange-700 mb-1.5">
+                      💳 Pay monatlich Target (€)
+                    </label>
+                    <input
+                      type="number"
+                      value={editForm.pay_arr_target}
+                      onChange={(e) => setEditForm({ ...editForm, pay_arr_target: e.target.value })}
+                      className="w-full px-4 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-orange-500 bg-white"
+                      placeholder="z.B. 145"
+                      min="0"
+                      step="0.01"
+                    />
+                    {editForm.pay_arr_target && (
+                      <p className="text-xs text-orange-600 mt-1">
+                        → Pay ARR Target: <strong>€{(parseFloat(editForm.pay_arr_target) * 12).toLocaleString('de-DE')}</strong> (€{editForm.pay_arr_target} × 12)
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {/* Pay ARR Ist (nach 3 Monaten) */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('goLive.payArr')}
+                    {t('goLive.payArr')} (Ist)
                     <span className="text-gray-400 font-normal ml-2">• {t('goLive.payArrHint')}</span>
                   </label>
                   <input
