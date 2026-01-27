@@ -471,10 +471,10 @@ export default function YearOverview({
                 <td className="py-2 md:py-3 px-1 md:px-2 text-right">{r.terminals_count}</td>
                 <td className="py-2 md:py-3 px-1 md:px-2 text-right text-green-600">{formatCurrency(r.subs_target)}</td>
                 <td className="py-2 md:py-3 px-1 md:px-2 text-right text-green-700 font-medium">{formatCurrency(r.subs_actual)}</td>
-                <td className={`py-2 md:py-3 px-1 md:px-2 text-right font-medium ${getAchievementColor(r.subs_achievement)}`}>{formatPercent(r.subs_achievement)}</td>
+                <td className={`py-2 md:py-3 px-1 md:px-2 text-right font-medium ${getAchievementColor(r.subs_target > 0 ? r.subs_actual / r.subs_target : 0)}`}>{formatPercent(r.subs_target > 0 ? r.subs_actual / r.subs_target : 0)}</td>
                 <td className="py-2 md:py-3 px-1 md:px-2 text-right text-orange-600">{formatCurrency(r.pay_target)}</td>
-                <td className="py-2 md:py-3 px-1 md:px-2 text-right text-orange-700 font-medium">{formatCurrency(r.pay_actual)}</td>
-                <td className={`py-2 md:py-3 px-1 md:px-2 text-right font-medium ${getAchievementColor(r.pay_achievement)}`}>{formatPercent(r.pay_achievement)}</td>
+                <td className="py-2 md:py-3 px-1 md:px-2 text-right text-orange-700 font-medium">{formatCurrency(r.pay_arr_target_total)}</td>
+                <td className={`py-2 md:py-3 px-1 md:px-2 text-right font-medium ${getAchievementColor(r.pay_m0_achievement)}`}>{formatPercent(r.pay_m0_achievement)}</td>
                 <td className="py-2 md:py-3 px-1 md:px-2 text-right text-purple-700 font-bold">{formatCurrency(r.total_provision)}</td>
               </tr>
             ))}
@@ -486,10 +486,10 @@ export default function YearOverview({
               <td className="py-2 md:py-3 px-1 md:px-2 text-right">{yearSummary.total_terminals}</td>
               <td className="py-2 md:py-3 px-1 md:px-2 text-right text-green-600">{formatCurrency(yearSummary.total_subs_target)}</td>
               <td className="py-2 md:py-3 px-1 md:px-2 text-right text-green-700">{formatCurrency(yearSummary.total_subs_actual)}</td>
-              <td className={`py-2 md:py-3 px-1 md:px-2 text-right ${getAchievementColor(yearSummary.total_subs_achievement)}`}>{formatPercent(yearSummary.total_subs_achievement)}</td>
+              <td className={`py-2 md:py-3 px-1 md:px-2 text-right ${getAchievementColor(yearSummary.total_subs_target > 0 ? yearSummary.total_subs_actual / yearSummary.total_subs_target : 0)}`}>{formatPercent(yearSummary.total_subs_target > 0 ? yearSummary.total_subs_actual / yearSummary.total_subs_target : 0)}</td>
               <td className="py-2 md:py-3 px-1 md:px-2 text-right text-orange-600">{formatCurrency(yearSummary.total_pay_target)}</td>
-              <td className="py-2 md:py-3 px-1 md:px-2 text-right text-orange-700">{formatCurrency(yearSummary.total_pay_actual)}</td>
-              <td className={`py-2 md:py-3 px-1 md:px-2 text-right ${getAchievementColor(yearSummary.total_pay_achievement)}`}>{formatPercent(yearSummary.total_pay_achievement)}</td>
+              <td className="py-2 md:py-3 px-1 md:px-2 text-right text-orange-700">{formatCurrency(yearSummary.total_pay_arr_target)}</td>
+              <td className={`py-2 md:py-3 px-1 md:px-2 text-right ${getAchievementColor(yearSummary.total_pay_target > 0 ? yearSummary.total_pay_arr_target / yearSummary.total_pay_target : 0)}`}>{formatPercent(yearSummary.total_pay_target > 0 ? yearSummary.total_pay_arr_target / yearSummary.total_pay_target : 0)}</td>
               <td className="py-2 md:py-3 px-1 md:px-2 text-right text-purple-800 text-base md:text-lg">{formatCurrency(yearSummary.total_provision)}</td>
             </tr>
           </tfoot>
