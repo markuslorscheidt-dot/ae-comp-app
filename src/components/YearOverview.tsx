@@ -205,12 +205,15 @@ export default function YearOverview({
   const totalGoLives = yearSummary.total_go_lives;
   const totalTerminals = yearSummary.total_terminals;
   const totalSubsArr = yearSummary.total_subs_actual;
-  const totalPayArr = yearSummary.total_pay_actual;
+  // NEU: Pay ARR verwendet pay_arr_target (bei Go-Live erfasst), nicht pay_actual (erst nach M3)
+  const totalPayArr = yearSummary.total_pay_arr_target;
   const totalAllInArr = totalSubsArr + totalPayArr;
   
   // Average Monthly Bills (ARR / 12 / Go-Lives, nur wenn Go-Lives > 0)
+  // NEU: Nur Terminals mit pay_arr_target für Pay Bill berechnen
+  const terminalsWithPayTarget = goLives.filter(gl => gl.has_terminal && gl.pay_arr_target).length;
   const avgMonthlySubsBill = totalGoLives > 0 ? (totalSubsArr / 12) / totalGoLives : 0;
-  const avgMonthlyPayBill = totalGoLives > 0 ? (totalPayArr / 12) / totalGoLives : 0;
+  const avgMonthlyPayBill = terminalsWithPayTarget > 0 ? (totalPayArr / 12) / terminalsWithPayTarget : 0;
   const avgMonthlyAllInBill = totalGoLives > 0 ? (totalAllInArr / 12) / totalGoLives : 0;
   
   // Ziele (Targets)

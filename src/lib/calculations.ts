@@ -116,27 +116,39 @@ export function calculateMonthlyResult(
   const payM0Provision = payArrTargetCommission * payM0Rate;
   
   // ========== M3: Pay Provision auf IST-Basis & Clawback ==========
-  // Nach 3 Monaten wird der tatsächliche Pay ARR verglichen
-  const payAchievement = payTarget > 0 ? payActualCommission / payTarget : 0;
-  const payRate = getProvisionRate(payAchievement, payTiers);
-  const payProvision = payActualCommission * payRate;
+  // WICHTIG: M3/Clawback nur berechnen wenn pay_arr (Ist) MANUELL ERFASST wurde!
+  // Prüfe ob mindestens ein Go-Live mit Terminal pay_arr erfasst hat
+  const hasPayArrRecorded = commissionGoLives.some(gl => gl.has_terminal && gl.pay_arr !== null && gl.pay_arr !== undefined);
   
-  // Clawback: Differenz zwischen Target und Ist (nur wenn Target > Ist)
-  const payClawbackBase = Math.max(0, payArrTargetCommission - payActualCommission);
-  // Clawback-Betrag: Die Differenz × die ursprüngliche M0-Rate
-  const payClawback = payClawbackBase * payM0Rate;
+  // Nur wenn pay_arr erfasst wurde: M3 und Clawback berechnen
+  let payAchievement = 0;
+  let payRate = 0;
+  let payProvision = 0;
+  let payClawbackBase = 0;
+  let payClawback = 0;
+  let m3Provision = 0;
+  
+  if (hasPayArrRecorded) {
+    // Nach 3 Monaten wird der tatsächliche Pay ARR verglichen
+    payAchievement = payTarget > 0 ? payActualCommission / payTarget : 0;
+    payRate = getProvisionRate(payAchievement, payTiers);
+    payProvision = payActualCommission * payRate;
+    
+    // Clawback: Differenz zwischen Target und Ist (nur wenn Target > Ist)
+    payClawbackBase = Math.max(0, payArrTargetCommission - payActualCommission);
+    // Clawback-Betrag: Die Differenz × die ursprüngliche M0-Rate
+    payClawback = payClawbackBase * payM0Rate;
+    
+    // M3 Provision: Differenz zwischen Ist-Provision und M0-Provision
+    m3Provision = payProvision - payM0Provision;
+  }
+  // Wenn pay_arr noch nicht erfasst: M3 = 0, Clawback = 0 (bleibt bei Init-Werten)
   
   // ========== TOTALS ==========
   // M0 Provision: Subs + Terminal + Pay auf Target-Basis
   const m0Provision = subsProvision + terminalProvision + payM0Provision;
   
-  // M3 Provision: Differenz zwischen Ist-Provision und M0-Provision
-  // Kann negativ sein (= Clawback), wenn Ist < Target
-  // Positiv wenn Ist > Target (mehr Provision)
-  // Hinweis: Wir berechnen die Netto-Anpassung bei M3
-  const m3Provision = payProvision - payM0Provision;
-  
-  // Total: M0 + M3 (entspricht: Subs + Terminal + tatsächliche Pay Provision)
+  // Total: M0 + M3 (M3 ist 0 wenn pay_arr noch nicht erfasst)
   const totalProvision = m0Provision + m3Provision;
   
   return {
