@@ -55,7 +55,7 @@ export default function YearOverview({
   const [subscriptionPackages, setSubscriptionPackages] = useState<SubscriptionPackage[]>([]);
   
   // Sortierung für Go-Lives Tabelle
-  type SortField = 'oak_id' | 'customer_name' | 'go_live_date' | 'subs_monthly' | 'subs_arr' | 'has_terminal' | 'pay_arr' | 'commission_relevant';
+  type SortField = 'oak_id' | 'customer_name' | 'go_live_date' | 'subs_monthly' | 'subs_arr' | 'has_terminal' | 'pay_arr' | 'commission_relevant' | 'partner_id' | 'is_enterprise';
   const [sortField, setSortField] = useState<SortField>('go_live_date');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
@@ -102,6 +102,12 @@ export default function YearOverview({
       case 'commission_relevant':
         comparison = (a.commission_relevant !== false ? 1 : 0) - (b.commission_relevant !== false ? 1 : 0);
         break;
+      case 'partner_id':
+        comparison = (a.partner_id ? 1 : 0) - (b.partner_id ? 1 : 0);
+        break;
+      case 'is_enterprise':
+        comparison = (a.is_enterprise ? 1 : 0) - (b.is_enterprise ? 1 : 0);
+        break;
     }
     return sortDirection === 'asc' ? comparison : -comparison;
   });
@@ -134,6 +140,11 @@ export default function YearOverview({
       ? (gl.pay_arr_target / 12).toString() 
       : (settings.avg_pay_bill || '').toString();
     
+    // Pay ARR Ist: gespeicherter Wert ist jährlich, Formular erwartet monatlich
+    const payArrMonthly = gl.pay_arr 
+      ? (gl.pay_arr / 12).toString() 
+      : '';
+    
     setEditForm({
       user_id: gl.user_id,
       customer_name: gl.customer_name,
@@ -141,8 +152,8 @@ export default function YearOverview({
       go_live_date: gl.go_live_date,
       subs_monthly: gl.subs_monthly.toString(),
       has_terminal: gl.has_terminal,
-      pay_arr_target: defaultPayMonthlyTarget,  // Default aus Settings wenn leer
-      pay_arr: gl.pay_arr?.toString() || '',
+      pay_arr_target: defaultPayMonthlyTarget,  // Monatlich (ARR ÷ 12)
+      pay_arr: payArrMonthly,  // Monatlich (ARR ÷ 12)
       commission_relevant: gl.commission_relevant !== false,
       partner_id: gl.partner_id || null,
       is_enterprise: gl.is_enterprise || false,
@@ -161,6 +172,11 @@ export default function YearOverview({
       ? parseFloat(editForm.pay_arr_target) * 12 
       : null;
     
+    // Pay ARR Ist berechnen (monatlich × 12)
+    const payArrIst = editForm.has_terminal && editForm.pay_arr 
+      ? parseFloat(editForm.pay_arr) * 12 
+      : null;
+    
     setSaving(true);
     const result = await onUpdateGoLive(editingGoLive.id, {
       user_id: editForm.user_id,
@@ -170,8 +186,8 @@ export default function YearOverview({
       month: newMonth, // Monat aus Datum aktualisieren
       subs_monthly: parseFloat(editForm.subs_monthly) || 0,
       has_terminal: editForm.has_terminal,
-      pay_arr_target: payArrTarget,  // NEU: Pay ARR Target
-      pay_arr: editForm.pay_arr ? parseFloat(editForm.pay_arr) : null,
+      pay_arr_target: payArrTarget,  // Pay ARR Target (monatlich × 12)
+      pay_arr: payArrIst,  // Pay ARR Ist (monatlich × 12)
       commission_relevant: editForm.commission_relevant,
       partner_id: editForm.partner_id,
       is_enterprise: editForm.is_enterprise,
@@ -515,7 +531,7 @@ export default function YearOverview({
       {/* Month Detail Modal - Responsive */}
       {selectedMonth && (
         <div className="fixed inset-0 bg-black/50 flex items-end md:items-center justify-center z-50 md:p-4" onClick={() => setSelectedMonth(null)}>
-          <div className="bg-white rounded-t-xl md:rounded-xl shadow-xl w-full md:max-w-4xl max-h-[85vh] md:max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-t-xl md:rounded-xl shadow-xl w-full md:max-w-6xl max-h-[85vh] md:max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="p-4 md:p-6">
               {/* Sticky Header */}
               <div className="flex items-center justify-between mb-4 md:mb-6 sticky top-0 bg-white py-2 -mt-2 border-b md:border-0">
@@ -568,20 +584,34 @@ export default function YearOverview({
                         </div>
                         <div className="grid grid-cols-4 gap-2 text-xs">
                           <div>
-                            <span className="text-gray-500 block">Subs</span>
+                            <span className="text-gray-500 block">Subs ARR</span>
                             <span className="font-medium text-green-600">{formatCurrency(gl.subs_arr)}</span>
                           </div>
                           <div>
-                            <span className="text-gray-500 block">Pay</span>
-                            <span className="font-medium text-orange-600">{gl.pay_arr_target || gl.pay_arr ? formatCurrency(gl.pay_arr_target || gl.pay_arr || 0) : '-'}</span>
+                            <span className="text-gray-500 block">Pay ARR</span>
+                            <span className="font-medium text-orange-600">{gl.pay_arr_target || gl.pay_arr ? formatCurrency(gl.pay_arr || gl.pay_arr_target || 0) : '-'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 block">Gesamt</span>
+                            <span className="font-medium text-blue-800">{formatCurrency(gl.subs_arr + (gl.pay_arr || gl.pay_arr_target || 0))}</span>
                           </div>
                           <div>
                             <span className="text-gray-500 block">Terminal</span>
                             <span className={gl.has_terminal ? 'text-blue-600' : 'text-gray-400'}>{gl.has_terminal ? '✓' : '-'}</span>
                           </div>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-xs mt-2">
                           <div>
                             <span className="text-gray-500 block">Prov.</span>
                             <span className={gl.commission_relevant !== false ? 'text-amber-600' : 'text-gray-400'}>{gl.commission_relevant !== false ? '✓' : '-'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 block">Partner</span>
+                            <span className={gl.partner_id ? 'text-purple-600' : 'text-gray-400'}>{gl.partner_id ? '✓' : '-'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500 block">Enterprise</span>
+                            <span className={gl.is_enterprise ? 'text-indigo-600' : 'text-gray-400'}>{gl.is_enterprise ? '✓' : '-'}</span>
                           </div>
                         </div>
                       </div>
@@ -589,18 +619,36 @@ export default function YearOverview({
                     {/* Mobile Total */}
                     <div className="bg-gray-200 rounded-lg p-3 border-2 border-gray-400">
                       <p className="font-bold text-gray-800 mb-2">{t('common.total')} ({sortedMonthGoLives.length} Go-Lives)</p>
-                      <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div className="grid grid-cols-4 gap-2 text-xs">
                         <div>
                           <span className="text-gray-600 block">Subs ARR</span>
                           <span className="font-bold text-green-700">{formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + gl.subs_arr, 0))}</span>
                         </div>
                         <div>
                           <span className="text-gray-600 block">Pay ARR</span>
-                          <span className="font-bold text-orange-700">{formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || gl.pay_arr || 0), 0))}</span>
+                          <span className="font-bold text-orange-700">{formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || gl.pay_arr_target || 0), 0))}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600 block">Gesamt</span>
+                          <span className="font-bold text-blue-800">{formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + gl.subs_arr + (gl.pay_arr || gl.pay_arr_target || 0), 0))}</span>
                         </div>
                         <div>
                           <span className="text-gray-600 block">Terminals</span>
                           <span className="font-bold text-blue-700">{sortedMonthGoLives.filter(gl => gl.has_terminal).length}</span>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-xs mt-2">
+                        <div>
+                          <span className="text-gray-600 block">Prov.</span>
+                          <span className="font-bold text-amber-700">{sortedMonthGoLives.filter(gl => gl.commission_relevant !== false).length}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600 block">Partner</span>
+                          <span className="font-bold text-purple-700">{sortedMonthGoLives.filter(gl => gl.partner_id).length}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-600 block">Enterprise</span>
+                          <span className="font-bold text-indigo-700">{sortedMonthGoLives.filter(gl => gl.is_enterprise).length}</span>
                         </div>
                       </div>
                     </div>
@@ -653,18 +701,36 @@ export default function YearOverview({
                           >
                             {t('goLive.payArr')}<SortIcon field="pay_arr" />
                           </th>
+                          <th className="text-right py-3 px-3 font-bold text-blue-800">
+                            Gesamt ARR
+                          </th>
                           <th 
                             className="text-center py-3 px-3 font-bold text-amber-700 cursor-pointer hover:bg-gray-100 select-none"
                             onClick={() => handleSort('commission_relevant')}
                           >
                             💰<SortIcon field="commission_relevant" />
                           </th>
-                          {canEdit && <th className="py-3 px-3"></th>}
+                          <th 
+                            className="text-center py-3 px-3 font-bold text-purple-700 cursor-pointer hover:bg-gray-100 select-none"
+                            onClick={() => handleSort('partner_id')}
+                          >
+                            Partner<SortIcon field="partner_id" />
+                          </th>
+                          <th 
+                            className="text-center py-3 px-3 font-bold text-indigo-700 cursor-pointer hover:bg-gray-100 select-none"
+                            onClick={() => handleSort('is_enterprise')}
+                          >
+                            Enterprise<SortIcon field="is_enterprise" />
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
                         {sortedMonthGoLives.map((gl) => (
-                          <tr key={gl.id} className={`border-b hover:bg-gray-50 ${gl.commission_relevant === false ? 'bg-gray-50 opacity-70' : ''}`}>
+                          <tr 
+                            key={gl.id} 
+                            className={`border-b hover:bg-gray-50 ${canEdit ? 'cursor-pointer' : ''} ${gl.commission_relevant === false ? 'bg-gray-50 opacity-70' : ''}`}
+                            onClick={() => canEdit && openEditModal(gl)}
+                          >
                             <td className="py-3 px-3 text-gray-500">{gl.oak_id || '-'}</td>
                             <td className="py-3 px-3 font-medium">{gl.customer_name}</td>
                             <td className="py-3 px-3">{new Date(gl.go_live_date).toLocaleDateString('de-DE')}</td>
@@ -680,14 +746,17 @@ export default function YearOverview({
                             <td className="py-3 px-3 text-right text-orange-600">
                               {gl.pay_arr_target || gl.pay_arr ? (
                                 <div>
-                                  <span>{formatCurrency(gl.pay_arr_target || gl.pay_arr || 0)}</span>
+                                  <span>{formatCurrency(gl.pay_arr || gl.pay_arr_target || 0)}</span>
                                   {gl.pay_arr && gl.pay_arr_target && (
                                     <span className={`block text-[10px] ${gl.pay_arr >= gl.pay_arr_target ? 'text-green-600' : 'text-red-500'}`}>
-                                      Ist: {formatCurrency(gl.pay_arr)}
+                                      Target: {formatCurrency(gl.pay_arr_target)}
                                     </span>
                                   )}
                                 </div>
                               ) : '-'}
+                            </td>
+                            <td className="py-3 px-3 text-right text-blue-800 font-medium">
+                              {formatCurrency(gl.subs_arr + (gl.pay_arr || gl.pay_arr_target || 0))}
                             </td>
                             <td className="py-3 px-3 text-center">
                               {gl.commission_relevant !== false ? (
@@ -696,22 +765,20 @@ export default function YearOverview({
                                 <span className="text-gray-300" title={t('goLive.notCommissionRelevant')}>-</span>
                               )}
                             </td>
-                            {canEdit && (
-                              <td className="py-3 px-3 text-right space-x-2">
-                                <button
-                                  onClick={() => openEditModal(gl)}
-                                  className="text-blue-500 hover:text-blue-700 text-xs"
-                                >
-                                  {t('common.edit')}
-                                </button>
-                                <button
-                                  onClick={() => handleDelete(gl.id)}
-                                  className="text-red-500 hover:text-red-700 text-xs"
-                                >
-                                  {t('common.delete')}
-                                </button>
-                              </td>
-                            )}
+                            <td className="py-3 px-3 text-center">
+                              {gl.partner_id ? (
+                                <span className="text-purple-600" title="Partner Go-Live">✓</span>
+                              ) : (
+                                <span className="text-gray-300">-</span>
+                              )}
+                            </td>
+                            <td className="py-3 px-3 text-center">
+                              {gl.is_enterprise ? (
+                                <span className="text-indigo-600" title="Enterprise Go-Live">✓</span>
+                              ) : (
+                                <span className="text-gray-300">-</span>
+                              )}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -728,12 +795,20 @@ export default function YearOverview({
                             {sortedMonthGoLives.filter(gl => gl.has_terminal).length}
                           </td>
                           <td className="py-3 px-3 text-right text-orange-600">
-                            {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || gl.pay_arr || 0), 0))}
+                            {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || gl.pay_arr_target || 0), 0))}
+                          </td>
+                          <td className="py-3 px-3 text-right text-blue-800">
+                            {formatCurrency(sortedMonthGoLives.reduce((sum, gl) => sum + gl.subs_arr + (gl.pay_arr || gl.pay_arr_target || 0), 0))}
                           </td>
                           <td className="py-3 px-3 text-center text-amber-600">
                             {sortedMonthGoLives.filter(gl => gl.commission_relevant !== false).length}
                           </td>
-                          {canEdit && <td></td>}
+                          <td className="py-3 px-3 text-center text-purple-600">
+                            {sortedMonthGoLives.filter(gl => gl.partner_id).length}
+                          </td>
+                          <td className="py-3 px-3 text-center text-indigo-600">
+                            {sortedMonthGoLives.filter(gl => gl.is_enterprise).length}
+                          </td>
                         </tr>
                       </tfoot>
                     </table>
@@ -954,19 +1029,28 @@ export default function YearOverview({
                 )}
 
                 {/* Pay ARR Ist (nach 3 Monaten) */}
-                <div>
-                  <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
-                    {t('goLive.payArr')} (Ist)
-                    <span className="text-gray-400 font-normal ml-1 text-[10px] md:text-xs">({t('goLive.payArrHint')})</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={editForm.pay_arr}
-                    onChange={(e) => setEditForm({ ...editForm, pay_arr: e.target.value })}
-                    className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                    step="0.01"
-                  />
-                </div>
+                {editForm.has_terminal && (
+                  <div className="p-2.5 md:p-3 bg-green-50 rounded-lg border border-green-200">
+                    <label className="block text-xs md:text-sm font-medium text-green-700 mb-1.5">
+                      💳 Pay monatlich Ist (€)
+                      <span className="text-green-500 font-normal ml-1 text-[10px] md:text-xs">(Nach 3 Monaten eintragen)</span>
+                    </label>
+                    <input
+                      type="number"
+                      value={editForm.pay_arr}
+                      onChange={(e) => setEditForm({ ...editForm, pay_arr: e.target.value })}
+                      className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-green-300 rounded-lg focus:ring-2 focus:ring-green-500 bg-white"
+                      placeholder="z.B. 145"
+                      min="0"
+                      step="0.01"
+                    />
+                    {editForm.pay_arr && (
+                      <p className="text-[10px] md:text-xs text-green-600 mt-1">
+                        → Pay ARR Ist: <strong>€{(parseFloat(editForm.pay_arr) * 12).toLocaleString('de-DE')}</strong> (€{editForm.pay_arr} × 12)
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Buttons - Sticky on mobile */}

@@ -1689,6 +1689,7 @@ export async function updateGoLiveUniversal(id: string, updates: Partial<GoLive>
     updateData.subs_arr = updates.subs_monthly * 12;
   }
   if (updates.has_terminal !== undefined) updateData.has_terminal = updates.has_terminal;
+  if (updates.pay_arr_target !== undefined) updateData.pay_arr_target = updates.pay_arr_target;
   if (updates.pay_arr !== undefined) updateData.pay_arr = updates.pay_arr;
   if (updates.notes !== undefined) updateData.notes = updates.notes;
   if (updates.commission_relevant !== undefined) updateData.commission_relevant = updates.commission_relevant;
