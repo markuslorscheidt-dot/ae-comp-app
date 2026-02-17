@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   AESettings, 
   ProvisionTier, 
@@ -22,6 +22,7 @@ import { supabase } from '@/lib/supabase';
 import DebugPanel from './DebugPanel';
 import PartnerManagement from './PartnerManagement';
 import SubscriptionPackageManagement from './SubscriptionPackageManagement';
+import PDFExportButton from './PDFExportButton';
 
 interface SettingsPanelProps {
   settings: AESettings;
@@ -49,6 +50,7 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
   const { t } = useLanguage();
   const { users } = useAllUsers();
   const { settings: allSettings } = useAllSettings(2026);
+  const exportRef = useRef<HTMLDivElement>(null);
   
   // ========== GRUNDEINSTELLUNGEN ==========
   const [year, setYear] = useState(settings.year);
@@ -70,6 +72,9 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
   const [terminalPenetrationThreshold, setTerminalPenetrationThreshold] = useState(75);  // Schwellwert für Bonus (€50)
   const [terminalSalesPercent, setTerminalSalesPercent] = useState(75);
   const [tippingPercent, setTippingPercent] = useState(24);
+  const payTerminalsPercentRef = useRef(payTerminalsPercent);
+  const terminalSalesPercentRef = useRef(terminalSalesPercent);
+  const tippingPercentRef = useRef(tippingPercent);
   
   // Business Pay Terminals, Terminal Sales und Tipping (monatlich)
   const [businessPayTerminals, setBusinessPayTerminals] = useState<number[]>([]);
@@ -219,11 +224,14 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
   }
   
   const recalculateBusinessDerived = () => {
-    const newPayTerms = businessGoLives.map(gl => Math.round(gl * payTerminalsPercent / 100));
+    const pPay = payTerminalsPercentRef.current;
+    const pTerm = terminalSalesPercentRef.current;
+    const pTip = tippingPercentRef.current;
+    const newPayTerms = businessGoLives.map(gl => Math.round(gl * pPay / 100));
     setBusinessPayTerminals(newPayTerms);
-    const newTermSales = businessGoLives.map(gl => Math.round(gl * terminalSalesPercent / 100));
+    const newTermSales = businessGoLives.map(gl => Math.round(gl * pTerm / 100));
     setBusinessTerminalSales(newTermSales);
-    setBusinessTipping(newTermSales.map(ts => Math.round(ts * tippingPercent / 100)));
+    setBusinessTipping(newTermSales.map(ts => Math.round(ts * pTip / 100)));
   };
   
   // ========== HANDLERS ==========
@@ -474,13 +482,26 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
             </button>
             <h2 className="text-2xl font-bold text-gray-800">{t('nav.settings')}</h2>
           </div>
-          <button
-            onClick={handleSave}
-            disabled={saving || !percentageValid}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition disabled:opacity-50"
-          >
-            {saving ? t('common.saving') : 'Alle speichern'}
-          </button>
+          <div className="flex items-center space-x-3">
+            <PDFExportButton
+              targetRef={exportRef}
+              baseFilename="Einstellungen"
+              userName={selectedAEData?.user.name}
+              year={year}
+              title={`${t('nav.settings')} ${year}`}
+              subtitle={selectedAEData ? `AE: ${selectedAEData.user.name}` : undefined}
+              orientation="portrait"
+              variant="secondary"
+              size="md"
+            />
+            <button
+              onClick={handleSave}
+              disabled={saving || !percentageValid}
+              className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition disabled:opacity-50"
+            >
+              {saving ? t('common.saving') : 'Alle speichern'}
+            </button>
+          </div>
         </div>
         
         {/* Quick Stats */}
@@ -531,6 +552,9 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
           {message}
         </div>
       )}
+
+      {/* PDF Export Container - Punkte 1-7 */}
+      <div ref={exportRef}>
 
       {/* ========== 1. GRUNDEINSTELLUNGEN ========== */}
       <div className="bg-white rounded-xl shadow-sm p-6">
@@ -597,7 +621,7 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
                 <div className="flex flex-wrap items-center gap-3 text-sm">
                   <div className="flex items-center space-x-1">
                     <span className="text-green-600">Pay Term.</span>
-                    <input type="number" value={payTerminalsPercent} onChange={(e) => setPayTerminalsPercent(parseInt(e.target.value) || 0)}
+                    <input type="number" value={payTerminalsPercent} onChange={(e) => { const v = parseInt(e.target.value) || 0; payTerminalsPercentRef.current = v; setPayTerminalsPercent(v); }}
                       className="w-12 px-1 py-0.5 text-center border border-green-300 rounded text-xs" />
                     <span className="text-green-600">%</span>
                   </div>
@@ -609,17 +633,17 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
                   </div>
                   <div className="flex items-center space-x-1">
                     <span className="text-teal-600">Terminal</span>
-                    <input type="number" value={terminalSalesPercent} onChange={(e) => setTerminalSalesPercent(parseInt(e.target.value) || 0)}
+                    <input type="number" value={terminalSalesPercent} onChange={(e) => { const v = parseInt(e.target.value) || 0; terminalSalesPercentRef.current = v; setTerminalSalesPercent(v); }}
                       className="w-12 px-1 py-0.5 text-center border border-teal-300 rounded text-xs" />
                     <span className="text-teal-600">%</span>
                   </div>
                   <div className="flex items-center space-x-1">
                     <span className="text-pink-600">Tipping</span>
-                    <input type="number" value={tippingPercent} onChange={(e) => setTippingPercent(parseInt(e.target.value) || 0)}
+                    <input type="number" value={tippingPercent} onChange={(e) => { const v = parseInt(e.target.value) || 0; tippingPercentRef.current = v; setTippingPercent(v); }}
                       className="w-12 px-1 py-0.5 text-center border border-pink-300 rounded text-xs" />
                     <span className="text-pink-600">%</span>
                   </div>
-                  <button onClick={recalculateBusinessDerived} className="text-xs text-blue-600 underline">Berechnen</button>
+                  <button type="button" onClick={recalculateBusinessDerived} className="text-xs text-blue-600 underline">Berechnen</button>
                 </div>
               </div>
               
@@ -1003,6 +1027,8 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
           </table>
         </div>
       </div>
+
+      </div>{/* Ende PDF Export Container (Punkte 1-7) */}
 
       {/* ========== PARTNER-VERWALTUNG ========== */}
       <div className="bg-white rounded-xl shadow-sm p-6">

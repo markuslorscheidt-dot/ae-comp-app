@@ -25,6 +25,7 @@ import {
 // ============================================
 
 const AUTH_TIMEOUT = 8000; // 8 Sekunden Timeout
+const COMMISSION_RELEVANT_ROLES: UserRole[] = ['ae_subscription_sales', 'ae_payments'];
 
 // Helper: Promise mit Timeout
 function withTimeout<T>(promise: Promise<T>, ms: number, errorMsg: string): Promise<T> {
@@ -50,6 +51,51 @@ async function clearCorruptSession() {
   } catch (e) {
     console.warn('Session cleanup error:', e);
   }
+}
+
+function isCommissionRelevantRole(role: UserRole): boolean {
+  return COMMISSION_RELEVANT_ROLES.includes(role);
+}
+
+async function validateUserAssignmentForDate(userId: string | undefined, goLiveDate: string | undefined) {
+  if (!userId || !goLiveDate) return { error: null };
+
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('entry_date, start_date, exit_date')
+    .eq('id', userId)
+    .single();
+
+  if (error || !user) {
+    return { error: { message: 'User konnte nicht geprüft werden' } };
+  }
+
+  const effectiveEntryDate = user.entry_date || user.start_date;
+  if (effectiveEntryDate && goLiveDate < effectiveEntryDate) {
+    return { error: { message: 'Go-Live liegt vor dem Eintrittsdatum des Users' } };
+  }
+  if (user.exit_date && goLiveDate > user.exit_date) {
+    return { error: { message: 'Go-Live liegt nach dem Austrittsdatum des Users' } };
+  }
+
+  return { error: null };
+}
+
+async function getEffectiveRoleAtDate(userId: string, date: string, fallbackRole?: UserRole): Promise<UserRole | null> {
+  const { data, error } = await supabase
+    .from('user_role_history')
+    .select('role, effective_from, effective_to')
+    .eq('user_id', userId)
+    .lte('effective_from', date)
+    .or(`effective_to.is.null,effective_to.gte.${date}`)
+    .order('effective_from', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!error && data?.role) {
+    return data.role as UserRole;
+  }
+  return fallbackRole || null;
 }
 
 export function useAuth() {
@@ -108,8 +154,12 @@ export function useAuth() {
               email: profile.email,
               name: profile.name,
               role: profile.role as UserRole,
+              is_active: profile.is_active ?? true,
               language: profile.language,
-              created_at: profile.created_at
+              created_at: profile.created_at,
+              start_date: profile.start_date,
+              entry_date: profile.entry_date || profile.start_date,
+              exit_date: profile.exit_date
             });
           }
         }
@@ -162,8 +212,12 @@ export function useAuth() {
               email: profile.email,
               name: profile.name,
               role: profile.role as UserRole,
+              is_active: profile.is_active ?? true,
               language: profile.language,
-              created_at: profile.created_at
+              created_at: profile.created_at,
+              start_date: profile.start_date,
+              entry_date: profile.entry_date || profile.start_date,
+              exit_date: profile.exit_date
             });
           }
         } catch (error) {
@@ -447,6 +501,16 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
 
   const addGoLive = async (goLive: Partial<GoLive>) => {
     const subsArr = (goLive.subs_monthly || 0) * 12;
+    const assignmentCheck = await validateUserAssignmentForDate(goLive.user_id, goLive.go_live_date);
+    if (assignmentCheck.error) return { data: null, error: assignmentCheck.error };
+
+    let commissionRelevant = goLive.commission_relevant ?? true;
+    if (goLive.commission_relevant === undefined && goLive.user_id && goLive.go_live_date) {
+      const roleAtDate = await getEffectiveRoleAtDate(goLive.user_id, goLive.go_live_date);
+      if (roleAtDate) {
+        commissionRelevant = isCommissionRelevantRole(roleAtDate);
+      }
+    }
     
     const { data, error } = await supabase
       .from('go_lives')
@@ -461,7 +525,7 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
         has_terminal: goLive.has_terminal || false,
         pay_arr_target: goLive.pay_arr_target || null,  // NEU: Pay ARR Target bei Go-Live
         pay_arr: goLive.pay_arr || null,
-        commission_relevant: goLive.commission_relevant ?? true,
+        commission_relevant: commissionRelevant,
         // NEU: Partnership & Enterprise
         partner_id: goLive.partner_id || null,
         is_enterprise: goLive.is_enterprise || false,
@@ -500,6 +564,28 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
     if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
     // NEU: Monat (bei Datumsänderung)
     if (updates.month !== undefined) updateData.month = updates.month;
+
+    if (updates.user_id || updates.go_live_date) {
+      const { data: existingGoLive, error: existingGoLiveError } = await supabase
+        .from('go_lives')
+        .select('user_id, go_live_date')
+        .eq('id', id)
+        .single();
+
+      if (existingGoLiveError || !existingGoLive) {
+        return { error: existingGoLiveError || { message: 'Go-Live nicht gefunden' } };
+      }
+
+      const targetUserId = updates.user_id || existingGoLive.user_id;
+      const targetDate = updates.go_live_date || existingGoLive.go_live_date;
+      const assignmentCheck = await validateUserAssignmentForDate(targetUserId, targetDate);
+      if (assignmentCheck.error) return { error: assignmentCheck.error };
+
+      const roleAtDate = await getEffectiveRoleAtDate(targetUserId, targetDate);
+      if (roleAtDate && updates.commission_relevant === undefined) {
+        updateData.commission_relevant = isCommissionRelevantRole(roleAtDate);
+      }
+    }
 
     const { error } = await supabase
       .from('go_lives')
@@ -552,12 +638,15 @@ export function useAllUsers() {
           email: p.email,
           name: p.name,
           role: p.role as UserRole,
+          is_active: p.is_active ?? true,
           language: p.language,
           created_at: p.created_at,
           employee_id: p.employee_id,
           phone: p.phone,
           region: p.region,
           start_date: p.start_date,
+          entry_date: p.entry_date || p.start_date,
+          exit_date: p.exit_date,
           manager_id: p.manager_id,
           photo_url: p.photo_url,
         })));
@@ -574,7 +663,51 @@ export function useAllUsers() {
     fetchUsers();
   }, []);
 
-  const updateUserRole = async (userId: string, newRole: UserRole) => {
+  const updateUserRole = async (userId: string, newRole: UserRole, effectiveFrom?: string) => {
+    const roleChangeDate = effectiveFrom || new Date().toISOString().slice(0, 10);
+
+    const { data: currentUser, error: currentUserError } = await supabase
+      .from('users')
+      .select('role')
+      .eq('id', userId)
+      .single();
+
+    if (currentUserError) {
+      return { error: currentUserError };
+    }
+    if (currentUser?.role === newRole) {
+      return { error: null };
+    }
+
+    const previousRoleEndDate = new Date(roleChangeDate);
+    previousRoleEndDate.setDate(previousRoleEndDate.getDate() - 1);
+    const previousRoleEndDateIso = previousRoleEndDate.toISOString().slice(0, 10);
+
+    // Aktuelle offene Historie schließen
+    const { error: closeHistoryError } = await supabase
+      .from('user_role_history')
+      .update({ effective_to: previousRoleEndDateIso })
+      .eq('user_id', userId)
+      .is('effective_to', null);
+
+    if (closeHistoryError) {
+      return { error: closeHistoryError };
+    }
+
+    // Neue Historie anlegen
+    const { error: historyInsertError } = await supabase
+      .from('user_role_history')
+      .insert({
+        user_id: userId,
+        role: newRole,
+        effective_from: roleChangeDate,
+      });
+
+    if (historyInsertError) {
+      return { error: historyInsertError };
+    }
+
+    // Aktuelle Rolle im User-Profil aktualisieren (vereinfachte Darstellung)
     const { error } = await supabase
       .from('users')
       .update({ role: newRole })
@@ -584,6 +717,27 @@ export function useAllUsers() {
       setUsers(prev => prev.map(u => 
         u.id === userId ? { ...u, role: newRole } : u
       ));
+
+      // Bereits erfasste Go-Lives ab Rollenwechsel neu als provisionsrelevant markieren
+      const { data: affectedGoLives } = await supabase
+        .from('go_lives')
+        .select('id, commission_relevant')
+        .eq('user_id', userId)
+        .gte('go_live_date', roleChangeDate);
+
+      if (affectedGoLives && affectedGoLives.length > 0) {
+        const newCommissionRelevant = isCommissionRelevantRole(newRole);
+        const idsToUpdate = affectedGoLives
+          .filter(gl => gl.commission_relevant !== newCommissionRelevant)
+          .map(gl => gl.id);
+
+        if (idsToUpdate.length > 0) {
+          await supabase
+            .from('go_lives')
+            .update({ commission_relevant: newCommissionRelevant })
+            .in('id', idsToUpdate);
+        }
+      }
     }
     return { error };
   };
@@ -898,11 +1052,22 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
 
   const addGoLive = async (goLive: Partial<GoLive>) => {
     const subsArr = (goLive.subs_monthly || 0) * 12;
+    const targetUserId = goLive.user_id || userId;
+    const assignmentCheck = await validateUserAssignmentForDate(targetUserId, goLive.go_live_date);
+    if (assignmentCheck.error) return { data: null, error: assignmentCheck.error };
+
+    let commissionRelevant = goLive.commission_relevant ?? true;
+    if (goLive.commission_relevant === undefined && targetUserId && goLive.go_live_date) {
+      const roleAtDate = await getEffectiveRoleAtDate(targetUserId, goLive.go_live_date);
+      if (roleAtDate) {
+        commissionRelevant = isCommissionRelevantRole(roleAtDate);
+      }
+    }
     
     const { data, error } = await supabase
       .from('go_lives')
       .insert({
-        user_id: goLive.user_id || userId,
+        user_id: targetUserId,
         year: goLive.year || year,
         month: goLive.month,
         customer_name: goLive.customer_name,
@@ -913,7 +1078,7 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
         has_terminal: goLive.has_terminal || false,
         pay_arr_target: goLive.pay_arr_target || null,  // NEU: Pay ARR Target bei Go-Live
         pay_arr: goLive.pay_arr || null,
-        commission_relevant: goLive.commission_relevant ?? true,
+        commission_relevant: commissionRelevant,
         // NEU: Partnership & Enterprise
         partner_id: goLive.partner_id || null,
         is_enterprise: goLive.is_enterprise || false,
@@ -952,6 +1117,28 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
     if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
     // NEU: Monat (bei Datumsänderung)
     if (updates.month !== undefined) updateData.month = updates.month;
+
+    if (updates.user_id || updates.go_live_date) {
+      const { data: existingGoLive, error: existingGoLiveError } = await supabase
+        .from('go_lives')
+        .select('user_id, go_live_date')
+        .eq('id', id)
+        .single();
+
+      if (existingGoLiveError || !existingGoLive) {
+        return { error: existingGoLiveError || { message: 'Go-Live nicht gefunden' } };
+      }
+
+      const targetUserId = updates.user_id || existingGoLive.user_id;
+      const targetDate = updates.go_live_date || existingGoLive.go_live_date;
+      const assignmentCheck = await validateUserAssignmentForDate(targetUserId, targetDate);
+      if (assignmentCheck.error) return { error: assignmentCheck.error };
+
+      const roleAtDate = await getEffectiveRoleAtDate(targetUserId, targetDate);
+      if (roleAtDate && updates.commission_relevant === undefined) {
+        updateData.commission_relevant = isCommissionRelevantRole(roleAtDate);
+      }
+    }
 
     const { error } = await supabase
       .from('go_lives')
@@ -1701,6 +1888,28 @@ export async function updateGoLiveUniversal(id: string, updates: Partial<GoLive>
   // NEU: Monat (bei Datumsänderung)
   if (updates.month !== undefined) updateData.month = updates.month;
 
+  if (updates.user_id || updates.go_live_date) {
+    const { data: existingGoLive, error: existingGoLiveError } = await supabase
+      .from('go_lives')
+      .select('user_id, go_live_date')
+      .eq('id', id)
+      .single();
+
+    if (existingGoLiveError || !existingGoLive) {
+      return { error: existingGoLiveError || { message: 'Go-Live nicht gefunden' } };
+    }
+
+    const targetUserId = updates.user_id || existingGoLive.user_id;
+    const targetDate = updates.go_live_date || existingGoLive.go_live_date;
+    const assignmentCheck = await validateUserAssignmentForDate(targetUserId, targetDate);
+    if (assignmentCheck.error) return { error: assignmentCheck.error };
+
+    const roleAtDate = await getEffectiveRoleAtDate(targetUserId, targetDate);
+    if (roleAtDate && updates.commission_relevant === undefined) {
+      updateData.commission_relevant = isCommissionRelevantRole(roleAtDate);
+    }
+  }
+
   const { error } = await supabase
     .from('go_lives')
     .update(updateData)
@@ -1852,11 +2061,14 @@ export async function restoreBackup(backup: BackupData): Promise<{ success: bool
           .update({
             name: user.name,
             role: user.role,
+            is_active: user.is_active,
             language: user.language,
             employee_id: user.employee_id,
             phone: user.phone,
             region: user.region,
             start_date: user.start_date,
+            entry_date: user.entry_date || user.start_date,
+            exit_date: user.exit_date,
             manager_id: user.manager_id,
           })
           .eq('id', user.id);

@@ -94,7 +94,7 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserName, setNewUserName] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
-  const [newUserRole, setNewUserRole] = useState<UserRole>('ae');
+  const [newUserRole, setNewUserRole] = useState<UserRole>('ae_subscription_sales');
   const [createLoading, setCreateLoading] = useState(false);
   const [createError, setCreateError] = useState('');
   const [createSuccess, setCreateSuccess] = useState('');
@@ -108,6 +108,9 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
     region: 'DACH',
     employee_id: '',
     start_date: '',
+    entry_date: '',
+    exit_date: '',
+    is_active: true,
     manager_id: '',
   });
   const [editLoading, setEditLoading] = useState(false);
@@ -141,6 +144,9 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
       region: user.region || 'DACH',
       employee_id: user.employee_id || '',
       start_date: user.start_date || '',
+      entry_date: user.entry_date || user.start_date || '',
+      exit_date: user.exit_date || '',
+      is_active: user.is_active ?? true,
       manager_id: user.manager_id || '',
     });
     setEditError('');
@@ -163,6 +169,9 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
           region: editData.region,
           employee_id: editData.employee_id || null,
           start_date: editData.start_date || null,
+          entry_date: editData.entry_date || editData.start_date || null,
+          exit_date: editData.exit_date || null,
+          is_active: editData.exit_date ? false : editData.is_active,
           manager_id: editData.manager_id || null,
         })
         .eq('id', editingUser.id);
@@ -255,11 +264,21 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
       });
       if (error) { setCreateError(error.message); return; }
       if (data.user) {
-        if (newUserRole !== 'ae') {
+        await supabase
+          .from('users')
+          .update({ entry_date: new Date().toISOString().slice(0, 10), is_active: true })
+          .eq('id', data.user.id);
+
+        if (newUserRole !== 'ae_subscription_sales') {
           await supabase.from('users').update({ role: newUserRole }).eq('id', data.user.id);
+          await supabase.from('user_role_history').insert({
+            user_id: data.user.id,
+            role: newUserRole,
+            effective_from: new Date().toISOString().slice(0, 10),
+          });
         }
         setCreateSuccess(t('admin.addUser.success', { name: newUserName }));
-        setNewUserEmail(''); setNewUserName(''); setNewUserPassword(''); setNewUserRole('ae');
+        setNewUserEmail(''); setNewUserName(''); setNewUserPassword(''); setNewUserRole('ae_subscription_sales');
         setTimeout(() => { refetchUsers(); setView('users'); }, 1500);
       }
     } catch (err: any) {
@@ -271,7 +290,9 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
 
   const handleRoleChange = async (userId: string, newRole: UserRole) => {
     if (!canAssignRoles(currentUser.role)) { alert(t('admin.users.noPermissionRole')); return; }
-    const result = await updateUserRole(userId, newRole);
+    const effectiveFrom = prompt('Rollenwechsel ab Datum (YYYY-MM-DD):', new Date().toISOString().slice(0, 10));
+    if (!effectiveFrom) return;
+    const result = await updateUserRole(userId, newRole, effectiveFrom);
     if (result.error) alert(t('admin.users.roleChangeError') + ': ' + result.error.message);
   };
 
@@ -438,6 +459,43 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
                 />
               </div>
 
+              {/* Eintrittsdatum */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Eintrittsdatum</label>
+                <input
+                  type="date"
+                  value={editData.entry_date}
+                  onChange={(e) => setEditData({ ...editData, entry_date: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+              </div>
+
+              {/* Austrittsdatum */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Austrittsdatum</label>
+                <input
+                  type="date"
+                  value={editData.exit_date}
+                  onChange={(e) => setEditData({ ...editData, exit_date: e.target.value, is_active: e.target.value ? false : editData.is_active })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+              </div>
+
+              {/* Aktiv-Status */}
+              <div className="flex items-center">
+                <input
+                  id="user-active"
+                  type="checkbox"
+                  checked={editData.is_active}
+                  disabled={!!editData.exit_date}
+                  onChange={(e) => setEditData({ ...editData, is_active: e.target.checked })}
+                  className="w-4 h-4 mr-2"
+                />
+                <label htmlFor="user-active" className="text-sm text-gray-700">
+                  User aktiv (bei Austrittsdatum automatisch inaktiv)
+                </label>
+              </div>
+
               {/* Vorgesetzter */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">{t('profile.manager')}</label>
@@ -503,6 +561,7 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
                   <th className="text-left py-3 px-2 font-medium text-gray-500">{t('common.name')}</th>
                   <th className="text-left py-3 px-2 font-medium text-gray-500">{t('common.email')}</th>
                   <th className="text-left py-3 px-2 font-medium text-gray-500">{t('common.role')}</th>
+                  <th className="text-left py-3 px-2 font-medium text-gray-500">Status</th>
                   <th className="text-left py-3 px-2 font-medium text-gray-500">{t('common.created')}</th>
                   <th className="py-3 px-2 font-medium text-gray-500">{t('common.actions')}</th>
                 </tr>
@@ -523,6 +582,15 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
                         </select>
                       ) : (
                         <span className={`px-2 py-1 rounded text-xs font-medium ${getRoleColor(user.role)}`}>{t(`roles.${user.role}`)}</span>
+                      )}
+                    </td>
+                    <td className="py-3 px-2">
+                      {user.is_active !== false ? (
+                        <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700">Aktiv</span>
+                      ) : (
+                        <span className="px-2 py-1 rounded text-xs font-medium bg-gray-200 text-gray-700">
+                          Inaktiv{user.exit_date ? ` (ab ${new Date(user.exit_date).toLocaleDateString('de-DE')})` : ''}
+                        </span>
                       )}
                     </td>
                     <td className="py-3 px-2 text-gray-500 text-xs">{new Date(user.created_at).toLocaleDateString('de-DE')}</td>

@@ -1,0 +1,112 @@
+{
+  "project": {
+    "name": "Commercial Business Planner",
+    "repo": "ae-comp-app",
+    "version_from_package_json": "3.17.0",
+    "framework": "Next.js 14",
+    "language": "TypeScript",
+    "last_updated": "2026-02-17"
+  },
+  "runtime": {
+    "frontend": ["Next.js", "React", "Tailwind CSS"],
+    "backend": ["Supabase", "PostgreSQL", "RLS"],
+    "charts_and_export": ["Recharts", "jsPDF", "html2canvas"]
+  },
+  "directories": {
+    "app": "src/app",
+    "components": "src/components",
+    "domain_and_data_access": "src/lib",
+    "sql_migrations": "supabase-*.sql"
+  },
+  "core_files": {
+    "types": "src/lib/types.ts",
+    "hooks": "src/lib/hooks.ts",
+    "calculations": "src/lib/calculations.ts",
+    "permissions": "src/lib/permissions.ts",
+    "i18n": "src/lib/i18n.ts",
+    "main_dashboard": "src/components/Dashboard.tsx",
+    "admin_panel": "src/components/AdminPanel.tsx",
+    "dlt_settings": "src/components/DLTSettings.tsx",
+    "month_detail": "src/components/MonthDetail.tsx",
+    "year_overview": "src/components/YearOverview.tsx",
+    "pipeline": "src/components/Pipeline.tsx"
+  },
+  "data_model": {
+    "primary_tables": [
+      "users",
+      "ae_settings",
+      "go_lives",
+      "role_permissions",
+      "challenges",
+      "leads",
+      "opportunities",
+      "opportunity_stage_history"
+    ],
+    "lifecycle_and_roles": {
+      "lifecycle_fields_on_users": ["entry_date", "exit_date", "is_active"],
+      "role_history_table": "user_role_history",
+      "effective_role_function": "get_effective_user_role_at_date"
+    }
+  },
+  "business_rules": [
+    {
+      "id": "employment_date_window",
+      "description": "Go-Lives duerfen nur Usern im gueltigen Beschaeftigungszeitraum zugeordnet werden."
+    },
+    {
+      "id": "role_history_tracking",
+      "description": "Rollenwechsel muessen historisiert werden (effective_from/effective_to)."
+    },
+    {
+      "id": "provision_m0_m3",
+      "description": "Provision basiert auf M0/M3-Modell inkl. Clawback und Tier-Rates."
+    },
+    {
+      "id": "commission_relevance_by_role_date",
+      "description": "Provisionsrelevanz kann aus der effektiven Rolle am Go-Live-Datum abgeleitet werden."
+    }
+  ],
+  "roles": {
+    "top_level": ["country_manager", "dlt_member"],
+    "new_business": [
+      "line_manager_new_business",
+      "ae_subscription_sales",
+      "ae_payments",
+      "commercial_director",
+      "head_of_partnerships"
+    ],
+    "expanding_business": [
+      "head_of_expanding_revenue",
+      "cs_account_executive",
+      "cs_account_manager",
+      "cs_sdr"
+    ],
+    "marketing": [
+      "head_of_marketing",
+      "marketing_specialist",
+      "marketing_executive",
+      "demand_generation_specialist"
+    ],
+    "misc": ["sonstiges"]
+  },
+  "key_workflows": [
+    "User anlegen und Rolle zuweisen",
+    "User-Stammdaten inkl. Eintritt/Austritt pflegen",
+    "Rollenwechsel mit Stichtag erfassen",
+    "Go-Live erfassen/umbuchen/bearbeiten",
+    "Monats- und Jahresauswertungen",
+    "Pipeline pflegen und analysieren",
+    "Salesforce-Import + Rollback"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "documentation": {
+    "human_readable": ["README.md", "DOCUMENTATION.md", "SESSION-HANDOVER.md"],
+    "agent_operational": ["AGENTS.md"],
+    "machine_readable": ["project-context.json"]
+  }
+}

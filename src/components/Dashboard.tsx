@@ -745,10 +745,16 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
     // Determine what data to show
     const isCompareMode = selectedViewUserIds.length > 1 && !isAllSelected;
     
-    // Für Einzelauswahl: Hole Go-Lives aus multiGoLives Map
+    // Für Einzelauswahl: Eigener User + Haupt-Dashboard zeigt denselben User → prod-Daten (bereits geladen)
     const singleSelectedUserId = selectedViewUserIds[0];
-    const singleUserGoLives = multiGoLives.get(singleSelectedUserId) || [];
-    const singleUserSettings = multiSettings.get(singleSelectedUserId) || settings;
+    const isViewingSelf = singleSelectedUserId === user.id;
+    const mainDashboardShowsSelf = safeSelectedUserId === user.id;
+    const singleUserGoLives = (isViewingSelf && mainDashboardShowsSelf)
+      ? prodGoLives
+      : (multiGoLives.get(singleSelectedUserId) || []);
+    const singleUserSettings = (isViewingSelf && mainDashboardShowsSelf)
+      ? prodSettings
+      : (multiSettings.get(singleSelectedUserId) || settings);
     
     const showData = isAllSelected || isCompareMode
       ? { settings: combined.settings, goLives: combined.goLives }
@@ -757,6 +763,10 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
     const displaySummary = showData.settings 
       ? calculateYearSummary(showData.goLives, showData.settings)
       : yearSummary;
+
+    // Multi-Daten nötig für GESAMT, Vergleich oder Einzeluser (wenn nicht prod-Fallback)
+    const yearViewNeedsMulti = isAllSelected || isCompareMode || !(isViewingSelf && mainDashboardShowsSelf);
+    const yearViewWaitingMulti = yearViewNeedsMulti && multiLoading;
 
     // Prüfe ob ausgewählter User ein planbarer User (AE) ist
     const selectedUser = selectableForView.find(u => selectedViewUserIds.includes(u.id));
@@ -824,6 +834,11 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
               goLivesMap={multiGoLives}
               onBack={() => setCurrentView('year')}
             />
+          ) : yearViewWaitingMulti ? (
+            <div className="bg-white rounded-xl shadow-sm p-8 flex flex-col items-center justify-center min-h-[320px]">
+              <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-4" />
+              <p className="text-gray-600">{t('common.loading')}</p>
+            </div>
           ) : (
             <YearOverview 
               settings={showData.settings || settings} 

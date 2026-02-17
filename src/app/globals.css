@@ -43,3 +43,24 @@ body {
 .animate-glow {
   animation: glow 2s ease-in-out infinite;
 }
+
+/* PDF Export Optimierungen */
+@media print {
+  body {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  
+  .no-print {
+    display: none !important;
+  }
+}
+
+/* Recharts SVG im PDF besser rendern */
+.recharts-wrapper {
+  overflow: visible !important;
+}
+
+.recharts-surface {
+  overflow: visible !important;
+}

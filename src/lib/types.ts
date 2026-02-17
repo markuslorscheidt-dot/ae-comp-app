@@ -115,6 +115,7 @@ export interface User {
   email: string;
   name: string;
   role: UserRole;
+  is_active?: boolean;
   language?: string;
   created_at: string;
   // Profil-Erweiterungen (Stufe 2)
@@ -122,8 +123,30 @@ export interface User {
   phone?: string;
   region?: string;
   start_date?: string;
+  entry_date?: string;
+  exit_date?: string;
   manager_id?: string;
   photo_url?: string;
+}
+
+export interface UserRoleHistoryRecord {
+  id: string;
+  user_id: string;
+  role: UserRole;
+  effective_from: string;
+  effective_to?: string | null;
+  created_at: string;
+  created_by?: string | null;
+}
+
+export function isUserActiveOnDate(user: User, date: string | Date): boolean {
+  const target = new Date(date);
+  const entry = user.entry_date || user.start_date;
+  const exit = user.exit_date;
+
+  if (entry && target < new Date(entry)) return false;
+  if (exit && target > new Date(exit)) return false;
+  return true;
 }
 
 export interface UserProfile extends User {

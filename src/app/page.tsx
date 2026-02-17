@@ -9,6 +9,7 @@ import AuthForm from '@/components/AuthForm';
 import AreaSelector from '@/components/AreaSelector';
 import AreaPlaceholder from '@/components/AreaPlaceholder';
 import Dashboard from '@/components/Dashboard';
+import DLTDashboard from '@/components/DLTDashboard';
 import AdminPanel from '@/components/AdminPanel';
 import LanguageSelector from '@/components/LanguageSelector';
 import { ToastProvider } from '@/components/Toast';
@@ -119,6 +120,17 @@ function AppContent() {
         onSignOut={signOut}
         selectedArea={selectedArea}
         onBackToAreaSelector={() => setSelectedArea(null)}
+      />
+    );
+  }
+
+  // DLT uses the new DLT Dashboard
+  if (selectedArea === 'dlt') {
+    return (
+      <DLTDashboard 
+        user={user}
+        onBack={() => setSelectedArea(null)}
+        onSignOut={signOut}
       />
     );
   }

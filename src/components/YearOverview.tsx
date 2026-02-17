@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { AESettings, YearSummary, GoLive, User, canReceiveGoLives, getDefaultCommissionRelevant } from '@/lib/types';
 import { Partner, SubscriptionPackage } from '@/lib/golive-types';
 import { loadPartners, loadSubscriptionPackages } from '@/lib/golive-import-hooks';
 import { useLanguage } from '@/lib/LanguageContext';
 import { formatCurrency, formatPercent, getAchievementColor } from '@/lib/calculations';
 import { PerformanceChart, GoLivesBarChart, ProvisionAreaChart } from './TrendCharts';
+import PDFExportButton from './PDFExportButton';
 
 interface YearOverviewProps {
   settings: AESettings;
@@ -33,6 +34,15 @@ export default function YearOverview({
 }: YearOverviewProps) {
   const { t } = useLanguage();
   const [selectedMonth, setSelectedMonth] = useState<number | null>(null);
+  const exportRef = useRef<HTMLDivElement>(null);
+  
+  // Extrahiere Benutzernamen aus dem Titel für den PDF-Export
+  const extractUserName = () => {
+    if (title && title.includes(' - ')) {
+      return title.split(' - ')[0];
+    }
+    return undefined;
+  };
   
   // Edit Modal State
   const [editingGoLive, setEditingGoLive] = useState<GoLive | null>(null);
@@ -247,7 +257,21 @@ export default function YearOverview({
             {title || `${t('yearOverview.title')} ${settings.year}`}
           </h2>
         </div>
+        <PDFExportButton
+          targetRef={exportRef}
+          baseFilename="Jahresuebersicht"
+          userName={extractUserName()}
+          year={settings.year}
+          title={title || `${t('yearOverview.title')} ${settings.year}`}
+          subtitle={extractUserName() ? `AE: ${extractUserName()}` : undefined}
+          orientation="portrait"
+          variant="secondary"
+          size="md"
+        />
       </div>
+
+      {/* PDF Export Container */}
+      <div ref={exportRef}>
 
       {/* Reihe 1: Basis-KPIs - Responsive */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 md:gap-4 mb-3 md:mb-4">
@@ -527,6 +551,8 @@ export default function YearOverview({
           </tfoot>
         </table>
       </div>
+
+      </div>{/* Ende PDF Export Container */}
 
       {/* Month Detail Modal - Responsive */}
       {selectedMonth && (

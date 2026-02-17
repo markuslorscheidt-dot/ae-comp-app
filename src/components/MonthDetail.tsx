@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { AESettings, GoLive, User, canReceiveGoLives, getDefaultCommissionRelevant } from '@/lib/types';
+import { AESettings, GoLive, User, canReceiveGoLives, getDefaultCommissionRelevant, isUserActiveOnDate } from '@/lib/types';
 import { Partner, SubscriptionPackage } from '@/lib/golive-types';
 import { loadPartners, loadSubscriptionPackages } from '@/lib/golive-import-hooks';
 import { useLanguage } from '@/lib/LanguageContext';
@@ -71,8 +71,12 @@ export default function MonthDetail({
     loadSubscriptionPackages().then(setSubscriptionPackages).catch(console.error);
   }, []);
 
-  // User die Go-Lives erhalten können
-  const goLiveReceivers = allUsers.filter(u => canReceiveGoLives(u.role));
+  // User die Go-Lives erhalten können (inkl. Eintritt/Austritt-Logik)
+  const getEligibleGoLiveReceivers = (date?: string) =>
+    allUsers.filter(
+      (u) => canReceiveGoLives(u.role) && isUserActiveOnDate(u, date || new Date())
+    );
+  const goLiveReceivers = getEligibleGoLiveReceivers();
 
   // Sortierte Go-Lives
   const sortedGoLives = [...goLives].sort((a, b) => {
@@ -190,7 +194,8 @@ export default function MonthDetail({
 
   // Wenn User geändert wird, Default für commission_relevant anpassen
   const handleUserChange = (newUserId: string) => {
-    const newUser = goLiveReceivers.find(u => u.id === newUserId);
+    const editGoLiveReceivers = getEligibleGoLiveReceivers(editForm.go_live_date);
+    const newUser = editGoLiveReceivers.find(u => u.id === newUserId);
     setEditForm({
       ...editForm,
       user_id: newUserId,
@@ -449,7 +454,7 @@ export default function MonthDetail({
                       onChange={(e) => handleUserChange(e.target.value)}
                       className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                     >
-                      {goLiveReceivers.map(u => (
+                      {getEligibleGoLiveReceivers(editForm.go_live_date).map(u => (
                         <option key={u.id} value={u.id}>
                           {u.name} - {t(`roles.${u.role}`)}
                         </option>

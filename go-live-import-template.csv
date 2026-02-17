@@ -1,0 +1,3 @@
+customer_name,oak_id,go_live_date,subs_monthly,has_terminal,pay_monthly,pay_target_monthly,commission_relevant,partner_name,is_enterprise,subscription_package
+Hair by Vian,102883,2026-01-02,109,true,,145,true,,false,Standard
+Vidal Sassoon,77056,2026-01-02,169,true,145,148,true,,true,Premium

@@ -22,7 +22,7 @@ import { MonthlyResult } from '@/lib/types';
 import { formatCurrency } from '@/lib/calculations';
 
 interface PerformanceChartProps {
-  monthlyResults: MonthlyResult[];
+  monthlyResults: MonthlyResult[] | MonthlyResultChart[];
   showTargets?: boolean;
 }
 
@@ -36,15 +36,14 @@ export function PerformanceChart({ monthlyResults, showTargets = true }: Perform
   // Daten für Recharts aufbereiten
   const chartData = useMemo(() => {
     return monthlyResults.map((result) => ({
-      month: t(`months.${result.month}`).substring(0, 3), // Jan, Feb, Mär...
+      month: t(`months.${result.month}`).substring(0, 3),
       monthFull: t(`months.${result.month}`),
       subsActual: result.subs_actual,
       subsTarget: result.subs_target,
       payActual: result.pay_actual,
       payTarget: result.pay_target,
-      // Für Tooltip
-      subsAchievement: result.subs_achievement,
-      payAchievement: result.pay_achievement,
+      subsAchievement: 'subs_achievement' in result ? result.subs_achievement : (result.subs_target > 0 ? result.subs_actual / result.subs_target : 0),
+      payAchievement: 'pay_achievement' in result ? result.pay_achievement : (result.pay_target > 0 ? result.pay_actual / result.pay_target : 0),
     }));
   }, [monthlyResults, t]);
 
@@ -198,8 +197,73 @@ export function PerformanceChart({ monthlyResults, showTargets = true }: Perform
   );
 }
 
+/** Minimal shape for charts that only need IST/Ziel (e.g. DLT YTD with planzahlen targets) */
+export interface MonthlyResultChart {
+  month: number;
+  go_lives_count: number;
+  go_lives_target: number;
+  terminals_count: number;
+  terminal_penetration?: number;
+  subs_actual: number;
+  subs_target: number;
+  subs_achievement?: number;
+  pay_actual: number;
+  pay_target: number;
+  pay_achievement?: number;
+}
+
+/**
+ * Pay-Entwicklung über Zeit – nur Pay ARR IST und Pay ARR Ziel
+ */
+export function PayPerformanceChart({ monthlyResults }: { monthlyResults: MonthlyResult[] | MonthlyResultChart[] }) {
+  const { t } = useLanguage();
+
+  const chartData = useMemo(() => {
+    return monthlyResults.map((result) => ({
+      month: t(`months.${result.month}`).substring(0, 3),
+      monthFull: t(`months.${result.month}`),
+      payActual: result.pay_actual,
+      payTarget: result.pay_target,
+    }));
+  }, [monthlyResults, t]);
+
+  const formatYAxis = (value: number) => (value >= 1000 ? `${(value / 1000).toFixed(0)}k` : value.toString());
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm p-6">
+      <h3 className="text-lg font-bold text-gray-800 mb-4">{t('trendCharts.payDevelopmentTitle')}</h3>
+      <div className="h-80">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+            <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#d1d5db' }} />
+            <YAxis tickFormatter={formatYAxis} tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#d1d5db' }} />
+            <Tooltip
+              formatter={(value: number) => formatCurrency(value)}
+              labelFormatter={(label) => label}
+            />
+            <Line type="monotone" dataKey="payActual" name={t('trendCharts.payArrActual')} stroke="#f97316" strokeWidth={2} dot={{ fill: '#f97316', strokeWidth: 2, r: 4 }} activeDot={{ r: 6, fill: '#f97316' }} />
+            <Line type="monotone" dataKey="payTarget" name={t('trendCharts.payArrTarget')} stroke="#f97316" strokeWidth={2} strokeDasharray="5 5" dot={false} opacity={0.5} />
+            <Legend wrapperStyle={{ paddingTop: '20px' }} formatter={(value) => <span className="text-sm text-gray-600">{value}</span>} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-4 text-xs text-gray-500">
+        <div className="flex items-center">
+          <div className="w-8 h-0.5 bg-orange-500 mr-2" />
+          <span>{t('trendCharts.actualLine')}</span>
+        </div>
+        <div className="flex items-center">
+          <div className="w-8 h-0.5 bg-orange-500 mr-2 border-dashed" style={{ borderTopWidth: 2, borderStyle: 'dashed' }} />
+          <span>{t('trendCharts.targetLine')}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface GoLivesBarChartProps {
-  monthlyResults: MonthlyResult[];
+  monthlyResults: MonthlyResult[] | MonthlyResultChart[];
   onMonthClick?: (month: number) => void;
 }
 
@@ -220,8 +284,7 @@ export function GoLivesBarChart({ monthlyResults, onMonthClick }: GoLivesBarChar
       goLivesTarget: result.go_lives_target,
       terminals: result.terminals_count,
       nonTerminals: result.go_lives_count - result.terminals_count,
-      penetration: result.terminal_penetration,
-      // Für Farbe: Ziel erreicht?
+      penetration: result.terminal_penetration ?? (result.go_lives_count > 0 ? result.terminals_count / result.go_lives_count : 0),
       achievedTarget: result.go_lives_count >= result.go_lives_target,
     }));
   }, [monthlyResults, t]);

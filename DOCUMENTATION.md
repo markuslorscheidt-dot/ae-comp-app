@@ -1,21 +1,17 @@
-# AE Kompensationsmodell - Technische Dokumentation
+# Commercial Business Planner - Technische Dokumentation
 
-**Version:** 3.16.23  
-**Letzte Aktualisierung:** 15.01.2026  
+**Version:** 3.17.x  
+**Letzte Aktualisierung:** 17.02.2026  
 **Autor:** Claude (Anthropic)
 
-## ⚠️ OFFENER BUG - Nächste Session fortsetzen!
+## Aktueller Dokumentationsstatus (17.02.2026)
 
-**Problem:** In der Opportunities-Tabellenansicht fehlt die "Aktionen"-Spalte (✏️ Bearbeiten, → Stage ändern). Die Tabelle ist zu breit (1400px minWidth) und der Container scrollt nicht horizontal.
+Diese Langdokumentation ist weiterhin als Detailreferenz nutzbar.  
+Für die aktuelle Betriebs- und Agentensicht wurden neu ergänzt:
 
-**Auswirkung:** Nutzer können Opportunities nicht bearbeiten oder archivieren.
-
-**Geplante Lösung:** 
-- Option 1: Zeilen-Klick öffnet Bearbeiten-Formular (empfohlen)
-- Option 2: Spaltenbreiten reduzieren
-- Option 3: Beides
-
-**Betroffene Datei:** `/src/components/Pipeline.tsx` (Zeile ~800-945)
+- `README.md` (schneller Einstieg)
+- `AGENTS.md` (Agenten-Betriebskontext)
+- `project-context.json` (maschinenlesbarer Projektkontext)
 
 ---
 
