@@ -5,7 +5,7 @@
     "version_from_package_json": "3.17.0",
     "framework": "Next.js 14",
     "language": "TypeScript",
-    "last_updated": "2026-02-17"
+    "last_updated": "2026-03-04"
   },
   "runtime": {
     "frontend": ["Next.js", "React", "Tailwind CSS"],
@@ -27,25 +27,113 @@
     "main_dashboard": "src/components/Dashboard.tsx",
     "admin_panel": "src/components/AdminPanel.tsx",
     "dlt_settings": "src/components/DLTSettings.tsx",
+    "dlt_strategic_reports": "src/components/DLTStrategicReports.tsx",
     "month_detail": "src/components/MonthDetail.tsx",
     "year_overview": "src/components/YearOverview.tsx",
-    "pipeline": "src/components/Pipeline.tsx"
+    "pipeline": "src/components/Pipeline.tsx",
+    "pipeline_analytics": "src/components/PipelineAnalytics.tsx",
+    "pipeline_types": "src/lib/pipeline-types.ts",
+    "pipeline_hooks": "src/lib/pipeline-hooks.ts",
+    "new_business_settings_panel": "src/components/SettingsPanel.tsx"
   },
   "data_model": {
     "primary_tables": [
       "users",
+      "user_role_history",
       "ae_settings",
+      "dlt_planzahlen",
       "go_lives",
       "role_permissions",
       "challenges",
       "leads",
       "opportunities",
-      "opportunity_stage_history"
+      "opportunity_stage_history",
+      "lost_reasons"
     ],
     "lifecycle_and_roles": {
       "lifecycle_fields_on_users": ["entry_date", "exit_date", "is_active"],
       "role_history_table": "user_role_history",
-      "effective_role_function": "get_effective_user_role_at_date"
+      "effective_role_function": "get_effective_user_role_at_date",
+      "lifecycle_sql": "supabase-user-lifecycle-and-role-history.sql"
+    }
+  },
+  "source_of_truth": {
+    "new_arr_planning_ui": "DLT Settings -> Planning -> 1. NEW ARR",
+    "ae_level_settings_storage": "ae_settings",
+    "dlt_aggregate_storage": "dlt_planzahlen",
+    "strategic_reports_targets": "dlt_planzahlen",
+    "strategic_reports_actuals": "go_lives aggregated via useMultiUserData/calculateYearSummary",
+    "new_business_settings_panel_status": {
+      "state": "read_only_disabled_for_save",
+      "reason": "DLT Planning ist zentrale Pflegeoberflaeche",
+      "file": "src/components/SettingsPanel.tsx"
+    }
+  },
+  "feature_modules": {
+    "user_and_role_management": {
+      "ui": ["src/components/DLTSettings.tsx", "src/components/AdminPanel.tsx"],
+      "rules": [
+        "exit_date steuert is_active (DB Trigger)",
+        "Rollenhistorie mit effective_from/effective_to",
+        "Bei gesetztem Austrittsdatum wird offene Rollenhistorie geschlossen"
+      ]
+    },
+    "new_arr_planning": {
+      "ui": "src/components/DLTSettings.tsx (Planning Tab)",
+      "sections": [
+        "1. Grundeinstellungen",
+        "2. Business Targets (100%)",
+        "4. Umsatz-Berechnung",
+        "5. AE auswaehlen & OTE",
+        "6. Provisionsmodell",
+        "7. OTE Validierung"
+      ],
+      "writes_to": ["dlt_planzahlen", "ae_settings"],
+      "calculation_basis": {
+        "go_lives": "business_inbound + business_outbound + business_partnerships",
+        "subs_arr_plan": "go_lives * avg_subs_bill * 12",
+        "pay_arr_plan": "(terminal_sales * avg_pay_bill_terminal * 12) + (tipping * avg_pay_bill_tipping * 12)"
+      }
+    },
+    "strategic_reports": {
+      "ui": "src/components/DLTStrategicReports.tsx",
+      "tabs": ["trend", "forecast", "ytd"],
+      "ytd_labels": [
+        "Subs ARR YTD vs Goal YTD",
+        "Pay ARR YTD vs Goal YTD",
+        "All-in ARR YTD vs Goal YTD",
+        "Subs ARR YTD vs Yearly ARR Goal",
+        "Pay ARR YTD vs Yearly ARR Goal",
+        "All-in ARR YTD vs Yearly ARR Goal"
+      ],
+      "ytd_month_tags": "Monats-Tags Jan..aktueller Monat vorhanden",
+      "bill_kpis": {
+        "subs_bill_source": "dlt_planzahlen.avg_subs_bill",
+        "pay_bill_source": "aus Yearly Pay Goal / (Yearly Go-Lives Goal * 12) abgeleitet",
+        "pay_bill_terminal_display": "zusatzlich separat sichtbar",
+        "all_in_bill_source": "subs_bill + pay_bill"
+      },
+      "known_limitations": [
+        "Forecast-Tab nutzt aktuell eine einfache lineare Projektion auf Basis bisheriger subsARR-Istwerte",
+        "Forecast ist derzeit nicht vollstaendig pipeline-getrieben (kein stochastisches Deal-by-Deal Modell)"
+      ]
+    },
+    "sales_pipeline_new_business": {
+      "ui": "src/components/Pipeline.tsx",
+      "data_hooks": ["useLeads", "useOpportunities", "usePipelineStats"],
+      "active_stages": ["sql", "demo_booked", "demo_completed", "sent_quote"],
+      "weighted_pipeline_formula": "weighted = (expected_subs_monthly*12 + expected_pay_monthly*12) * probability",
+      "probability_source": "opportunity.probability oder stage default/pipeline settings",
+      "expected_close_logic": "stage-basiert ueber calculateExpectedCloseDate",
+      "analytics": "src/components/PipelineAnalytics.tsx mit conversion, cycle-times, won/lost"
+    },
+    "go_live_and_arr_tracking": {
+      "core": ["src/components/YearOverview.tsx", "src/components/MonthDetail.tsx", "src/lib/calculations.ts"],
+      "pay_logic": [
+        "pay_arr_target wird bei Go-Live genutzt (M0-Zielbasis)",
+        "pay_arr ist Ist-Wert (M3-Betrachtung)",
+        "Clawback-Logik in calculations.ts"
+      ]
     }
   },
   "business_rules": [
@@ -64,6 +152,10 @@
     {
       "id": "commission_relevance_by_role_date",
       "description": "Provisionsrelevanz kann aus der effektiven Rolle am Go-Live-Datum abgeleitet werden."
+    },
+    {
+      "id": "dlt_central_planning",
+      "description": "DLT Planning ist zentrale Quelle fuer New ARR/Commission Planung; alter New Business Settings-Bereich bleibt vorerst read-only."
     }
   ],
   "roles": {
@@ -87,7 +179,18 @@
       "marketing_executive",
       "demand_generation_specialist"
     ],
-    "misc": ["sonstiges"]
+    "misc": ["sonstiges"],
+    "plannable_roles": ["ae_subscription_sales", "ae_payments"],
+    "can_receive_go_lives": [
+      "ae_subscription_sales",
+      "ae_payments",
+      "line_manager_new_business",
+      "country_manager",
+      "dlt_member",
+      "commercial_director",
+      "head_of_partnerships",
+      "sonstiges"
+    ]
   },
   "key_workflows": [
     "User anlegen und Rolle zuweisen",
@@ -96,7 +199,8 @@
     "Go-Live erfassen/umbuchen/bearbeiten",
     "Monats- und Jahresauswertungen",
     "Pipeline pflegen und analysieren",
-    "Salesforce-Import + Rollback"
+    "Salesforce-Import + Rollback",
+    "DLT New ARR Planung speichern -> schreibt dlt_planzahlen + ae_settings"
   ],
   "scripts": {
     "dev": "next dev",
@@ -107,6 +211,6 @@
   "documentation": {
     "human_readable": ["README.md", "DOCUMENTATION.md", "SESSION-HANDOVER.md"],
     "agent_operational": ["AGENTS.md"],
-    "machine_readable": ["project-context.json"]
+    "machine_readable": ["project-context.json", "forecast-context.json"]
   }
 }

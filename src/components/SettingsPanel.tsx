@@ -100,6 +100,7 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
   const [message, setMessage] = useState('');
   const [businessTargetsExpanded, setBusinessTargetsExpanded] = useState(true);
   const [selectedAEId, setSelectedAEId] = useState<string | null>(null);
+  const settingsManagedInDLT = true;
   
   // OTE pro AE (wird aus aePlanningData oder allSettings geladen)
   const [aeOTEs, setAeOTEs] = useState<Map<string, number>>(new Map());
@@ -345,6 +346,11 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
   
   // ========== SAVE ==========
   const handleSave = async () => {
+    if (settingsManagedInDLT) {
+      setMessage('Speichern ist deaktiviert: Bitte verwalte New ARR/Provisionen zentral in DLT → Planning → 1. NEW ARR.');
+      return;
+    }
+
     if (!percentageValid) {
       setMessage('Die Summe der Prozentsätze muss 100% ergeben!');
       return;
@@ -475,6 +481,12 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
 
       {/* ========== HEADER mit Quick Stats ========== */}
       <div className="bg-white rounded-xl shadow-sm p-4">
+        {settingsManagedInDLT && (
+          <div className="mb-4 p-3 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm">
+            Dieser Bereich ist vorerst read-only. Bitte nutze für New ARR/Commissions den zentralen Bereich
+            {' '}<strong>DLT → Planning → 1. NEW ARR</strong>.
+          </div>
+        )}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center space-x-4">
             <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-lg transition">
@@ -496,10 +508,10 @@ export default function SettingsPanel({ settings, onSave, onBack, currentUser, o
             />
             <button
               onClick={handleSave}
-              disabled={saving || !percentageValid}
-              className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition disabled:opacity-50"
+              disabled={settingsManagedInDLT || saving || !percentageValid}
+              className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {saving ? t('common.saving') : 'Alle speichern'}
+              {settingsManagedInDLT ? 'Speichern deaktiviert (DLT)' : (saving ? t('common.saving') : 'Alle speichern')}
             </button>
           </div>
         </div>

@@ -1,0 +1,227 @@
+{
+  "meta": {
+    "name": "ARR Forecast Context",
+    "repo": "ae-comp-app",
+    "version": "1.0.0",
+    "last_updated": "2026-03-04",
+    "status": "planning_reference"
+  },
+  "scope": {
+    "feature_area": "New Business / Strategic Reports / Forecast",
+    "objective": "Maschinenlesbare Referenz fuer aktuelle Forecast-Logik und Advanced-Target-Modell.",
+    "time_granularity": "monthly",
+    "currency": "EUR"
+  },
+  "current_state": {
+    "strategic_reports_forecast": {
+      "component": "src/components/DLTStrategicReports.tsx",
+      "logic_type": "simple_linear_projection",
+      "actual_basis": "monthlyData.subsARR bis currentMonth",
+      "projection_basis": "Durchschnitt actualMonths.subsARR",
+      "future_formula": "forecast = avgGrowth * (1 + monthOffset * 0.02)",
+      "includes_pipeline_probability": false,
+      "includes_expected_close_date_distribution": false,
+      "includes_seasonality": false,
+      "notes": [
+        "Forecast betrifft aktuell primär Subs-ARR-Projektion.",
+        "Pay-ARR wird in Forecast-Berechnung nicht als separates probabilistisches Modell projiziert."
+      ]
+    },
+    "pipeline_forecast_widget": {
+      "component": "src/components/Pipeline.tsx",
+      "logic_type": "pipeline_snapshot",
+      "active_stages": ["sql", "demo_booked", "demo_completed", "sent_quote"],
+      "total_formula": "sum((expected_subs_monthly*12) + (expected_pay_monthly*12))",
+      "weighted_formula": "sum((((expected_subs_monthly*12) + (expected_pay_monthly*12)) * probability))",
+      "probability_fallback": "opportunity.probability ?? getDefaultProbability(stage, settings)",
+      "risk_flags": ["overdueCount", "stuckCount"]
+    }
+  },
+  "data_sources": {
+    "actuals": [
+      {
+        "table": "go_lives",
+        "purpose": "Istwerte fuer Subs/Pay/All-in ARR, Go-Live Volumen, Terminal-Penetration",
+        "primary_fields": [
+          "month",
+          "year",
+          "user_id",
+          "subs_monthly",
+          "pay_monthly",
+          "pay_arr_target",
+          "has_terminal"
+        ]
+      }
+    ],
+    "planning_targets": [
+      {
+        "table": "dlt_planzahlen",
+        "purpose": "Zentrale DLT-Targets fuer Monatsziele und Bill-Parameter",
+        "primary_fields": [
+          "business_inbound",
+          "business_outbound",
+          "business_partnerships",
+          "business_terminal_sales",
+          "business_tipping",
+          "avg_subs_bill",
+          "avg_pay_bill_terminal",
+          "avg_pay_bill_tipping"
+        ]
+      },
+      {
+        "table": "ae_settings",
+        "purpose": "AE-spezifische Ziel- und Provisionsparameter; von DLT Planning gespeist",
+        "primary_fields": [
+          "monthly_go_live_targets",
+          "monthly_subs_targets",
+          "monthly_pay_targets",
+          "target_percentage",
+          "subs_tiers",
+          "pay_tiers",
+          "terminal_base",
+          "terminal_bonus"
+        ]
+      }
+    ],
+    "pipeline_inputs": [
+      {
+        "table": "opportunities",
+        "purpose": "Future-ARR Potenzial pro Deal",
+        "primary_fields": [
+          "stage",
+          "expected_subs_monthly",
+          "expected_pay_monthly",
+          "probability",
+          "expected_close_date",
+          "has_terminal",
+          "stage_changed_at",
+          "imported_from",
+          "sf_created_date",
+          "user_id"
+        ]
+      },
+      {
+        "table": "pipeline_settings",
+        "purpose": "Default-Wahrscheinlichkeiten und Stage-Dauern",
+        "primary_fields": [
+          "sql_probability",
+          "demo_booked_probability",
+          "demo_completed_probability",
+          "sent_quote_probability",
+          "sql_to_demo_booked_days",
+          "demo_booked_to_completed_days",
+          "demo_completed_to_quote_days",
+          "quote_to_close_days"
+        ]
+      },
+      {
+        "table": "opportunity_stage_history",
+        "purpose": "Historische Stage-Wechsel fuer Conversion/Cycle-Tuning",
+        "primary_fields": [
+          "from_stage",
+          "to_stage",
+          "changed_at",
+          "probability_at_change",
+          "expected_arr_at_change"
+        ]
+      }
+    ]
+  },
+  "domain_formulas": {
+    "arr_conversion": "ARR = monthly_value * 12",
+    "opportunity_total_arr": "opp_arr = (expected_subs_monthly*12) + (expected_pay_monthly*12)",
+    "opportunity_weighted_arr": "weighted_opp_arr = opp_arr * p_win",
+    "plan_targets": {
+      "go_lives_target_month": "business_inbound + business_outbound + business_partnerships",
+      "subs_target_month": "go_lives_target_month * avg_subs_bill * 12",
+      "pay_target_month": "(terminal_sales * avg_pay_bill_terminal * 12) + (tipping * avg_pay_bill_tipping * 12)"
+    }
+  },
+  "advanced_forecast_target_model": {
+    "status": "not_implemented",
+    "goal": "Kombiniere Ist-Go-Lives und probabilistische Future-Deals zu einem belastbaren Monats- und Jahresforecast.",
+    "monthly_equation": "forecast_arr_month = actual_arr_month + committed_arr_month + weighted_pipeline_arr_month + adjustment_arr_month",
+    "components": [
+      {
+        "id": "actual_arr_month",
+        "description": "Gebuchte ARR-Istwerte aus bereits erfolgten Go-Lives im Monat.",
+        "source": "go_lives"
+      },
+      {
+        "id": "committed_arr_month",
+        "description": "Deals mit Stage close_won (oder hohe Commitment-Regel) mit geplantem Go-Live im Monat.",
+        "source": ["opportunities", "go_lives"]
+      },
+      {
+        "id": "weighted_pipeline_arr_month",
+        "description": "Summe aktiver Opportunities mit p_win und erwarteter Close/Golive-Monatszuordnung.",
+        "source": ["opportunities", "pipeline_settings", "opportunity_stage_history"]
+      },
+      {
+        "id": "adjustment_arr_month",
+        "description": "Optionale Korrektur auf Basis historischer Forecast-Bias, Slip-Rate und Saisonfaktoren.",
+        "source": "derived_metrics"
+      }
+    ],
+    "probability_strategy": {
+      "primary": "opportunity.probability (wenn gesetzt)",
+      "fallback": "stage-default aus pipeline_settings",
+      "calibration": "periodische Re-Kalibrierung ueber Won/Lost Historie je Stage"
+    },
+    "date_allocation_strategy": {
+      "primary": "expected_close_date pro Deal",
+      "fallback": "calculateExpectedCloseDate(stage, pipeline_settings)",
+      "spillover_rule": "optional: Anteil in Folge-Monat bei hoher Slip-Rate"
+    },
+    "output_views": [
+      "forecast_by_month_subs_pay_allin",
+      "forecast_ytd_vs_goal_ytd",
+      "forecast_ytd_vs_year_goal",
+      "forecast_by_owner",
+      "forecast_risk_bands_best_base_worst"
+    ]
+  },
+  "quality_and_governance": {
+    "required_validations": [
+      "expected_subs_monthly >= 0",
+      "expected_pay_monthly >= 0",
+      "probability in [0,1] oder null",
+      "expected_close_date plausibel bei aktiven Stages",
+      "Deduplizierung importierter Opportunities (external_id/sfid)"
+    ],
+    "data_gaps_to_monitor": [
+      "fehlende expected_close_date bei aktiven Deals",
+      "manuell gesetzte probability ohne regelmaessige Kalibrierung",
+      "stage_changed_at veraltet -> Stuck-Risiko",
+      "inkonsistente Owner-Zuordnung zwischen Pipeline und Go-Lives"
+    ],
+    "auditability": [
+      "Forecast-Inputs je Lauf versionieren (year, filters, snapshot_time)",
+      "Abweichung Forecast vs Ist je Monat speichern (bias tracking)"
+    ]
+  },
+  "implementation_backlog_reference": {
+    "phase_1_foundation": [
+      "Forecast-Input-View mit Opportunity-Monatszuordnung bauen",
+      "Current Forecast und Pipeline Snapshot logisch entkoppeln",
+      "Subs + Pay Forecast parallel in Strategic Reports darstellen"
+    ],
+    "phase_2_modeling": [
+      "Stage-basierte Probability-Kalibrierung aus opportunity_stage_history",
+      "Slip-Rate und Conversion-Lag in Monatsallokation integrieren",
+      "Best/Base/Worst Szenarien einfuehren"
+    ],
+    "phase_3_governance": [
+      "Forecast-Bias Monitoring Dashboard",
+      "Warnungen fuer Datenqualitaet (fehlendes close_date, stale deals)",
+      "Automatisierte Regressionstests fuer Forecast-Formeln"
+    ]
+  },
+  "code_references": {
+    "strategic_reports_forecast_component": "src/components/DLTStrategicReports.tsx",
+    "pipeline_component": "src/components/Pipeline.tsx",
+    "pipeline_types_and_formulas": "src/lib/pipeline-types.ts",
+    "pipeline_data_hooks": "src/lib/pipeline-hooks.ts",
+    "dlt_targets_source": "src/components/DLTSettings.tsx"
+  }
+}

@@ -3,15 +3,20 @@
 // Version: v3.17.0
 // ============================================================================
 
-// CSV Row (roh geparst aus Salesforce Export)
+// CSV Row (roh geparst aus Google-Sheet CSV Export)
 export interface GoLiveCSVRow {
-  OAKID: string;
-  'Opportunity-Name': string;
-  'Land (Rechnungsanschrift)': string;
-  'Customer Info Stage': string;
-  Accountinhaber: string;
-  'Go Live Date': string;
-  'Opportunity-Inhaber': string;
+  'GL-Date': string;
+  'Oak ID': string;
+  'Customer Name': string;
+  'monthly subs': string;
+  Package: string;
+  'Terminal sold': string;
+  AE: string;
+  Provisionsrelevant: string;
+  'Partnerships J/N': string;
+  Partnerschaftsname: string;
+  Enterprise: string;
+  'Pay Value after 3 month': string;
 }
 
 // Unterstützte Länder
@@ -28,6 +33,13 @@ export interface GoLiveStagingRow {
   opportunityOwner: string;
   goLiveDate: string; // ISO format (YYYY-MM-DDTHH:mm:ss)
   month: number; // 1-12
+  monthlySubs: number | null;
+  packageName: string;
+  hasTerminal: boolean;
+  commissionRelevant: boolean;
+  payArrAfter3Months: number | null;
+  partnershipsEnabled: boolean;
+  partnershipName: string;
 
   // Auto-Matching Ergebnisse
   matchedUserId: string | null;

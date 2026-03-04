@@ -336,7 +336,7 @@ export default function GoLiveImport({ onBack, onImportComplete }: GoLiveImportP
             <div className="text-5xl mb-4">📁</div>
             <h2 className="text-2xl font-bold mb-2">Go-Live Import</h2>
             <p className="text-gray-600">
-              Salesforce Go-Live Reports (CSV) importieren
+              Google-Sheet CSV im DACH-Template importieren
             </p>
           </div>
 
@@ -357,7 +357,7 @@ export default function GoLiveImport({ onBack, onImportComplete }: GoLiveImportP
                 CSV-Datei auswählen
               </div>
               <div className="text-sm text-gray-500">
-                Delimiter: Semikolon (;) • Encoding: ISO-8859-1
+                Erwartete Header: GL-Date, Oak ID, Customer Name, monthly subs, ...
               </div>
             </label>
           </div>

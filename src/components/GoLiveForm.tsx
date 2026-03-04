@@ -11,18 +11,31 @@ import DebugPanel from './DebugPanel';
 interface GoLiveFormProps {
   onSubmit: (goLive: Partial<GoLive>) => Promise<{ error: any }>;
   onCancel: () => void;
-  defaultMonth: number;
   initialData?: GoLive;
   canEnterPayARR?: boolean;
   defaultCommissionRelevant?: boolean; // Default basierend auf Rolle des Empfängers
   currentUser?: User; // Für DebugPanel
   targetUserId?: string; // User für den der Go-Live angelegt wird
   avgPayBillTerminal?: number; // NEU: Avg Pay Bill Terminal aus Einstellungen für Target-Berechnung
+  assignableUsers?: User[];
+  selectedUserId?: string;
+  onSelectedUserChange?: (userId: string) => void;
 }
 
-export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialData, canEnterPayARR = false, defaultCommissionRelevant = true, currentUser, targetUserId, avgPayBillTerminal = 0 }: GoLiveFormProps) {
+export default function GoLiveForm({
+  onSubmit,
+  onCancel,
+  initialData,
+  canEnterPayARR = false,
+  defaultCommissionRelevant = true,
+  currentUser,
+  targetUserId,
+  avgPayBillTerminal = 0,
+  assignableUsers = [],
+  selectedUserId,
+  onSelectedUserChange,
+}: GoLiveFormProps) {
   const { t } = useLanguage();
-  const [month, setMonth] = useState(initialData?.month || defaultMonth);
   const [customerName, setCustomerName] = useState(initialData?.customer_name || '');
   const [oakId, setOakId] = useState(initialData?.oak_id?.toString() || '');
   const [goLiveDate, setGoLiveDate] = useState(initialData?.go_live_date || '');
@@ -67,8 +80,9 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
     setLoading(true);
 
     try {
+      const derivedMonth = goLiveDate ? new Date(goLiveDate).getMonth() + 1 : undefined;
       const result = await onSubmit({
-        month,
+        month: derivedMonth,
         customer_name: customerName,
         oak_id: oakId ? parseInt(oakId) : null,
         go_live_date: goLiveDate,
@@ -125,7 +139,7 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
             commissionRelevant: commissionRelevant,
             isEdit: !!initialData,
             formData: {
-              month,
+              month: goLiveDate ? new Date(goLiveDate).getMonth() + 1 : null,
               customerName,
               subsMonthly,
               hasTerminal,
@@ -140,34 +154,38 @@ export default function GoLiveForm({ onSubmit, onCancel, defaultMonth, initialDa
       </h2>
 
       <form onSubmit={handleSubmit} className="space-y-3 md:space-y-4">
-        {/* Monat + Datum Row */}
-        <div className="grid grid-cols-2 gap-3">
+        {/* User Zuordnung */}
+        {assignableUsers.length > 0 && onSelectedUserChange && (
           <div>
             <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
-              {t('common.month')}
+              {t('userSelector.goLiveFor')}
             </label>
             <select
-              value={month}
-              onChange={(e) => setMonth(parseInt(e.target.value))}
-              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              value={selectedUserId || ''}
+              onChange={(e) => onSelectedUserChange(e.target.value)}
+              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 bg-white"
             >
-              {[1,2,3,4,5,6,7,8,9,10,11,12].map(m => (
-                <option key={m} value={m}>{t(`months.${m}`)}</option>
+              {assignableUsers.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name} - {t(`roles.${u.role}`)}
+                </option>
               ))}
             </select>
           </div>
-          <div>
-            <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
-              {t('goLive.goLiveDate')}
-            </label>
-            <input
-              type="date"
-              value={goLiveDate}
-              onChange={(e) => setGoLiveDate(e.target.value)}
-              className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-              required
-            />
-          </div>
+        )}
+
+        {/* Datum */}
+        <div>
+          <label className="block text-xs md:text-sm font-medium text-gray-700 mb-1">
+            {t('goLive.goLiveDate')}
+          </label>
+          <input
+            type="date"
+            value={goLiveDate}
+            onChange={(e) => setGoLiveDate(e.target.value)}
+            className="w-full px-3 py-2.5 md:py-2 text-base md:text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+            required
+          />
         </div>
 
         {/* Kundenname */}

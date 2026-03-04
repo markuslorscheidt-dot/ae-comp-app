@@ -54,7 +54,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   // Load all users
   const { users, loading: usersLoading } = useAllUsers();
 
-  // Load DLT Planzahlen für Targets
+  // DLT-Settings (Planzahlen) sind die zentrale Quelle für Plan-Ziele.
   const [planzahlen, setPlanzahlen] = useState<DLTPlanzahlen | null>(null);
   const [planzahlenLoading, setPlanzahlenLoading] = useState(true);
   useEffect(() => {
@@ -65,6 +65,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         .select('*')
         .eq('year', selectedYear)
         .single();
+
       if (error && error.code !== 'PGRST116') {
         console.error('DLT Planzahlen load error:', error);
         setPlanzahlen(null);
@@ -75,7 +76,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     };
     fetchPlanzahlen();
   }, [selectedYear]);
-  
+
   // Filter: plannable Users (für Targets) und Go-Live Empfänger (für IST)
   const plannableUsers = useMemo(
     () => users.filter(u => isPlannable(u.role)),
@@ -187,6 +188,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         data[idx].goLivesTarget += result.go_lives_target;
       });
     });
+
     if (planTargets) {
       data.forEach((month, idx) => {
         month.subsTarget = planTargets.subsTarget[idx];
@@ -206,6 +208,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       data[idx].cumTotalARR = cumSubsARR + cumPayARR;
       data[idx].cumTotalTarget = cumSubsTarget + cumPayTarget;
     });
+
     return data;
   }, [combined, multiSettings, multiGoLives, goLiveReceiverIds, planTargets]);
 
@@ -282,6 +285,22 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     totalPayTarget: ytdMonthlyResult.reduce((s, r) => s + r.pay_target, 0),
     totalPayARR: ytdMonthlyResult.reduce((s, r) => s + r.pay_actual, 0),
   }), [ytdMonthlyResult]);
+
+  // Bill-KPIs sollen auf DLT-Settings-Planzahlen basieren.
+  const planBillMetrics = useMemo(() => {
+    if (!planzahlen || !planTargets) return null;
+    const yearlyGoLivesGoal = planTargets.goLivesTarget.reduce((s, v) => s + v, 0);
+    const yearlyPayGoal = planTargets.payTarget.reduce((s, v) => s + v, 0);
+    const subsBill = planzahlen.avg_subs_bill || 0;
+    const payBill = yearlyGoLivesGoal > 0 ? yearlyPayGoal / (yearlyGoLivesGoal * 12) : 0;
+    return {
+      subsBill,
+      payBill,
+      payBillTerminal: planzahlen.avg_pay_bill_terminal || 0,
+      payBillTipping: planzahlen.avg_pay_bill_tipping || 0,
+      allInBill: subsBill + payBill
+    };
+  }, [planzahlen, planTargets]);
 
   const loading = usersLoading || dataLoading || planzahlenLoading;
 
@@ -532,9 +551,20 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           </div>
         )}
 
-        {/* YTD Summary – wie Jahresübersicht, basierend auf Planzahlen (ohne Provision) */}
+        {/* YTD Summary – wie Jahresübersicht, basierend auf zentralen DLT-Settings (ohne Provision) */}
         {reportType === 'ytd' && (
           <div className="space-y-6">
+            {/*
+              Bill-KPIs basieren auf DLT-Settings-Planzahlen.
+              Dadurch gilt konsistent: Subs Bill + Pay Bill = All-in Bill.
+            */}
+            {(() => {
+              const monthlySubsBill = planBillMetrics?.subsBill ?? 0;
+              const monthlyPayBill = planBillMetrics?.payBill ?? 0;
+              const monthlyAllInBill = planBillMetrics?.allInBill ?? 0;
+              const hasBillMetrics = !!planBillMetrics;
+              return (
+                <>
             {/* Reihe 1: Basis-KPIs (wie Jahresübersicht) */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 md:gap-4">
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4">
@@ -549,27 +579,52 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4">
                 <span className="text-xs md:text-sm text-gray-500 truncate block">{t('yearOverview.avgMonthlySubsBill')}</span>
                 <p className="text-lg md:text-2xl font-bold text-green-600">
-                  {ytdSummary.totalGoLives > 0 ? formatCurrency((ytdSummary.totalSubsARR / 12) / ytdSummary.totalGoLives) : '–'}
+                  {hasBillMetrics ? formatCurrency(monthlySubsBill) : '–'}
                 </p>
               </div>
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4">
                 <span className="text-xs md:text-sm text-gray-500 truncate block">{t('yearOverview.avgMonthlyPayBill')}</span>
                 <p className="text-lg md:text-2xl font-bold text-orange-600">
-                  {ytdSummary.totalTerminals > 0 ? formatCurrency((ytdSummary.totalPayARR / 12) / ytdSummary.totalTerminals) : '–'}
+                  {hasBillMetrics ? formatCurrency(monthlyPayBill) : '–'}
                 </p>
+                {hasBillMetrics && (
+                  <p className="text-[10px] md:text-xs text-gray-500 mt-1">
+                    Pay Bill (Terminal): {formatCurrency(planBillMetrics.payBillTerminal)} | Tipping: {formatCurrency(planBillMetrics.payBillTipping)}
+                  </p>
+                )}
               </div>
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 col-span-2 sm:col-span-1">
                 <span className="text-xs md:text-sm text-gray-500 truncate block">{t('yearOverview.avgMonthlyAllInBill')}</span>
                 <p className="text-lg md:text-2xl font-bold text-blue-600">
-                  {ytdSummary.totalGoLives > 0 ? formatCurrency((ytdSummary.totalAllInARR / 12) / ytdSummary.totalGoLives) : '–'}
+                  {hasBillMetrics ? formatCurrency(monthlyAllInBill) : '–'}
                 </p>
               </div>
             </div>
 
+            <div className="text-xs text-gray-500 -mt-2">
+              Basis: DLT-Settings-Planzahlen (Jahresziel) als Monatswert pro Go-Live. Daher gilt: Subs Bill + Pay Bill = All-in Bill.
+            </div>
+
+                <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border border-gray-200">
+                  <div className="text-xs md:text-sm text-gray-600 mb-2">
+                    Berücksichtigte Monate (YTD):
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {MONTH_NAMES_SHORT.slice(0, currentMonth + 1).map((month) => (
+                      <span
+                        key={month}
+                        className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200"
+                      >
+                        {month}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
             {/* Reihe 2: ARR YTD vs Ziel mit Fortschrittsbalken */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 md:gap-4">
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-green-500">
-                <span className="text-xs md:text-sm text-gray-500">{t('yearOverview.subsArrYtdVsGoal')}</span>
+                <span className="text-xs md:text-sm text-gray-500">Subs ARR YTD vs Goal YTD</span>
                 <p className="text-base md:text-xl font-bold text-green-600">
                   {formatCurrency(ytdSummary.totalSubsARR)} <span className="text-gray-400 font-normal">/</span>{' '}
                   <span className="text-green-400">{formatCurrency(ytdSummary.totalSubsTarget)}</span>
@@ -582,7 +637,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </p>
               </div>
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-orange-500">
-                <span className="text-xs md:text-sm text-gray-500">{t('yearOverview.payArrYtdVsGoal')}</span>
+                <span className="text-xs md:text-sm text-gray-500">Pay ARR YTD vs Goal YTD</span>
                 <p className="text-base md:text-xl font-bold text-orange-600">
                   {formatCurrency(ytdSummary.totalPayARR)} <span className="text-gray-400 font-normal">/</span>{' '}
                   <span className="text-orange-400">{formatCurrency(ytdSummary.totalPayTarget)}</span>
@@ -595,7 +650,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </p>
               </div>
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-blue-500">
-                <span className="text-xs md:text-sm text-gray-500">{t('yearOverview.allInArrYtdVsGoal')}</span>
+                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD vs Goal YTD</span>
                 <p className="text-base md:text-xl font-bold text-blue-600">
                   {formatCurrency(ytdSummary.totalAllInARR)} <span className="text-gray-400 font-normal">/</span>{' '}
                   <span className="text-blue-400">{formatCurrency(ytdSummary.totalAllInTarget)}</span>
@@ -608,6 +663,52 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </p>
               </div>
             </div>
+
+            {/* Reihe 3: ARR YTD vs Jahresziel */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 md:gap-4">
+              <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-green-500">
+                <span className="text-xs md:text-sm text-gray-500">Subs ARR YTD vs Yearly ARR Goal</span>
+                <p className="text-base md:text-xl font-bold text-green-600">
+                  {formatCurrency(ytdSummary.totalSubsARR)} <span className="text-gray-400 font-normal">/</span>{' '}
+                  <span className="text-green-400">{formatCurrency(fullYearTotals.totalSubsTarget)}</span>
+                </p>
+                <div className="mt-1.5 md:mt-2 h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-green-500 rounded-full transition-all" style={{ width: `${Math.min(fullYearTotals.totalSubsTarget > 0 ? (ytdSummary.totalSubsARR / fullYearTotals.totalSubsTarget) * 100 : 0, 100)}%` }} />
+                </div>
+                <p className="text-[10px] md:text-xs text-gray-500 mt-1">
+                  {fullYearTotals.totalSubsTarget > 0 ? ((ytdSummary.totalSubsARR / fullYearTotals.totalSubsTarget) * 100).toFixed(1) : 0}% {t('yearOverview.achieved')}
+                </p>
+              </div>
+              <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-orange-500">
+                <span className="text-xs md:text-sm text-gray-500">Pay ARR YTD vs Yearly ARR Goal</span>
+                <p className="text-base md:text-xl font-bold text-orange-600">
+                  {formatCurrency(ytdSummary.totalPayARR)} <span className="text-gray-400 font-normal">/</span>{' '}
+                  <span className="text-orange-400">{formatCurrency(fullYearTotals.totalPayTarget)}</span>
+                </p>
+                <div className="mt-1.5 md:mt-2 h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-orange-500 rounded-full transition-all" style={{ width: `${Math.min(fullYearTotals.totalPayTarget > 0 ? (ytdSummary.totalPayARR / fullYearTotals.totalPayTarget) * 100 : 0, 100)}%` }} />
+                </div>
+                <p className="text-[10px] md:text-xs text-gray-500 mt-1">
+                  {fullYearTotals.totalPayTarget > 0 ? ((ytdSummary.totalPayARR / fullYearTotals.totalPayTarget) * 100).toFixed(1) : 0}% {t('yearOverview.achieved')}
+                </p>
+              </div>
+              <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-blue-500">
+                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD vs Yearly ARR Goal</span>
+                <p className="text-base md:text-xl font-bold text-blue-600">
+                  {formatCurrency(ytdSummary.totalAllInARR)} <span className="text-gray-400 font-normal">/</span>{' '}
+                  <span className="text-blue-400">{formatCurrency(fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget)}</span>
+                </p>
+                <div className="mt-1.5 md:mt-2 h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${Math.min((fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) > 0 ? (ytdSummary.totalAllInARR / (fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget)) * 100 : 0, 100)}%` }} />
+                </div>
+                <p className="text-[10px] md:text-xs text-gray-500 mt-1">
+                  {(fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) > 0 ? ((ytdSummary.totalAllInARR / (fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget)) * 100).toFixed(1) : 0}% {t('yearOverview.achieved')}
+                </p>
+              </div>
+            </div>
+                </>
+              );
+            })()}
 
             {/* Performance über Zeit (Subs + Pay IST/Ziel) */}
             <PerformanceChart monthlyResults={ytdMonthlyResult} showTargets={true} />

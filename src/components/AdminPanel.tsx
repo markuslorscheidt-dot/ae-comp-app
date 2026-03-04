@@ -178,6 +178,18 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
 
       if (error) throw error;
 
+      // Beim Austrittsdatum offene Rollenhistorie taggenau schließen.
+      if (editData.exit_date) {
+        const { error: closeHistoryError } = await supabase
+          .from('user_role_history')
+          .update({ effective_to: editData.exit_date })
+          .eq('user_id', editingUser.id)
+          .is('effective_to', null)
+          .lte('effective_from', editData.exit_date);
+
+        if (closeHistoryError) throw closeHistoryError;
+      }
+
       setEditSuccess(t('profile.saveSuccess'));
       setTimeout(() => {
         setEditingUser(null);

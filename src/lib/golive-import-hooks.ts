@@ -7,17 +7,14 @@
 import Papa from 'papaparse';
 import { supabase } from './supabase';
 import {
-  GoLiveCSVRow,
   GoLiveStagingRow,
   GoLiveFilters,
   GoLiveCountry,
   Partner,
   SubscriptionPackage,
   UserOption,
-  OpportunityOption,
   GoLiveImportResult,
   ImportProgressCallback,
-  COUNTRY_VARIANTS,
   validateStagingRow,
 } from './golive-types';
 
@@ -33,26 +30,33 @@ import {
  */
 export function parseGoLiveCSV(file: File): Promise<GoLiveStagingRow[]> {
   return new Promise((resolve, reject) => {
-    // FileReader für ISO-8859-1 Encoding (wichtig für Umlaute!)
+    // UTF-8 passt für Google-Sheet CSV Exporte.
     const reader = new FileReader();
     
     reader.onload = (event) => {
       const csvText = event.target?.result as string;
       
-      Papa.parse<GoLiveCSVRow>(csvText, {
-        delimiter: ';',
+      Papa.parse<Record<string, string>>(csvText, {
+        delimiter: '',
         header: true,
-        skipEmptyLines: true,
+        skipEmptyLines: 'greedy',
         transformHeader: (header) => header.trim(),
         complete: (results) => {
           try {
-            // Validierung: Erforderliche Spalten prüfen
+            // Validierung: Spezifisches Google-Sheet Template prüfen
             const requiredColumns = [
-              'OAKID',
-              'Opportunity-Name',
-              'Land (Rechnungsanschrift)',
-              'Accountinhaber',
-              'Go Live Date'
+              'GL-Date',
+              'Oak ID',
+              'Customer Name',
+              'monthly subs',
+              'Package',
+              'Terminal sold',
+              'AE',
+              'Provisionsrelevant',
+              'Partnerships J/N',
+              'Partnerschaftsname',
+              'Enterprise',
+              'Pay Value after 3 month'
             ];
 
             const headers = Object.keys(results.data[0] || {});
@@ -65,26 +69,37 @@ export function parseGoLiveCSV(file: File): Promise<GoLiveStagingRow[]> {
 
             // Transformation
             const transformed: GoLiveStagingRow[] = results.data
-              .filter(row => row.OAKID && row.OAKID.trim()) // Leere Zeilen filtern
+              .filter(row => {
+                const oakId = (row['Oak ID'] || '').trim();
+                const goLiveDate = (row['GL-Date'] || '').trim();
+                return oakId !== '' && goLiveDate !== '';
+              })
               .map(row => ({
                 // Aus CSV
-                oakid: row.OAKID?.trim() || '',
-                salonName: cleanSalonName(row['Opportunity-Name']),
-                country: normalizeCountry(row['Land (Rechnungsanschrift)']),
-                stage: row['Customer Info Stage']?.trim() || '',
-                accountOwner: row.Accountinhaber?.trim() || '',
-                opportunityOwner: row['Opportunity-Inhaber']?.trim() || '',
-                goLiveDate: parseGoLiveDate(row['Go Live Date']),
-                month: getMonthFromDate(row['Go Live Date']),
+                oakid: row['Oak ID']?.trim() || '',
+                salonName: cleanSalonName(row['Customer Name']),
+                country: 'Germany', // Das aktuelle Sheet enthält kein Länderfeld
+                stage: 'Google Sheet',
+                accountOwner: row.AE?.trim() || '',
+                opportunityOwner: '',
+                goLiveDate: parseGoLiveDate(row['GL-Date']),
+                month: getMonthFromDate(row['GL-Date']),
+                monthlySubs: parseNumber(row['monthly subs']),
+                packageName: row.Package?.trim() || '',
+                hasTerminal: parseYesNo(row['Terminal sold']) ?? false,
+                commissionRelevant: parseYesNo(row.Provisionsrelevant) ?? true,
+                payArrAfter3Months: parseNumber(row['Pay Value after 3 month']),
+                partnershipsEnabled: parseYesNo(row['Partnerships J/N']) ?? false,
+                partnershipName: row.Partnerschaftsname?.trim() || '',
 
                 // Initialisierung (wird später durch Matching gefüllt)
                 matchedUserId: null,
                 matchedUserName: null,
                 matchedOpportunityId: null,
                 matchedOpportunityName: null,
-                arr: null,
+                arr: parseNumber(row['monthly subs']) ? (parseNumber(row['monthly subs']) || 0) * 12 : null,
                 partnerId: null,
-                isEnterprise: false,
+                isEnterprise: parseYesNo(row.Enterprise) ?? false,
                 isDuplicate: false,
                 isImportable: true,
                 validationErrors: []
@@ -105,8 +120,7 @@ export function parseGoLiveCSV(file: File): Promise<GoLiveStagingRow[]> {
       reject(new Error('Datei konnte nicht gelesen werden'));
     };
 
-    // ISO-8859-1 Encoding für deutsche Umlaute
-    reader.readAsText(file, 'ISO-8859-1');
+    reader.readAsText(file, 'UTF-8');
   });
 }
 
@@ -119,15 +133,6 @@ function cleanSalonName(name: string | undefined): string {
 }
 
 /**
- * Normalisiert Ländernamen zu einheitlichem Format
- */
-function normalizeCountry(land: string | undefined): GoLiveCountry | string {
-  if (!land) return '';
-  const normalized = land.trim().toLowerCase();
-  return COUNTRY_VARIANTS[normalized] || land.trim();
-}
-
-/**
  * Parst deutsches Datumsformat zu ISO
  * Format: "06.01.2026 01:00" → "2026-01-06T01:00:00"
  */
@@ -135,17 +140,11 @@ function parseGoLiveDate(dateStr: string | undefined): string {
   if (!dateStr) return '';
 
   const trimmed = dateStr.trim();
-  const [datePart, timePart] = trimmed.split(' ');
-  
-  if (!datePart) return '';
-  
-  const [day, month, year] = datePart.split('.');
-  
-  if (!day || !month || !year) return '';
-  
-  const [hour, minute] = (timePart || '00:00').split(':');
+  const [day, month, year] = trimmed.split('.');
 
-  return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T${(hour || '00').padStart(2, '0')}:${(minute || '00').padStart(2, '0')}:00`;
+  if (!day || !month || !year) return '';
+
+  return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00`;
 }
 
 /**
@@ -159,6 +158,22 @@ function getMonthFromDate(dateStr: string | undefined): number {
   
   const date = new Date(isoDate);
   return isNaN(date.getTime()) ? 0 : date.getMonth() + 1; // 1-12
+}
+
+function parseYesNo(value: string | undefined): boolean | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'ja' || normalized === 'yes' || normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'nein' || normalized === 'no' || normalized === 'false' || normalized === '0') return false;
+  return null;
+}
+
+function parseNumber(value: string | undefined): number | null {
+  if (!value) return null;
+  const normalized = value.trim().replace(',', '.');
+  if (!normalized) return null;
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
 }
 
 // ============================================================================
@@ -182,45 +197,39 @@ export async function performMatching(
     throw new Error('Users konnten nicht geladen werden');
   }
 
-  // 2. Alle Opportunities laden
-  const { data: opportunities, error: oppsError } = await supabase
-    .from('opportunities')
-    .select('id, name, user_id');
-
-  if (oppsError) {
-    console.error('Fehler beim Laden der Opportunities:', oppsError);
-    // Kein throw - Opportunity-Matching ist optional
-  }
-
-  // 3. Bestehende OAKIDs laden (Duplikat-Check)
-  const oakids = rows.map(r => r.oakid).filter(Boolean);
+  // 2. Bestehende OAKIDs laden (Duplikat-Check)
+  const oakids = rows.map(r => parseInt(r.oakid, 10)).filter(n => Number.isInteger(n));
   
   let existingOakidSet = new Set<string>();
   
   if (oakids.length > 0) {
     const { data: existingOakids, error: oakError } = await supabase
       .from('go_lives')
-      .select('oakid')
-      .in('oakid', oakids);
+      .select('oak_id')
+      .in('oak_id', oakids);
 
     if (!oakError && existingOakids) {
-      existingOakidSet = new Set(existingOakids.map(e => e.oakid).filter(Boolean));
+      existingOakidSet = new Set(
+        existingOakids
+          .map((e: any) => (e.oak_id !== null && e.oak_id !== undefined ? String(e.oak_id) : ''))
+          .filter(Boolean)
+      );
     }
   }
 
-  // 4. Matching durchführen
+  // 3. Matching durchführen
   const matched = rows.map(row => {
     // User-Matching (STRICT)
     const user = findUserMatch(row.accountOwner, users || []);
-
-    // Opportunity-Matching (STRICT)
-    const opportunity = findOpportunityMatch(row.salonName, opportunities || []);
+    const oakIdInt = parseInt(row.oakid, 10);
+    const hasValidOakId = Number.isInteger(oakIdInt);
 
     // Duplikat-Check
     const isDuplicate = existingOakidSet.has(row.oakid);
 
     // Validierung
     const errors: string[] = [];
+    if (!hasValidOakId) errors.push('Oak ID ist nicht numerisch');
     if (!user) errors.push('Kein User-Match gefunden');
     if (isDuplicate) errors.push('OAKID bereits importiert');
 
@@ -228,10 +237,10 @@ export async function performMatching(
       ...row,
       matchedUserId: user?.id || null,
       matchedUserName: user?.name || null,
-      matchedOpportunityId: opportunity?.id || null,
-      matchedOpportunityName: opportunity?.name || null,
+      matchedOpportunityId: null,
+      matchedOpportunityName: null,
       isDuplicate,
-      isImportable: !isDuplicate && user !== null,
+      isImportable: !isDuplicate && user !== null && hasValidOakId,
       validationErrors: errors
     };
   });
@@ -246,47 +255,36 @@ export async function performMatching(
 function findUserMatch(csvName: string, users: UserOption[]): UserOption | null {
   if (!csvName || !users.length) return null;
 
-  const csvNameLower = csvName.toLowerCase().trim();
+  const csvNameLower = normalizeName(csvName);
 
   // 1. Exakte Übereinstimmung (case-insensitive)
   const exactMatch = users.find(u =>
-    u.name.toLowerCase().trim() === csvNameLower
+    normalizeName(u.name) === csvNameLower
   );
   if (exactMatch) return exactMatch;
 
   // 2. Fallback: Alle Wort-Teile (>2 Zeichen) müssen vorkommen
-  const nameParts = csvName.split(/[\s-]+/).filter(p => p.length > 2);
+  const nameParts = normalizeName(csvName).split(/[\s-]+/).filter(p => p.length > 2);
   
   if (nameParts.length === 0) return null;
 
   const partialMatch = users.find(u => {
-    const userNameLower = u.name.toLowerCase();
+    const userNameLower = normalizeName(u.name);
     return nameParts.every(part =>
-      userNameLower.includes(part.toLowerCase())
+      userNameLower.includes(part)
     );
   });
 
   return partialMatch || null;
 }
 
-/**
- * Findet einen Opportunity-Match basierend auf dem Salon-Namen
- * STRICT: Nur exakte Übereinstimmung
- */
-function findOpportunityMatch(
-  csvName: string,
-  opportunities: OpportunityOption[]
-): OpportunityOption | null {
-  if (!csvName || !opportunities.length) return null;
-
-  // CSV hat oft trailing "-" → wurde bereits in cleanSalonName entfernt
-  const cleanedName = csvName.toLowerCase().trim();
-
-  // Exakte Übereinstimmung
-  return opportunities.find(o =>
-    o.name.toLowerCase().trim() === cleanedName ||
-    o.name.toLowerCase().trim().replace(/-\s*$/, '') === cleanedName
-  ) || null;
+function normalizeName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
 }
 
 // ============================================================================
@@ -374,6 +372,7 @@ export async function importGoLives(
     r.isImportable &&
     r.matchedUserId &&
     r.arr && r.arr > 0 &&
+    Number.isInteger(parseInt(r.oakid, 10)) &&
     !r.isDuplicate
   );
 
@@ -398,15 +397,15 @@ export async function importGoLives(
       go_live_date: row.goLiveDate,
       year: new Date(row.goLiveDate).getFullYear(),
       month: row.month,
-      subs_monthly: Math.round((row.arr || 0) / 12), // ARR → monatlich
+      subs_monthly: row.monthlySubs ?? Math.round((row.arr || 0) / 12),
       subs_arr: row.arr,
-      has_terminal: false, // Default
-      pay_arr: null,
-      commission_relevant: true, // Default für AE Go-Lives
+      has_terminal: row.hasTerminal,
+      pay_arr: row.payArrAfter3Months,
+      commission_relevant: row.commissionRelevant,
       partner_id: row.partnerId || null,
       is_enterprise: row.isEnterprise,
-      oakid: row.oakid,
-      notes: `Import aus Salesforce Report (${new Date().toLocaleDateString('de-DE')})`
+      oak_id: parseInt(row.oakid, 10),
+      notes: `Import aus Google-Sheet CSV (${new Date().toLocaleDateString('de-DE')})`
     }));
 
     // Insert
@@ -581,10 +580,13 @@ export async function loadAllUsers(): Promise<UserOption[]> {
  * Prüft ob eine OAKID bereits in der DB existiert
  */
 export async function checkOakidExists(oakid: string): Promise<boolean> {
+  const oakIdInt = parseInt(oakid, 10);
+  if (!Number.isInteger(oakIdInt)) return false;
+
   const { data, error } = await supabase
     .from('go_lives')
     .select('id')
-    .eq('oakid', oakid)
+    .eq('oak_id', oakIdInt)
     .limit(1);
 
   if (error) {
