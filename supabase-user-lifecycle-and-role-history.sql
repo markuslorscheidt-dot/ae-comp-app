@@ -125,7 +125,7 @@ AS $$
 $$;
 
 
--- 5) Trigger: Go-Live darf nur im Beschäftigungszeitraum zugeordnet werden
+-- 5) Trigger: Go-Live wird auch außerhalb Beschäftigungszeitraum zugelassen
 CREATE OR REPLACE FUNCTION validate_go_live_user_assignment()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -140,11 +140,13 @@ BEGIN
   WHERE id = NEW.user_id;
 
   IF v_entry_date IS NOT NULL AND NEW.go_live_date::date < v_entry_date THEN
-    RAISE EXCEPTION 'Go-Live Datum liegt vor Eintrittsdatum des Users';
+    RAISE NOTICE 'Go-Live liegt vor Eintrittsdatum (zugelassen): user_id=%, go_live_date=%, entry_date=%',
+      NEW.user_id, NEW.go_live_date::date, v_entry_date;
   END IF;
 
   IF v_exit_date IS NOT NULL AND NEW.go_live_date::date > v_exit_date THEN
-    RAISE EXCEPTION 'Go-Live Datum liegt nach Austrittsdatum des Users';
+    RAISE NOTICE 'Go-Live liegt nach Austrittsdatum (zugelassen): user_id=%, go_live_date=%, exit_date=%',
+      NEW.user_id, NEW.go_live_date::date, v_exit_date;
   END IF;
 
   RETURN NEW;

@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
+const GO_LIVE_AUTO_IMPORT_KEY = 'go_live_auto_import_enabled';
+
 type ParsedGoLiveRow = {
   rowNumber: number;
   goLiveDate: string | null;
@@ -130,6 +132,37 @@ function getServerSupabase() {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceRoleKey) return null;
   return createClient(supabaseUrl, serviceRoleKey);
+}
+
+export async function getGoLiveAutoImportState() {
+  const supabase = getServerSupabase();
+  if (!supabase) {
+    return {
+      success: false as const,
+      status: 500,
+      error: 'SUPABASE_SERVICE_ROLE_KEY fehlt. Auto-Import-Flag kann nicht geladen werden.',
+    };
+  }
+
+  const { data, error } = await supabase
+    .from('import_controls')
+    .select('enabled, updated_at')
+    .eq('key', GO_LIVE_AUTO_IMPORT_KEY)
+    .maybeSingle();
+
+  if (error) {
+    return {
+      success: false as const,
+      status: 500,
+      error: `Auto-Import-Flag konnte nicht geladen werden: ${error.message}`,
+    };
+  }
+
+  return {
+    success: true as const,
+    enabled: Boolean(data?.enabled),
+    updatedAt: data?.updated_at || null,
+  };
 }
 
 async function extractSheetRows(): Promise<ExtractResult> {

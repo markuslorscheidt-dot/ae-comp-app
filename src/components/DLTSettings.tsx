@@ -59,6 +59,13 @@ interface GoLiveDryRunResponse {
   error?: string;
 }
 
+interface GoLiveAutoImportResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
 // Role display names
 const ROLE_LABELS: Record<UserRole, string> = {
   country_manager: 'Country Manager',
@@ -121,6 +128,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [goLiveSaveMessage, setGoLiveSaveMessage] = useState('');
   const [goLiveImportMode, setGoLiveImportMode] = useState<'manual' | 'automatic'>('manual');
   const [autoImportEnabled, setAutoImportEnabled] = useState(false);
+  const [autoImportLoading, setAutoImportLoading] = useState(false);
+  const [autoImportSaving, setAutoImportSaving] = useState(false);
+  const [autoImportMessage, setAutoImportMessage] = useState('');
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchError, setBatchError] = useState('');
   const [batchResult, setBatchResult] = useState<GoLiveDryRunResponse | null>(null);
@@ -258,6 +268,56 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
     } finally {
       setBatchLoading(false);
+    }
+  };
+
+  const loadAutoImportState = useCallback(async () => {
+    setAutoImportLoading(true);
+    setAutoImportMessage('');
+    try {
+      const response = await fetch('/api/goLive/sync/auto-import', { method: 'GET' });
+      const data = (await response.json()) as GoLiveAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      setAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+    } finally {
+      setAutoImportLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'goLives') {
+      loadAutoImportState();
+    }
+  }, [activeTab, loadAutoImportState]);
+
+  const handleAutoImportToggle = async (enabled: boolean) => {
+    setAutoImportEnabled(enabled);
+    setAutoImportSaving(true);
+    setAutoImportMessage('');
+    try {
+      const response = await fetch('/api/goLive/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as GoLiveAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setAutoImportEnabled(!enabled);
+        setAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setAutoImportEnabled(Boolean(data.enabled));
+      setAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
+    } catch (err: any) {
+      setAutoImportEnabled(!enabled);
+      setAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setAutoImportSaving(false);
     }
   };
   
@@ -1332,13 +1392,18 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   type="checkbox"
                   className="h-4 w-4"
                   checked={autoImportEnabled}
-                  onChange={(e) => setAutoImportEnabled(e.target.checked)}
+                  disabled={autoImportLoading || autoImportSaving}
+                  onChange={(e) => handleAutoImportToggle(e.target.checked)}
                 />
               </label>
 
-              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3">
-                Hinweis: Der Schalter aktiviert nur die UI-Option. Daten laufen erst automatisch ein,
-                wenn zusaetzlich ein Scheduler/Cron den Import-Endpoint regelmaessig triggert.
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+                <div>
+                  Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.
+                </div>
+                {autoImportLoading ? <div>Status wird geladen...</div> : null}
+                {autoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                {autoImportMessage ? <div>{autoImportMessage}</div> : null}
               </div>
 
               <div className="flex items-center gap-3">

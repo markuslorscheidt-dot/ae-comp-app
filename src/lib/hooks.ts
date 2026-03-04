@@ -57,6 +57,13 @@ function isCommissionRelevantRole(role: UserRole): boolean {
   return COMMISSION_RELEVANT_ROLES.includes(role);
 }
 
+function getMonthFromGoLiveDate(goLiveDate?: string): number | null {
+  if (!goLiveDate) return null;
+  const monthPart = Number(goLiveDate.slice(5, 7));
+  if (Number.isNaN(monthPart) || monthPart < 1 || monthPart > 12) return null;
+  return monthPart;
+}
+
 async function validateUserAssignmentForDate(userId: string | undefined, goLiveDate: string | undefined) {
   if (!userId || !goLiveDate) return { error: null };
 
@@ -68,14 +75,6 @@ async function validateUserAssignmentForDate(userId: string | undefined, goLiveD
 
   if (error || !user) {
     return { error: { message: 'User konnte nicht geprüft werden' } };
-  }
-
-  const effectiveEntryDate = user.entry_date || user.start_date;
-  if (effectiveEntryDate && goLiveDate < effectiveEntryDate) {
-    return { error: { message: 'Go-Live liegt vor dem Eintrittsdatum des Users' } };
-  }
-  if (user.exit_date && goLiveDate > user.exit_date) {
-    return { error: { message: 'Go-Live liegt nach dem Austrittsdatum des Users' } };
   }
 
   return { error: null };
@@ -462,7 +461,7 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
           id: gl.id,
           user_id: gl.user_id,
           year: gl.year,
-          month: gl.month,
+          month: Number(gl.month) || getMonthFromGoLiveDate(gl.go_live_date) || 1,
           customer_name: gl.customer_name,
           oak_id: gl.oak_id ? Number(gl.oak_id) : null,
           go_live_date: gl.go_live_date,
@@ -501,6 +500,7 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
 
   const addGoLive = async (goLive: Partial<GoLive>) => {
     const subsArr = (goLive.subs_monthly || 0) * 12;
+    const derivedMonth = getMonthFromGoLiveDate(goLive.go_live_date) ?? goLive.month;
     const assignmentCheck = await validateUserAssignmentForDate(goLive.user_id, goLive.go_live_date);
     if (assignmentCheck.error) return { data: null, error: assignmentCheck.error };
 
@@ -517,7 +517,7 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
       .insert({
         user_id: goLive.user_id,
         year: goLive.year || 2026,
-        month: goLive.month,
+        month: derivedMonth,
         customer_name: goLive.customer_name,
         go_live_date: goLive.go_live_date,
         subs_monthly: goLive.subs_monthly || 0,
@@ -562,8 +562,13 @@ export function useGoLives(userId: string | undefined, year: number = 2026) {
     if (updates.is_enterprise !== undefined) updateData.is_enterprise = updates.is_enterprise;
     // NEU: Subscription Package
     if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
-    // NEU: Monat (bei Datumsänderung)
-    if (updates.month !== undefined) updateData.month = updates.month;
+    // Monat immer primär aus Datum ableiten
+    const monthFromDate = getMonthFromGoLiveDate(updates.go_live_date);
+    if (monthFromDate !== null) {
+      updateData.month = monthFromDate;
+    } else if (updates.month !== undefined) {
+      updateData.month = updates.month;
+    }
 
     if (updates.user_id || updates.go_live_date) {
       const { data: existingGoLive, error: existingGoLiveError } = await supabase
@@ -781,7 +786,7 @@ export function useAllGoLives(year: number = 2026) {
             id: gl.id,
             user_id: gl.user_id,
             year: gl.year,
-            month: gl.month,
+            month: Number(gl.month) || getMonthFromGoLiveDate(gl.go_live_date) || 1,
             customer_name: gl.customer_name,
             oak_id: gl.oak_id ? Number(gl.oak_id) : null,
             go_live_date: gl.go_live_date,
@@ -1017,7 +1022,7 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
           id: gl.id,
           user_id: gl.user_id,
           year: gl.year,
-          month: gl.month,
+          month: Number(gl.month) || getMonthFromGoLiveDate(gl.go_live_date) || 1,
           customer_name: gl.customer_name,
           oak_id: gl.oak_id ? Number(gl.oak_id) : null,
           go_live_date: gl.go_live_date,
@@ -1053,6 +1058,7 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
   const addGoLive = async (goLive: Partial<GoLive>) => {
     const subsArr = (goLive.subs_monthly || 0) * 12;
     const targetUserId = goLive.user_id || userId;
+    const derivedMonth = getMonthFromGoLiveDate(goLive.go_live_date) ?? goLive.month;
     const assignmentCheck = await validateUserAssignmentForDate(targetUserId, goLive.go_live_date);
     if (assignmentCheck.error) return { data: null, error: assignmentCheck.error };
 
@@ -1069,7 +1075,7 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
       .insert({
         user_id: targetUserId,
         year: goLive.year || year,
-        month: goLive.month,
+        month: derivedMonth,
         customer_name: goLive.customer_name,
         oak_id: goLive.oak_id || null,
         go_live_date: goLive.go_live_date,
@@ -1115,8 +1121,13 @@ export function useGoLivesForUser(userId: string | undefined, year: number = 202
     if (updates.is_enterprise !== undefined) updateData.is_enterprise = updates.is_enterprise;
     // NEU: Subscription Package
     if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
-    // NEU: Monat (bei Datumsänderung)
-    if (updates.month !== undefined) updateData.month = updates.month;
+    // Monat immer primär aus Datum ableiten
+    const monthFromDate = getMonthFromGoLiveDate(updates.go_live_date);
+    if (monthFromDate !== null) {
+      updateData.month = monthFromDate;
+    } else if (updates.month !== undefined) {
+      updateData.month = updates.month;
+    }
 
     if (updates.user_id || updates.go_live_date) {
       const { data: existingGoLive, error: existingGoLiveError } = await supabase
@@ -1227,7 +1238,7 @@ export function useMultiUserData(userIds: string[], year: number = 2026, plannab
           id: gl.id,
           user_id: gl.user_id,
           year: gl.year,
-          month: gl.month,
+          month: Number(gl.month) || getMonthFromGoLiveDate(gl.go_live_date) || 1,
           customer_name: gl.customer_name,
           oak_id: gl.oak_id ? Number(gl.oak_id) : null,
           go_live_date: gl.go_live_date,
@@ -1328,7 +1339,7 @@ export function useMultiUserData(userIds: string[], year: number = 2026, plannab
         id: gl.id,
         user_id: gl.user_id,
         year: gl.year,
-        month: gl.month,
+        month: Number(gl.month) || getMonthFromGoLiveDate(gl.go_live_date) || 1,
         customer_name: gl.customer_name,
         oak_id: gl.oak_id ? Number(gl.oak_id) : null,
         go_live_date: gl.go_live_date,
@@ -1885,8 +1896,13 @@ export async function updateGoLiveUniversal(id: string, updates: Partial<GoLive>
   if (updates.is_enterprise !== undefined) updateData.is_enterprise = updates.is_enterprise;
   // NEU: Subscription Package
   if (updates.subscription_package_id !== undefined) updateData.subscription_package_id = updates.subscription_package_id;
-  // NEU: Monat (bei Datumsänderung)
-  if (updates.month !== undefined) updateData.month = updates.month;
+  // Monat immer primär aus Datum ableiten
+  const monthFromDate = getMonthFromGoLiveDate(updates.go_live_date);
+  if (monthFromDate !== null) {
+    updateData.month = monthFromDate;
+  } else if (updates.month !== undefined) {
+    updateData.month = updates.month;
+  }
 
   if (updates.user_id || updates.go_live_date) {
     const { data: existingGoLive, error: existingGoLiveError } = await supabase
