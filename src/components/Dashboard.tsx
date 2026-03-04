@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { User, GoLive, AESettings, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, Challenge, BusinessArea, BUSINESS_AREA_LABELS } from '@/lib/types';
+import { User, GoLive, AESettings, isPlannable, canReceiveGoLives, Challenge, BusinessArea, BUSINESS_AREA_LABELS } from '@/lib/types';
 import { useAllUsers, useSettingsForUser, useGoLivesForUser, useMultiUserData, updateGoLiveUniversal, deleteGoLiveUniversal, useChallenges, calculateChallengeProgress } from '@/lib/hooks';
 import { useLanguage } from '@/lib/LanguageContext';
 import { useDataSource } from '@/lib/DataSourceContext';
@@ -24,7 +24,6 @@ import {
   getAchievementBgColor
 } from '@/lib/calculations';
 import { getPermissions } from '@/lib/permissions';
-import GoLiveForm from './GoLiveForm';
 import MonthDetail from './MonthDetail';
 import YearOverview from './YearOverview';
 import AdminPanel from './AdminPanel';
@@ -35,7 +34,6 @@ import Leaderboard from './Leaderboard';
 import UserProfile from './UserProfile';
 import DebugPanel from './DebugPanel';
 import Pipeline from './Pipeline';
-import GoLiveImport from './GoLiveImport';
 import { AchievementGauges } from './TrendCharts';
 import { useToast, useChallengeNotifications } from './Toast';
 import { supabase } from '@/lib/supabase';
@@ -47,7 +45,7 @@ interface DashboardProps {
   onBackToAreaSelector?: () => void;
 }
 
-type View = 'dashboard' | 'month' | 'year' | 'add' | 'settings' | 'leaderboard' | 'profile' | 'pipeline' | 'golive_import';
+type View = 'dashboard' | 'month' | 'year' | 'settings' | 'leaderboard' | 'profile' | 'pipeline';
 
 export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaSelector }: DashboardProps) {
   const { t } = useLanguage();
@@ -131,7 +129,6 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
   const { 
     goLives: prodGoLives, 
     loading: goLivesLoading, 
-    addGoLive, 
     updateGoLive, 
     deleteGoLive,
     refetch: refetchGoLives
@@ -320,21 +317,6 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
   const yearSummary = calculateYearSummary(goLives, settings);
   const ytdSummary = calculateYTDSummary(goLives, settings, currentMonth);
 
-  const handleAddGoLive = async (goLive: Partial<GoLive>) => {
-    const result = await addGoLive({ 
-      ...goLive, 
-      user_id: selectedUserId, 
-      year: settings.year 
-    });
-    // Nach erfolgreichem Speichern: Multi-User Daten neu laden für Jahresübersicht
-    if (!result.error) {
-      refetchMulti();
-    }
-    // View bleibt auf 'add' für schnelle Dateneingabe
-    // Das Formular wird automatisch zurückgesetzt durch GoLiveForm
-    return result;
-  };
-
   // Navigation Component - Responsive
   const Navigation = () => {
     const navItems = [
@@ -342,7 +324,6 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
       { view: 'dashboard' as View, label: t('nav.dashboard'), icon: '📊', show: true },
       { view: 'pipeline' as View, label: t('nav.pipeline'), icon: '📈', show: !isDemo },
       { view: 'leaderboard' as View, label: t('nav.leaderboard'), icon: '🏆', show: true },
-      { view: 'add' as View, label: t('nav.addGoLive'), icon: '➕', show: (permissions.enterOwnGoLives || permissions.enterGoLivesForOthers) && !isDemo, highlight: true },
       { view: 'settings' as View, label: t('nav.settings'), icon: '⚙️', show: permissions.editSettings && !isDemo },
     ].filter(item => item.show);
 
@@ -558,24 +539,6 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
     );
   }
 
-  // Go-Live Import View
-  if (currentView === 'golive_import' && permissions.hasAdminAccess) {
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <Navigation />
-        <main className="max-w-7xl mx-auto px-4 py-8">
-          <GoLiveImport 
-            onBack={() => setCurrentView('add')}
-            onImportComplete={(count) => {
-              // Refresh Go-Lives nach erfolgreichem Import
-              refetchGoLives();
-            }}
-          />
-        </main>
-      </div>
-    );
-  }
-
   // Admin-View wurde in den Startbildschirm verschoben
 
   // Leaderboard View
@@ -654,67 +617,6 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
     );
   }
 
-  // Add Go-Live View
-  if (currentView === 'add') {
-    // Finde den ausgewählten User für defaultCommissionRelevant
-    const goLiveTargetUser = goLiveReceivers.find(u => u.id === selectedUserId) || user;
-    
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <Navigation />
-        <main className="max-w-2xl mx-auto px-4 py-8">
-          {/* User Selector for Go-Live - alle die Go-Lives erhalten können */}
-          {permissions.enterGoLivesForOthers && goLiveReceivers.length > 0 && (
-            <div className="bg-white rounded-xl shadow-sm p-4 mb-6">
-              <UserSelector
-                users={goLiveReceivers}
-                selectedUserIds={[selectedUserId]}
-                onSelectionChange={(ids) => setSelectedUserId(ids[0])}
-                currentUser={user}
-                mode="single"
-                label={t('userSelector.goLiveFor')}
-              />
-              {selectedUserId !== user.id && (
-                <p className="mt-2 text-sm text-blue-600">
-                  📝 {t('userSelector.recordingGoLiveFor')} <strong>{goLiveTargetUser.name}</strong>
-                  {!isPlannable(goLiveTargetUser.role) && (
-                    <span className="ml-2 text-amber-600">
-                      ⚠️ {t('goLive.nonPlannableHint')}
-                    </span>
-                  )}
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Go-Live Import Button für Admins */}
-          {permissions.hasAdminAccess && !isDemo && (
-            <div className="mb-6">
-              <button
-                onClick={() => setCurrentView('golive_import')}
-                className="w-full px-4 py-3 bg-purple-50 border border-purple-200 text-purple-700 rounded-xl hover:bg-purple-100 transition-colors flex items-center justify-center gap-2"
-              >
-                <span>📥</span>
-                <span className="font-medium">Go-Live Import (Salesforce/CSV)</span>
-              </button>
-            </div>
-          )}
-          
-          <GoLiveForm 
-            onSubmit={handleAddGoLive}
-            onCancel={() => setCurrentView('year')}
-            defaultMonth={currentMonth}
-            canEnterPayARR={permissions.enterPayARR}
-            defaultCommissionRelevant={getDefaultCommissionRelevant(goLiveTargetUser.role)}
-            currentUser={user}
-            targetUserId={selectedUserId}
-            avgPayBillTerminal={settings?.avg_pay_bill || 0}
-          />
-        </main>
-      </div>
-    );
-  }
-
   // Month Detail View
   if (currentView === 'month') {
     return (
@@ -730,9 +632,9 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             onBack={() => setCurrentView('year')}
             onUpdateGoLive={handleUniversalUpdate}
             onDeleteGoLive={handleUniversalDelete}
-            onAddGoLive={() => setCurrentView('add')}
+            onAddGoLive={() => {}}
             canEnterPayARR={permissions.enterPayARR}
-            canAddGoLives={permissions.enterOwnGoLives}
+            canAddGoLives={false}
             canEditGoLives={permissions.enterGoLivesForOthers || permissions.enterOwnGoLives}
           />
         </main>

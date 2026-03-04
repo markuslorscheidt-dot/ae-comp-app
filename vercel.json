@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/goLive/sync/cron",
+      "schedule": "0 5 * * *"
+    }
+  ]
+}

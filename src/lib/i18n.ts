@@ -88,7 +88,7 @@ export const translations: Record<Language, Record<string, any>> = {
     nav: {
       dashboard: 'Sales Rangliste',
       yearOverview: 'Jahresübersicht',
-      addGoLive: '+ Go-Live',
+      addGoLive: '+New Business Go-Lives',
       admin: 'Admin',
       settings: 'Einstellungen',
       simulator: 'Simulator',
@@ -1028,7 +1028,7 @@ export const translations: Record<Language, Record<string, any>> = {
     nav: {
       dashboard: 'Sales Ranking',
       yearOverview: 'Year Overview',
-      addGoLive: '+ Go-Live',
+      addGoLive: '+New Business Go-Lives',
       admin: 'Admin',
       settings: 'Settings',
       simulator: 'Simulator',

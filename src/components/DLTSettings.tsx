@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { User, UserRole, UserRoleHistoryRecord, isPlannable, BUSINESS_AREA_LABELS, BusinessArea, MONTH_NAMES, DEFAULT_SETTINGS } from '@/lib/types';
+import { User, UserRole, UserRoleHistoryRecord, ProvisionTier, AESettings, GoLive, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, BUSINESS_AREA_LABELS, BusinessArea, MONTH_NAMES, DEFAULT_SETTINGS, DEFAULT_SUBS_TIERS, DEFAULT_PAY_TIERS, calculateMonthlySubsTargets, calculateTotalGoLives } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
-import { useAllUsers, useMultiUserData } from '@/lib/hooks';
+import { useAllUsers, useMultiUserData, useAllSettings, useGoLivesForUser, useSettingsForUser } from '@/lib/hooks';
 import { getPermissions } from '@/lib/permissions';
-import { formatCurrency } from '@/lib/calculations';
+import { formatCurrency, calculateOTEProjections, validateOTESettings } from '@/lib/calculations';
 import { supabase } from '@/lib/supabase';
+import GoLiveForm from './GoLiveForm';
 
 // DLT Planzahlen Datenstruktur
 interface DLTPlanzahlen {
@@ -40,6 +41,22 @@ interface DLTPlanzahlen {
 
 interface DLTSettingsProps {
   user: User;
+}
+
+interface GoLiveDryRunResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+  };
+  preview?: {
+    valid: Array<{ rowNumber: number; customerName: string; ae: string; oakId: number | null }>;
+    invalid: Array<{ rowNumber: number; reasons: string[]; raw: { customerName: string; ae: string; oakId: number | null } }>;
+  };
+  error?: string;
 }
 
 // Role display names
@@ -91,7 +108,7 @@ const NEW_ARR_DEFAULTS = {
   avgPayBillTipping: 30,
 };
 
-type SettingsTab = 'users' | 'permissions' | 'areas' | 'planning' | 'system';
+type SettingsTab = 'users' | 'goLives' | 'permissions' | 'areas' | 'planning' | 'system';
 
 export default function DLTSettings({ user }: DLTSettingsProps) {
   const { t } = useLanguage();
@@ -100,6 +117,14 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterRole, setFilterRole] = useState<UserRole | 'all'>('all');
   const [planningYear, setPlanningYear] = useState(currentYear);
+  const [goLiveUserId, setGoLiveUserId] = useState('');
+  const [goLiveSaveMessage, setGoLiveSaveMessage] = useState('');
+  const [goLiveImportMode, setGoLiveImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [autoImportEnabled, setAutoImportEnabled] = useState(false);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchError, setBatchError] = useState('');
+  const [batchResult, setBatchResult] = useState<GoLiveDryRunResponse | null>(null);
+  const [lastBatchCheckAt, setLastBatchCheckAt] = useState<string | null>(null);
   
   // ========== NEW ARR: GRUNDEINSTELLUNGEN ==========
   const [newArrYear, setNewArrYear] = useState(currentYear);
@@ -143,9 +168,19 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [loadingPlanzahlen, setLoadingPlanzahlen] = useState(true);
   const [saveMessage, setSaveMessage] = useState('');
   const [planzahlenId, setPlanzahlenId] = useState<string | null>(null);
+
+  // ========== AE-SPEZIFISCHE NEW ARR SETTINGS ==========
+  const [selectedAEId, setSelectedAEId] = useState<string | null>(null);
+  const [aePercentages, setAePercentages] = useState<Map<string, number>>(new Map());
+  const [aeOTEs, setAeOTEs] = useState<Map<string, number>>(new Map());
+  const [aeTerminalBase, setAeTerminalBase] = useState<Map<string, number>>(new Map());
+  const [aeTerminalBonus, setAeTerminalBonus] = useState<Map<string, number>>(new Map());
+  const [aeSubsTiers, setAeSubsTiers] = useState<Map<string, ProvisionTier[]>>(new Map());
+  const [aePayTiers, setAePayTiers] = useState<Map<string, ProvisionTier[]>>(new Map());
   
   // Load all users
   const { users, loading, refetch: refetchUsers, updateUserRole } = useAllUsers();
+  const { settings: allSettings } = useAllSettings(newArrYear);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [savingUser, setSavingUser] = useState(false);
   const [userEditError, setUserEditError] = useState('');
@@ -164,6 +199,67 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     is_active: true,
     manager_id: '',
   });
+
+  const assignableGoLiveUsers = useMemo(
+    () => users.filter((u) => canReceiveGoLives(u.role)),
+    [users]
+  );
+
+  useEffect(() => {
+    if (!goLiveUserId && assignableGoLiveUsers.length > 0) {
+      setGoLiveUserId(assignableGoLiveUsers[0].id);
+    }
+  }, [goLiveUserId, assignableGoLiveUsers]);
+
+  const selectedGoLiveTargetUser =
+    assignableGoLiveUsers.find((u) => u.id === goLiveUserId) || assignableGoLiveUsers[0] || user;
+
+  const { settings: goLiveTargetSettings } = useSettingsForUser(goLiveUserId || undefined, currentYear);
+  const { addGoLive: addGoLiveForTargetUser, refetch: refetchGoLivesForTargetUser } = useGoLivesForUser(
+    goLiveUserId || undefined,
+    currentYear
+  );
+
+  const handleManualGoLiveSubmit = async (goLive: Partial<GoLive>) => {
+    if (!goLiveUserId) {
+      return { error: { message: 'Bitte zuerst einen Ziel-User auswählen.' } };
+    }
+
+    const result = await addGoLiveForTargetUser({
+      ...goLive,
+      user_id: goLiveUserId,
+      year: currentYear,
+    });
+
+    if (!result.error) {
+      setGoLiveSaveMessage('Go-Live wurde erfolgreich gespeichert.');
+      refetchGoLivesForTargetUser();
+      setTimeout(() => setGoLiveSaveMessage(''), 2000);
+    }
+
+    return result;
+  };
+
+  const handleRunGoLiveBatchCheck = async () => {
+    setBatchLoading(true);
+    setBatchError('');
+    try {
+      const response = await fetch('/api/goLive/sync', { method: 'GET' });
+      const data = (await response.json()) as GoLiveDryRunResponse;
+      if (!response.ok || !data.success) {
+        setBatchResult(null);
+        setBatchError(data.error || 'Batch-Pruefung fehlgeschlagen');
+        return;
+      }
+      setBatchResult(data);
+      setLastBatchCheckAt(new Date().toISOString());
+    } catch (err: any) {
+      setBatchResult(null);
+      setBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
+    } finally {
+      setBatchLoading(false);
+    }
+  };
   
   // ========== PLANZAHLEN: LADEN ==========
   const loadPlanzahlen = useCallback(async (year: number) => {
@@ -279,6 +375,52 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       if (result.error) {
         throw result.error;
       }
+
+      // DLT ist ab jetzt die zentrale Quelle für New ARR/Commission Settings pro AE.
+      for (const ae of plannableUsers) {
+        const percentage = aePercentages.get(ae.id) ?? 0;
+        const inboundTargets = calculateFromPercentage(businessInbound, percentage);
+        const outboundTargets = calculateFromPercentage(businessOutbound, percentage);
+        const partnershipTargets = calculateFromPercentage(businessPartnerships, percentage);
+        const goLiveTargets = calculateTotalGoLives(inboundTargets, outboundTargets, partnershipTargets);
+        const terminalSalesTargets = goLiveTargets.map((v) => Math.round(v * terminalSalesPercent / 100));
+        const tippingTargets = terminalSalesTargets.map((v) => Math.round(v * tippingPercent / 100));
+        const monthlySubsTargets = calculateMonthlySubsTargets(goLiveTargets, avgSubsBill);
+        const monthlyPayTargets = terminalSalesTargets.map((ts, i) => (ts * avgPayBillTerminal * 12) + (tippingTargets[i] * avgPayBillTipping * 12));
+
+        const payload = {
+          user_id: ae.id,
+          year: newArrYear,
+          region: newArrRegion,
+          ote: aeOTEs.get(ae.id) ?? DEFAULT_SETTINGS.ote,
+          monthly_inbound_targets: inboundTargets,
+          monthly_outbound_targets: outboundTargets,
+          monthly_partnerships_targets: partnershipTargets,
+          target_percentage: percentage,
+          monthly_go_live_targets: goLiveTargets,
+          monthly_subs_targets: monthlySubsTargets,
+          monthly_pay_targets: monthlyPayTargets,
+          avg_subs_bill: avgSubsBill,
+          avg_pay_bill: avgPayBillTerminal,
+          avg_pay_bill_tipping: avgPayBillTipping,
+          terminal_base: aeTerminalBase.get(ae.id) ?? DEFAULT_SETTINGS.terminal_base,
+          terminal_bonus: aeTerminalBonus.get(ae.id) ?? DEFAULT_SETTINGS.terminal_bonus,
+          terminal_penetration_threshold: terminalPenetrationThreshold / 100,
+          subs_tiers: aeSubsTiers.get(ae.id) ?? DEFAULT_SUBS_TIERS,
+          pay_tiers: aePayTiers.get(ae.id) ?? DEFAULT_PAY_TIERS,
+          pay_arr_factor: 0,
+          updated_at: new Date().toISOString(),
+        };
+
+        const existing = allSettings.find((s) => s.user_id === ae.id);
+        const settingsResult = existing
+          ? await supabase.from('ae_settings').update(payload).eq('id', existing.id)
+          : await supabase.from('ae_settings').insert({ ...payload, created_at: new Date().toISOString() });
+
+        if (settingsResult.error) {
+          throw settingsResult.error;
+        }
+      }
       
       setSaveMessage('Planzahlen erfolgreich gespeichert!');
       setTimeout(() => setSaveMessage(''), 3000);
@@ -295,6 +437,48 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     users.filter(u => isPlannable(u.role)), 
     [users]
   );
+
+  const calculateFromPercentage = useCallback((businessValues: number[], percentage: number): number[] => {
+    return businessValues.map((val) => Math.round(val * percentage / 100));
+  }, []);
+
+  useEffect(() => {
+    if (plannableUsers.length === 0) {
+      setSelectedAEId(null);
+      return;
+    }
+
+    const percentPerUser = Math.floor(100 / plannableUsers.length);
+    let remainingPercent = 100;
+
+    const nextPercentages = new Map<string, number>();
+    const nextOTEs = new Map<string, number>();
+    const nextTerminalBase = new Map<string, number>();
+    const nextTerminalBonus = new Map<string, number>();
+    const nextSubsTiers = new Map<string, ProvisionTier[]>();
+    const nextPayTiers = new Map<string, ProvisionTier[]>();
+
+    plannableUsers.forEach((u, idx) => {
+      const isLast = idx === plannableUsers.length - 1;
+      const defaultPercent = isLast ? remainingPercent : percentPerUser;
+      remainingPercent -= percentPerUser;
+      const existing = allSettings.find((s) => s.user_id === u.id);
+      nextPercentages.set(u.id, existing?.target_percentage ?? defaultPercent);
+      nextOTEs.set(u.id, existing?.ote ?? DEFAULT_SETTINGS.ote);
+      nextTerminalBase.set(u.id, existing?.terminal_base ?? DEFAULT_SETTINGS.terminal_base);
+      nextTerminalBonus.set(u.id, existing?.terminal_bonus ?? DEFAULT_SETTINGS.terminal_bonus);
+      nextSubsTiers.set(u.id, existing?.subs_tiers ?? DEFAULT_SUBS_TIERS);
+      nextPayTiers.set(u.id, existing?.pay_tiers ?? DEFAULT_PAY_TIERS);
+    });
+
+    setAePercentages(nextPercentages);
+    setAeOTEs(nextOTEs);
+    setAeTerminalBase(nextTerminalBase);
+    setAeTerminalBonus(nextTerminalBonus);
+    setAeSubsTiers(nextSubsTiers);
+    setAePayTiers(nextPayTiers);
+    setSelectedAEId((prev) => (prev && plannableUsers.some((u) => u.id === prev) ? prev : plannableUsers[0].id));
+  }, [plannableUsers, allSettings]);
   
   // Load multi-user data for planning
   const userIds = useMemo(() => plannableUsers.map(u => u.id), [plannableUsers]);
@@ -439,6 +623,18 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         }
       }
 
+      // Beim Austrittsdatum offene Rollenhistorie taggenau schließen.
+      if (userEditData.exit_date) {
+        const { error: closeHistoryError } = await supabase
+          .from('user_role_history')
+          .update({ effective_to: userEditData.exit_date })
+          .eq('user_id', editingUser.id)
+          .is('effective_to', null)
+          .lte('effective_from', userEditData.exit_date);
+
+        if (closeHistoryError) throw closeHistoryError;
+      }
+
       setEditingUser(null);
       await refetchUsers();
     } catch (err: any) {
@@ -519,6 +715,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   // Tab configuration
   const tabs: { id: SettingsTab; label: string; icon: string }[] = [
     { id: 'users', label: t('dlt.settings.users'), icon: '👥' },
+    { id: 'goLives', label: '+New Business Go-Lives', icon: '➕' },
     { id: 'permissions', label: t('dlt.settings.permissions'), icon: '🔐' },
     { id: 'areas', label: t('dlt.settings.areas'), icon: '🏢' },
     { id: 'planning', label: t('dlt.settings.planning'), icon: '📊' },
@@ -578,6 +775,130 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       aeCount: plannableUsers.length
     };
   }, [multiUserData, plannableUsers]);
+
+  const selectedAEUser = useMemo(
+    () => plannableUsers.find((u) => u.id === selectedAEId) || null,
+    [plannableUsers, selectedAEId]
+  );
+  const selectedAEPercentage = selectedAEId ? (aePercentages.get(selectedAEId) ?? 0) : 0;
+  const selectedAEOTE = selectedAEId ? (aeOTEs.get(selectedAEId) ?? DEFAULT_SETTINGS.ote) : DEFAULT_SETTINGS.ote;
+  const selectedTerminalBase = selectedAEId ? (aeTerminalBase.get(selectedAEId) ?? DEFAULT_SETTINGS.terminal_base) : DEFAULT_SETTINGS.terminal_base;
+  const selectedTerminalBonus = selectedAEId ? (aeTerminalBonus.get(selectedAEId) ?? DEFAULT_SETTINGS.terminal_bonus) : DEFAULT_SETTINGS.terminal_bonus;
+  const selectedSubsTiers = selectedAEId ? (aeSubsTiers.get(selectedAEId) ?? DEFAULT_SUBS_TIERS) : DEFAULT_SUBS_TIERS;
+  const selectedPayTiers = selectedAEId ? (aePayTiers.get(selectedAEId) ?? DEFAULT_PAY_TIERS) : DEFAULT_PAY_TIERS;
+
+  const selectedAEInbound = useMemo(
+    () => calculateFromPercentage(businessInbound, selectedAEPercentage),
+    [businessInbound, selectedAEPercentage, calculateFromPercentage]
+  );
+  const selectedAEOutbound = useMemo(
+    () => calculateFromPercentage(businessOutbound, selectedAEPercentage),
+    [businessOutbound, selectedAEPercentage, calculateFromPercentage]
+  );
+  const selectedAEPartnerships = useMemo(
+    () => calculateFromPercentage(businessPartnerships, selectedAEPercentage),
+    [businessPartnerships, selectedAEPercentage, calculateFromPercentage]
+  );
+  const selectedAEGoLiveTargets = useMemo(
+    () => calculateTotalGoLives(selectedAEInbound, selectedAEOutbound, selectedAEPartnerships),
+    [selectedAEInbound, selectedAEOutbound, selectedAEPartnerships]
+  );
+  const selectedAEPayTerminalsByMonth = useMemo(
+    () => selectedAEGoLiveTargets.map((v) => Math.round(v * payTerminalsPercent / 100)),
+    [selectedAEGoLiveTargets, payTerminalsPercent]
+  );
+  const selectedAETerminalSalesByMonth = useMemo(
+    () => selectedAEGoLiveTargets.map((v) => Math.round(v * terminalSalesPercent / 100)),
+    [selectedAEGoLiveTargets, terminalSalesPercent]
+  );
+  const selectedAETippingByMonth = useMemo(
+    () => selectedAETerminalSalesByMonth.map((v) => Math.round(v * tippingPercent / 100)),
+    [selectedAETerminalSalesByMonth, tippingPercent]
+  );
+  const selectedAEGoLives = selectedAEGoLiveTargets.reduce((a, b) => a + b, 0);
+  const selectedAEPayTerminals = selectedAEPayTerminalsByMonth.reduce((a, b) => a + b, 0);
+  const selectedAETerminalSales = selectedAETerminalSalesByMonth.reduce((a, b) => a + b, 0);
+  const selectedAETipping = selectedAETippingByMonth.reduce((a, b) => a + b, 0);
+  const selectedAEPenetration = selectedAEGoLives > 0 ? selectedAEPayTerminals / selectedAEGoLives : 0;
+
+  const handleSelectedAEOTEChange = (ote: number) => {
+    if (!selectedAEId) return;
+    setAeOTEs((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, ote);
+      return next;
+    });
+  };
+
+  const handleSelectedTerminalBaseChange = (value: number) => {
+    if (!selectedAEId) return;
+    setAeTerminalBase((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, value);
+      return next;
+    });
+  };
+
+  const handleSelectedTerminalBonusChange = (value: number) => {
+    if (!selectedAEId) return;
+    setAeTerminalBonus((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, value);
+      return next;
+    });
+  };
+
+  const handleSelectedSubsTierRateChange = (idx: number, ratePercent: number) => {
+    if (!selectedAEId) return;
+    const current = aeSubsTiers.get(selectedAEId) ?? DEFAULT_SUBS_TIERS;
+    const nextTiers = [...current];
+    nextTiers[idx] = { ...nextTiers[idx], rate: ratePercent / 100 };
+    setAeSubsTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, nextTiers);
+      return next;
+    });
+  };
+
+  const handleSelectedPayTierRateChange = (idx: number, ratePercent: number) => {
+    if (!selectedAEId) return;
+    const current = aePayTiers.get(selectedAEId) ?? DEFAULT_PAY_TIERS;
+    const nextTiers = [...current];
+    nextTiers[idx] = { ...nextTiers[idx], rate: ratePercent / 100 };
+    setAePayTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, nextTiers);
+      return next;
+    });
+  };
+
+  const previewSettings: AESettings = {
+    id: 'preview',
+    user_id: selectedAEId || '',
+    year: newArrYear,
+    region: newArrRegion,
+    ote: selectedAEOTE,
+    monthly_go_live_targets: selectedAEGoLiveTargets,
+    monthly_subs_targets: calculateMonthlySubsTargets(selectedAEGoLiveTargets, avgSubsBill),
+    monthly_pay_targets: selectedAETerminalSalesByMonth.map((ts, i) => (ts * avgPayBillTerminal * 12) + (selectedAETippingByMonth[i] * avgPayBillTipping * 12)),
+    monthly_inbound_targets: selectedAEInbound,
+    monthly_outbound_targets: selectedAEOutbound,
+    monthly_partnerships_targets: selectedAEPartnerships,
+    target_percentage: selectedAEPercentage,
+    avg_subs_bill: avgSubsBill,
+    avg_pay_bill: avgPayBillTerminal,
+    avg_pay_bill_tipping: avgPayBillTipping,
+    pay_arr_factor: 0,
+    terminal_base: selectedTerminalBase,
+    terminal_bonus: selectedTerminalBonus,
+    terminal_penetration_threshold: terminalPenetrationThreshold / 100,
+    subs_tiers: selectedSubsTiers,
+    pay_tiers: selectedPayTiers,
+    created_at: '',
+    updated_at: ''
+  };
+  const oteValidation = validateOTESettings(previewSettings, selectedAEPayTerminals);
+  const oteProjections = calculateOTEProjections(previewSettings, selectedAEPayTerminals);
 
   if (loading) {
     return (
@@ -679,7 +1000,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 </thead>
                 <tbody className="divide-y divide-gray-200">
                   {filteredUsers.map((u) => (
-                    <tr key={u.id} className="hover:bg-gray-50">
+                    <tr
+                      key={u.id}
+                      className={`${u.exit_date && !plannedRoleChanges[u.id] ? 'bg-red-100 hover:bg-red-200 italic text-gray-700' : 'hover:bg-gray-50'}`}
+                    >
                       <td className="px-4 py-3">
                         <span className="font-medium text-gray-900">{u.name}</span>
                       </td>
@@ -692,6 +1016,13 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                           <div className="mt-1">
                             <span className="inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-100 text-amber-800">
                               Rollenwechsel geplant ab {new Date(plannedRoleChanges[u.id].effective_from).toLocaleDateString('de-DE')}
+                            </span>
+                          </div>
+                        )}
+                        {u.exit_date && !plannedRoleChanges[u.id] && (
+                          <div className="mt-1">
+                            <span className="inline-flex px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-100 text-red-800">
+                              Austritt gesetzt: {new Date(u.exit_date).toLocaleDateString('de-DE')}
                             </span>
                           </div>
                         )}
@@ -928,6 +1259,147 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
               >
                 {savingUser ? 'Speichere...' : 'Speichern'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Go-Lives Tab */}
+      {activeTab === 'goLives' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h3 className="text-lg font-semibold text-gray-800 mb-2">Manuelle Go-Live-Erfassung</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Die manuelle Eingabe wurde aus dem New-Business-Bereich hierher verlagert.
+            </p>
+            {goLiveSaveMessage && (
+              <div className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">
+                {goLiveSaveMessage}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+            <div className="max-w-2xl">
+              <GoLiveForm
+                onSubmit={handleManualGoLiveSubmit}
+                onCancel={() => {}}
+                canEnterPayARR={permissions.enterPayARR}
+                defaultCommissionRelevant={getDefaultCommissionRelevant(selectedGoLiveTargetUser.role)}
+                currentUser={user}
+                targetUserId={goLiveUserId}
+                avgPayBillTerminal={goLiveTargetSettings?.avg_pay_bill || 0}
+                assignableUsers={assignableGoLiveUsers}
+                selectedUserId={goLiveUserId}
+                onSelectedUserChange={setGoLiveUserId}
+              />
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">Google-Sheet Batch Import</h4>
+                <p className="text-sm text-gray-500">
+                  Pruefe eingehende Go-Live-Daten als Stapel und entscheide dann ueber den Import.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setGoLiveImportMode('manual')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    goLiveImportMode === 'manual'
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Manuell pruefen
+                </button>
+                <button
+                  onClick={() => setGoLiveImportMode('automatic')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    goLiveImportMode === 'automatic'
+                      ? 'bg-green-50 border-green-300 text-green-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Automatisch einlaufen
+                </button>
+              </div>
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={autoImportEnabled}
+                  onChange={(e) => setAutoImportEnabled(e.target.checked)}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                Hinweis: Der Schalter aktiviert nur die UI-Option. Daten laufen erst automatisch ein,
+                wenn zusaetzlich ein Scheduler/Cron den Import-Endpoint regelmaessig triggert.
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunGoLiveBatchCheck}
+                  disabled={batchLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {batchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
+                </button>
+                {lastBatchCheckAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Check: {new Date(lastBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+              </div>
+
+              {batchError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {batchError}
+                </div>
+              )}
+
+              {batchResult?.stats && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Sheet Zeilen</div>
+                      <div className="text-xl font-semibold">{batchResult.stats.totalRowsFromSheet}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Geparst</div>
+                      <div className="text-xl font-semibold">{batchResult.stats.parsedRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-green-50 p-3 border border-green-200">
+                      <div className="text-green-700">Importierbar</div>
+                      <div className="text-xl font-semibold text-green-700">{batchResult.stats.validRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-red-50 p-3 border border-red-200">
+                      <div className="text-red-700">Fehlerhaft</div>
+                      <div className="text-xl font-semibold text-red-700">{batchResult.stats.invalidRows}</div>
+                    </div>
+                  </div>
+
+                  {goLiveImportMode === 'manual' && batchResult.preview?.invalid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Beispiele fehlerhafte Zeilen</h5>
+                      <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                        {batchResult.preview.invalid.slice(0, 6).map((row) => (
+                          <div key={row.rowNumber} className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs">
+                            <div className="font-medium text-red-700">
+                              Zeile {row.rowNumber} - {row.raw.customerName || 'Ohne Kundenname'}
+                            </div>
+                            <div className="text-red-600">{row.reasons.join(', ')}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1298,6 +1770,207 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   <div className="border-t border-gray-200 pt-2 mt-2">
                     <strong className="text-purple-700">Gesamt ARR:</strong> {formatCurrency(yearlySubsArr)} + {formatCurrency(yearlyPayArr)} = <strong className="text-purple-600 text-base">{formatCurrency(yearlySubsArr + yearlyPayArr)}</strong>
                   </div>
+                </div>
+              </div>
+
+              {/* ========== 5. AE AUSWÄHLEN + OTE ========== */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="text-md font-bold text-gray-800 mb-3">
+                  5. AE auswählen & OTE <span className="text-sm font-normal text-gray-500">(ab hier AE-spezifisch)</span>
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">AE auswählen</label>
+                    <select
+                      value={selectedAEId || ''}
+                      onChange={(e) => setSelectedAEId(e.target.value)}
+                      className="w-full px-3 py-2 border border-indigo-300 rounded-lg bg-indigo-50 font-medium"
+                    >
+                      {plannableUsers.map((ae) => (
+                        <option key={ae.id} value={ae.id}>
+                          {ae.name} ({aePercentages.get(ae.id) ?? 0}%)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">OTE für {selectedAEUser?.name || 'AE'}</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-2 text-gray-500">€</span>
+                      <input
+                        type="number"
+                        value={selectedAEOTE}
+                        onChange={(e) => handleSelectedAEOTEChange(parseInt(e.target.value) || 0)}
+                        className="w-full pl-8 pr-3 py-2 border border-gray-300 rounded-lg"
+                      />
+                    </div>
+                  </div>
+                </div>
+                {selectedAEUser && (
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-center">
+                    <div className="bg-blue-50 rounded-lg p-2">
+                      <div className="text-xs text-blue-600">Go-Lives</div>
+                      <div className="text-lg font-bold text-blue-700">{selectedAEGoLives}</div>
+                    </div>
+                    <div className="bg-teal-50 rounded-lg p-2">
+                      <div className="text-xs text-teal-600">Terminal</div>
+                      <div className="text-lg font-bold text-teal-700">{selectedAETerminalSales}</div>
+                    </div>
+                    <div className="bg-pink-50 rounded-lg p-2">
+                      <div className="text-xs text-pink-600">Tipping</div>
+                      <div className="text-lg font-bold text-pink-700">{selectedAETipping}</div>
+                    </div>
+                    <div className="bg-green-50 rounded-lg p-2">
+                      <div className="text-xs text-green-600">Subs ARR</div>
+                      <div className="text-lg font-bold text-green-700">{formatCurrency(selectedAEGoLives * avgSubsBill * 12)}</div>
+                    </div>
+                    <div className="bg-orange-50 rounded-lg p-2">
+                      <div className="text-xs text-orange-600">Pay ARR</div>
+                      <div className="text-lg font-bold text-orange-700">{formatCurrency((selectedAETerminalSales * avgPayBillTerminal * 12) + (selectedAETipping * avgPayBillTipping * 12))}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ========== 6. PROVISIONSMODELL (AE-spezifisch) ========== */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="text-md font-bold text-gray-800 mb-3">
+                  6. Provisionsmodell <span className="text-sm font-normal text-indigo-600 ml-2">für {selectedAEUser?.name || 'AE'}</span>
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Terminal Basis €</label>
+                    <input
+                      type="number"
+                      value={selectedTerminalBase}
+                      onChange={(e) => handleSelectedTerminalBaseChange(parseInt(e.target.value) || 0)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Terminal Bonus €</label>
+                    <input
+                      type="number"
+                      value={selectedTerminalBonus}
+                      onChange={(e) => handleSelectedTerminalBonusChange(parseInt(e.target.value) || 0)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <div>
+                    <h5 className="font-medium text-green-700 mb-2">Subs ARR Stufen</h5>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {selectedSubsTiers.map((tier, i) => (
+                          <tr key={i} className="border-b">
+                            <td className="py-1">{tier.label}</td>
+                            <td className="py-1 text-right">
+                              <input
+                                type="number"
+                                value={(tier.rate * 100).toFixed(1)}
+                                onChange={(e) => handleSelectedSubsTierRateChange(i, parseFloat(e.target.value) || 0)}
+                                className="w-14 px-1 py-0.5 text-right border rounded text-xs"
+                                step="0.1"
+                              />%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div>
+                    <h5 className="font-medium text-orange-700 mb-2">Pay ARR Stufen</h5>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {selectedPayTiers.map((tier, i) => (
+                          <tr key={i} className="border-b">
+                            <td className="py-1">{tier.label}</td>
+                            <td className="py-1 text-right">
+                              <input
+                                type="number"
+                                value={(tier.rate * 100).toFixed(1)}
+                                onChange={(e) => handleSelectedPayTierRateChange(i, parseFloat(e.target.value) || 0)}
+                                className="w-14 px-1 py-0.5 text-right border rounded text-xs"
+                                step="0.1"
+                              />%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div>
+                    <h5 className="font-medium text-blue-700 mb-2">Terminal-Provision (Einmalig)</h5>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        <tr className={`border-b ${selectedAEPenetration < (terminalPenetrationThreshold / 100) ? 'bg-blue-50' : ''}`}>
+                          <td className="py-1">&lt; {terminalPenetrationThreshold}%</td>
+                          <td className="py-1 text-right font-medium">€{selectedTerminalBase}</td>
+                          <td className="py-1 text-right text-xs text-gray-500">pro Terminal</td>
+                        </tr>
+                        <tr className={`border-b ${selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? 'bg-blue-50' : ''}`}>
+                          <td className="py-1">≥ {terminalPenetrationThreshold}%</td>
+                          <td className="py-1 text-right font-medium">€{selectedTerminalBonus}</td>
+                          <td className="py-1 text-right text-xs text-gray-500">pro Terminal</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    {selectedAEUser && (
+                      <div className={`mt-2 p-2 rounded text-xs ${selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
+                        <strong>{selectedAEUser.name.split(' ')[0]}:</strong> {(selectedAEPenetration * 100).toFixed(0)}% Penetration
+                        {' '}→ <strong>€{selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? selectedTerminalBonus : selectedTerminalBase}</strong> × {selectedAEPayTerminals} = <strong>{formatCurrency(selectedAEPayTerminals * (selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? selectedTerminalBonus : selectedTerminalBase))}</strong>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* ========== 7. OTE VALIDIERUNG ========== */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="text-md font-bold text-gray-800 mb-3">
+                  7. OTE Validierung <span className="text-sm font-normal text-indigo-600 ml-2">für {selectedAEUser?.name || 'AE'}</span>
+                </h4>
+                <div className={`p-4 rounded-lg mb-4 ${oteValidation.valid ? 'bg-green-50 border border-green-200' : 'bg-yellow-50 border border-yellow-200'}`}>
+                  <p className={`font-medium ${oteValidation.valid ? 'text-green-700' : 'text-yellow-700'}`}>
+                    {oteValidation.valid
+                      ? `OTE passt! Erwartete Provision: ${formatCurrency(oteValidation.expectedProvision)}`
+                      : `OTE Abweichung: ${oteValidation.deviation > 0 ? '+' : ''}${oteValidation.deviation.toFixed(1)}%`
+                    }
+                  </p>
+                  <p className="text-sm text-gray-600 mt-1">
+                    OTE: {formatCurrency(selectedAEOTE)} | Erwartet bei 100%: {formatCurrency(oteValidation.expectedProvision)}
+                  </p>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-2 px-1">Szenario</th>
+                        <th className="text-right py-2 px-1 text-green-600">Subs</th>
+                        <th className="text-right py-2 px-1 text-orange-600">Pay</th>
+                        <th className="text-right py-2 px-1 text-blue-600">Terminal</th>
+                        <th className="text-right py-2 px-1 text-purple-700 font-bold">Gesamt</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {oteProjections.map((proj, i) => (
+                        <tr key={i} className={`border-b ${proj.ote_match ? 'bg-green-50' : ''}`}>
+                          <td className="py-1 px-1">{proj.scenario}</td>
+                          <td className="py-1 px-1 text-right text-green-600">{formatCurrency(proj.subs_provision)}</td>
+                          <td className="py-1 px-1 text-right text-orange-600">{formatCurrency(proj.pay_provision)}</td>
+                          <td className="py-1 px-1 text-right text-blue-600">{formatCurrency(proj.terminal_provision)}</td>
+                          <td className="py-1 px-1 text-right font-bold text-purple-700">
+                            {formatCurrency(proj.total_provision)} {proj.ote_match && '✓'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
