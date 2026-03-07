@@ -57,18 +57,52 @@ function parseNumber(value: string | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function isValidDateParts(year: number, month: number, day: number): boolean {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return false;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+
+  const d = new Date(year, month - 1, day);
+  return d.getFullYear() === year && d.getMonth() === month - 1 && d.getDate() === day;
+}
+
 function parseYearMonthToIsoDate(value: string | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
 
-  const match = /^(\d{4})-(\d{1,2})$/.exec(trimmed);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return null;
+  // 1) YYYY-MM
+  let match = /^(\d{4})-(\d{1,2})$/.exec(trimmed);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    if (isValidDateParts(year, month, 1)) {
+      return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-01`;
+    }
+  }
 
-  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-01`;
+  // 2) YYYY-MM-DD
+  match = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(trimmed);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (isValidDateParts(year, month, day)) {
+      return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-01`;
+    }
+  }
+
+  // 3) DD.MM.YYYY (deutsches Datum), optional mit Uhrzeit
+  match = /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+.*)?$/.exec(trimmed);
+  if (match) {
+    const day = Number(match[1]);
+    const month = Number(match[2]);
+    const year = Number(match[3]);
+    if (isValidDateParts(year, month, day)) {
+      return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-01`;
+    }
+  }
+
+  return null;
 }
 
 function buildHeaderIndexMap(headerRow: string[]) {
