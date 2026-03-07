@@ -63,6 +63,7 @@ Die App kombiniert:
 - Bei User-/Rollenänderungen immer Datumslogik mitdenken.
 - Bei UI-Änderungen in Userlisten prüfen, ob mehrere Admin-Oberflächen existieren (`AdminPanel`, `DLTSettings`).
 - Keine fachlichen Annahmen ohne Prüfung in `hooks.ts` und `calculations.ts`.
+- Für neue Import-Routinen immer zuerst `docs/import-playbook.md` anwenden (API-Pattern, Logging, Upsert, SQL-Checks).
 
 ## Maschinenlesbarer Kontext
 
