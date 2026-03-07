@@ -2,6 +2,8 @@ import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
 const GO_LIVE_AUTO_IMPORT_KEY = 'go_live_auto_import_enabled';
+type ImportTrigger = 'manual' | 'cron';
+type ImportStatus = 'success' | 'partial' | 'failed' | 'skipped';
 
 type ParsedGoLiveRow = {
   rowNumber: number;
@@ -57,8 +59,17 @@ function parseYesNo(value: string | undefined): boolean | null {
 
 function parseNumber(value: string | undefined): number | null {
   if (!value) return null;
-  const normalized = value.trim().replace(',', '.');
-  if (!normalized) return null;
+  const raw = value.trim().replace(/\s+/g, '').replace(/€/g, '');
+  if (!raw) return null;
+
+  let normalized = raw;
+  if (raw.includes('.') && raw.includes(',')) {
+    // Deutsches Format wie 1.234,56
+    normalized = raw.replace(/\./g, '').replace(',', '.');
+  } else if (raw.includes(',')) {
+    normalized = raw.replace(',', '.');
+  }
+
   const n = Number(normalized);
   return Number.isFinite(n) ? n : null;
 }
@@ -127,11 +138,121 @@ function findUserMatch(
   return partialMatch || null;
 }
 
+function findPartnerMatch(
+  partnerName: string,
+  partners: Array<{ id: string; name: string }>
+): { id: string; name: string } | null {
+  if (!partnerName || !partners.length) return null;
+  const normalizedPartnerName = normalizeName(partnerName);
+  const exactMatch = partners.find((p) => normalizeName(p.name) === normalizedPartnerName);
+  if (exactMatch) return exactMatch;
+
+  const nameParts = normalizedPartnerName.split(/[\s-]+/).filter((p) => p.length > 2);
+  if (!nameParts.length) return null;
+
+  const partialMatch = partners.find((p) => {
+    const partnerLower = normalizeName(p.name);
+    return nameParts.every((part) => partnerLower.includes(part));
+  });
+  return partialMatch || null;
+}
+
 function getServerSupabase() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceRoleKey) return null;
   return createClient(supabaseUrl, serviceRoleKey);
+}
+
+async function persistImportRun(params: {
+  supabase: ReturnType<typeof createClient>;
+  triggeredBy: ImportTrigger;
+  status: ImportStatus;
+  autoImportEnabled: boolean;
+  sheetRange?: string | null;
+  skipped?: boolean;
+  reason?: string | null;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport?: number;
+    imported?: number;
+    failed?: number;
+    duplicates?: number;
+  };
+  errors?: Array<{ rowNumber: number; oakId: number | null; error: string }>;
+  warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
+}) {
+  try {
+    const {
+      supabase,
+      triggeredBy,
+      status,
+      autoImportEnabled,
+      sheetRange,
+      skipped = false,
+      reason = null,
+      stats,
+      errors = [],
+      warnings = [],
+    } = params;
+
+    const { data: run, error: runError } = await supabase
+      .from('go_live_import_runs')
+      .insert({
+        triggered_by: triggeredBy,
+        status,
+        started_at: new Date().toISOString(),
+        finished_at: new Date().toISOString(),
+        sheet_range: sheetRange || null,
+        total_rows: stats?.totalRowsFromSheet ?? 0,
+        parsed_rows: stats?.parsedRows ?? 0,
+        valid_rows: stats?.validRows ?? 0,
+        invalid_rows: stats?.invalidRows ?? 0,
+        to_import: stats?.toImport ?? 0,
+        imported: stats?.imported ?? 0,
+        failed: stats?.failed ?? 0,
+        duplicates: stats?.duplicates ?? 0,
+        auto_import_enabled: autoImportEnabled,
+        skipped,
+        reason,
+      })
+      .select('id')
+      .single();
+
+    if (runError || !run?.id) {
+      console.error('Import-Run Logging fehlgeschlagen:', runError?.message || 'Keine run.id');
+      return;
+    }
+
+    const warningItems = warnings.map((w) => ({
+      run_id: run.id,
+      row_number: w.rowNumber > 0 ? w.rowNumber : null,
+      oak_id: w.oakId,
+      level: 'warning',
+      message: w.warning,
+    }));
+
+    const errorItems = errors.map((e) => ({
+      run_id: run.id,
+      row_number: e.rowNumber > 0 ? e.rowNumber : null,
+      oak_id: e.oakId,
+      level: e.error === 'OAKID bereits vorhanden' ? 'duplicate' : 'error',
+      message: e.error,
+    }));
+
+    const allItems = [...warningItems, ...errorItems];
+    if (allItems.length > 0) {
+      const { error: itemError } = await supabase.from('go_live_import_run_items').insert(allItems);
+      if (itemError) {
+        console.error('Import-Run-Items Logging fehlgeschlagen:', itemError.message);
+      }
+    }
+  } catch (e: any) {
+    console.error('Import-Run Logging Exception:', e?.message || e);
+  }
 }
 
 export async function getGoLiveAutoImportState() {
@@ -356,7 +477,7 @@ export async function POST() {
   }
 }
 
-export async function runCommitImport() {
+export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }) {
   const supabase = getServerSupabase();
   if (!supabase) {
     return {
@@ -367,8 +488,19 @@ export async function runCommitImport() {
     };
   }
 
+  const triggeredBy: ImportTrigger = context?.triggeredBy || 'manual';
+  const autoImportEnabled = context?.autoImportEnabled ?? false;
+
   const extracted = await extractSheetRows();
   if (!extracted.success) {
+    await persistImportRun({
+      supabase,
+      triggeredBy,
+      status: 'failed',
+      autoImportEnabled,
+      sheetRange: extracted.range || null,
+      reason: extracted.error,
+    });
     return {
       success: false,
       status: extracted.status,
@@ -380,6 +512,20 @@ export async function runCommitImport() {
 
   const { data: users, error: usersError } = await supabase.from('users').select('id, name, email');
   if (usersError) {
+    await persistImportRun({
+      supabase,
+      triggeredBy,
+      status: 'failed',
+      autoImportEnabled,
+      sheetRange: extracted.range,
+      reason: `Users konnten nicht geladen werden: ${usersError.message}`,
+      stats: {
+        totalRowsFromSheet: extracted.rawRows.length,
+        parsedRows: extracted.parsedRows.length,
+        validRows: extracted.validRows.length,
+        invalidRows: extracted.invalidRows.length,
+      },
+    });
     return {
       success: false,
       status: 500,
@@ -387,16 +533,51 @@ export async function runCommitImport() {
     };
   }
 
-  const oakIds = extracted.validRows.map((r) => r.oakId).filter((v): v is number => Number.isInteger(v));
+  const { data: partners, error: partnersError } = await supabase.from('partners').select('id, name');
+
+  const rowByOakId = new Map<number, ParsedGoLiveRow>();
+  const warnings: Array<{ rowNumber: number; oakId: number | null; warning: string }> = [];
+  let sourceDuplicates = 0;
+
+  for (const row of extracted.validRows) {
+    if (row.oakId === null) continue;
+    if (rowByOakId.has(row.oakId)) {
+      sourceDuplicates += 1;
+      warnings.push({
+        rowNumber: row.rowNumber,
+        oakId: row.oakId,
+        warning: 'Doppelte OAK-ID im Sheet: letzte Zeile wird verwendet',
+      });
+    }
+    rowByOakId.set(row.oakId, row);
+  }
+
+  const rowsToProcess = Array.from(rowByOakId.values());
+  const oakIds = rowsToProcess.map((r) => r.oakId).filter((v): v is number => Number.isInteger(v));
   const { data: existingOakIds, error: existingError } = oakIds.length
     ? await supabase.from('go_lives').select('oak_id').in('oak_id', oakIds)
     : { data: [], error: null };
 
   if (existingError) {
+    await persistImportRun({
+      supabase,
+      triggeredBy,
+      status: 'failed',
+      autoImportEnabled,
+      sheetRange: extracted.range,
+      reason: `Vorab-Check fehlgeschlagen: ${existingError.message}`,
+      stats: {
+        totalRowsFromSheet: extracted.rawRows.length,
+        parsedRows: extracted.parsedRows.length,
+        validRows: extracted.validRows.length,
+        invalidRows: extracted.invalidRows.length,
+      },
+      warnings,
+    });
     return {
       success: false,
       status: 500,
-      error: `Duplikat-Check fehlgeschlagen: ${existingError.message}`,
+      error: `Vorab-Check fehlgeschlagen: ${existingError.message}`,
     };
   }
 
@@ -406,21 +587,18 @@ export async function runCommitImport() {
       .filter((n: number | null): n is number => n !== null)
   );
 
-  const rowsForInsert: any[] = [];
+  const rowsForUpsert: any[] = [];
   const errors: Array<{ rowNumber: number; oakId: number | null; error: string }> = [];
-  let duplicates = 0;
 
-  for (const row of extracted.validRows) {
-    if (row.oakId !== null && existingSet.has(row.oakId)) {
-      duplicates += 1;
-      errors.push({
-        rowNumber: row.rowNumber,
-        oakId: row.oakId,
-        error: 'OAKID bereits vorhanden',
-      });
-      continue;
-    }
+  if (partnersError) {
+    warnings.push({
+      rowNumber: -1,
+      oakId: null,
+      warning: `Partner-Liste konnte nicht geladen werden: ${partnersError.message}`,
+    });
+  }
 
+  for (const row of rowsToProcess) {
     const matchedUser = findUserMatch(row.ae, users || []);
     if (!matchedUser) {
       errors.push({
@@ -442,8 +620,30 @@ export async function runCommitImport() {
 
     const year = new Date(row.goLiveDate).getFullYear();
     const month = new Date(row.goLiveDate).getMonth() + 1;
+    let partnerId: string | null = null;
 
-    rowsForInsert.push({
+    if (row.partnershipsEnabled) {
+      if (row.partnershipName) {
+        const matchedPartner = findPartnerMatch(row.partnershipName, partners || []);
+        if (matchedPartner) {
+          partnerId = matchedPartner.id;
+        } else {
+          warnings.push({
+            rowNumber: row.rowNumber,
+            oakId: row.oakId,
+            warning: `Partnerschaft aktiv, aber kein Partner-Match fuer "${row.partnershipName}"`,
+          });
+        }
+      } else {
+        warnings.push({
+          rowNumber: row.rowNumber,
+          oakId: row.oakId,
+          warning: 'Partnerships J/N = Ja, aber Partnerschaftsname ist leer',
+        });
+      }
+    }
+
+    rowsForUpsert.push({
       user_id: matchedUser.id,
       customer_name: row.customerName,
       go_live_date: row.goLiveDate,
@@ -454,48 +654,78 @@ export async function runCommitImport() {
       has_terminal: row.hasTerminal ?? false,
       pay_arr: row.payValueAfter3Month,
       commission_relevant: row.commissionRelevant ?? true,
+      partner_id: partnerId,
       is_enterprise: row.enterprise ?? false,
       oak_id: row.oakId,
       notes: `Import aus Google-Sheet API (${new Date().toLocaleDateString('de-DE')})`,
     });
-
-    existingSet.add(row.oakId);
   }
 
+  const existingInDbCount = rowsToProcess.filter((r) => r.oakId !== null && existingSet.has(r.oakId)).length;
+  const updated = Math.max(0, Math.min(existingInDbCount, rowsForUpsert.length));
   let imported = 0;
   let failed = 0;
   const BATCH_SIZE = 50;
 
-  for (let i = 0; i < rowsForInsert.length; i += BATCH_SIZE) {
-    const chunk = rowsForInsert.slice(i, i + BATCH_SIZE);
-    const { error: insertError } = await supabase.from('go_lives').insert(chunk);
-    if (insertError) {
+  for (let i = 0; i < rowsForUpsert.length; i += BATCH_SIZE) {
+    const chunk = rowsForUpsert.slice(i, i + BATCH_SIZE);
+    const { error: upsertError } = await supabase
+      .from('go_lives')
+      .upsert(chunk, { onConflict: 'oak_id', ignoreDuplicates: false });
+    if (upsertError) {
       failed += chunk.length;
       chunk.forEach((r) => {
         errors.push({
           rowNumber: -1,
           oakId: r.oak_id ?? null,
-          error: insertError.message,
+          error: upsertError.message,
         });
       });
+      if (
+        upsertError.message.includes('there is no unique or exclusion constraint') ||
+        upsertError.message.includes('on conflict')
+      ) {
+        warnings.push({
+          rowNumber: -1,
+          oakId: null,
+          warning:
+            'DB-Constraint fuer Upsert fehlt: bitte supabase-go-live-oak-upsert-constraint.sql ausfuehren.',
+        });
+      }
     } else {
       imported += chunk.length;
     }
   }
 
+  const finalStats = {
+    totalRowsFromSheet: extracted.rawRows.length,
+    parsedRows: extracted.parsedRows.length,
+    validRows: extracted.validRows.length,
+    invalidRows: extracted.invalidRows.length,
+    toImport: rowsForUpsert.length,
+    imported,
+    failed,
+    duplicates: sourceDuplicates,
+    updated,
+  };
+  const finalStatus: ImportStatus = failed > 0 ? (imported > 0 ? 'partial' : 'failed') : 'success';
+
+  await persistImportRun({
+    supabase,
+    triggeredBy,
+    status: finalStatus,
+    autoImportEnabled,
+    sheetRange: extracted.range,
+    stats: finalStats,
+    errors,
+    warnings,
+  });
+
   return {
     success: true,
     mode: 'commit',
-    stats: {
-      totalRowsFromSheet: extracted.rawRows.length,
-      parsedRows: extracted.parsedRows.length,
-      validRows: extracted.validRows.length,
-      invalidRows: extracted.invalidRows.length,
-      toImport: rowsForInsert.length,
-      imported,
-      failed,
-      duplicates,
-    },
+    stats: finalStats,
     errors: errors.slice(0, 200),
+    warnings: warnings.slice(0, 200),
   };
 }

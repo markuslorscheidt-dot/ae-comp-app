@@ -69,6 +69,12 @@ export default function GoLiveForm({
     loadSubscriptionPackages().then(setSubscriptionPackages).catch(console.error);
   }, []);
 
+  // Default für Pay-Target immer aus DLT Umsatz-Berechnung nachziehen (nur bei Neuanlage)
+  useEffect(() => {
+    if (initialData) return;
+    setPayMonthlyTarget(avgPayBillTerminal > 0 ? avgPayBillTerminal.toString() : '');
+  }, [avgPayBillTerminal, initialData]);
+
   const subsArr = subsMonthly ? parseFloat(subsMonthly) * 12 : 0;
 
   const [successMessage, setSuccessMessage] = useState('');

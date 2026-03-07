@@ -260,8 +260,8 @@ export interface MonthlyResult {
   pay_m0_achievement: number;       // pay_arr_target_total / pay_target
   pay_m0_rate: number;              // Provisions-Rate für M0
   pay_m0_provision: number;         // M0 Provision auf Target-Basis
-  // Pay ARR - Ist (M3)
-  pay_actual: number;               // Tatsächlicher Pay ARR (nach 3 Monaten)
+  // Pay ARR - Ist (Reporting)
+  pay_actual: number;               // PAY IST: Finance-Actual oder Forecast
   pay_achievement: number;          // pay_actual / pay_target
   pay_rate: number;                 // Provisions-Rate für Ist
   pay_provision: number;            // Volle Provision auf Ist-Basis
@@ -285,7 +285,7 @@ export interface YearSummary {
   total_pay_arr_target: number;     // Summe aller pay_arr_target bei Go-Live
   total_pay_target: number;         // Summe aller Pay Targets aus Settings
   total_pay_m0_provision: number;   // M0 Provision auf Target-Basis
-  // Pay Ist (M3)
+  // Pay Ist (Reporting)
   total_pay_actual: number;
   total_pay_achievement: number;
   // Clawback

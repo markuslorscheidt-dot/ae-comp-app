@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getGoLiveAutoImportState, runCommitImport } from '../route';
+import { createClient } from '@supabase/supabase-js';
 
 export async function GET(request: Request) {
   const cronSecret = process.env.CRON_SECRET;
@@ -22,6 +23,25 @@ export async function GET(request: Request) {
   }
 
   if (!autoImportState.enabled) {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (supabaseUrl && serviceRoleKey) {
+      try {
+        const supabase = createClient(supabaseUrl, serviceRoleKey);
+        await supabase.from('go_live_import_runs').insert({
+          triggered_by: 'cron',
+          status: 'skipped',
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          auto_import_enabled: false,
+          skipped: true,
+          reason: 'Auto-Import ist deaktiviert',
+        });
+      } catch (e) {
+        console.error('Skipped-Run Logging fehlgeschlagen:', e);
+      }
+    }
+
     return NextResponse.json({
       success: true,
       mode: 'commit',
@@ -34,7 +54,7 @@ export async function GET(request: Request) {
     });
   }
 
-  const result = await runCommitImport();
+  const result = await runCommitImport({ triggeredBy: 'cron', autoImportEnabled: true });
   if (!result.success) {
     return NextResponse.json(result, { status: result.status || 500 });
   }

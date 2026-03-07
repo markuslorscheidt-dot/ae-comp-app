@@ -3,7 +3,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { User, UserRole, UserRoleHistoryRecord, ProvisionTier, AESettings, GoLive, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, BUSINESS_AREA_LABELS, BusinessArea, MONTH_NAMES, DEFAULT_SETTINGS, DEFAULT_SUBS_TIERS, DEFAULT_PAY_TIERS, calculateMonthlySubsTargets, calculateTotalGoLives } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
-import { useAllUsers, useMultiUserData, useAllSettings, useGoLivesForUser, useSettingsForUser } from '@/lib/hooks';
+import { useAllUsers, useMultiUserData, useAllSettings, useGoLivesForUser } from '@/lib/hooks';
 import { getPermissions } from '@/lib/permissions';
 import { formatCurrency, calculateOTEProjections, validateOTESettings } from '@/lib/calculations';
 import { supabase } from '@/lib/supabase';
@@ -43,6 +43,21 @@ interface DLTSettingsProps {
   user: User;
 }
 
+interface GoLiveBatchValidRowPreview {
+  rowNumber: number;
+  goLiveDate: string | null;
+  oakId: number | null;
+  customerName: string;
+  monthlySubs: number | null;
+  hasTerminal: boolean | null;
+  ae: string;
+  commissionRelevant: boolean | null;
+  partnershipsEnabled: boolean | null;
+  partnershipName: string;
+  enterprise: boolean | null;
+  payValueAfter3Month: number | null;
+}
+
 interface GoLiveDryRunResponse {
   success: boolean;
   mode?: string;
@@ -53,9 +68,29 @@ interface GoLiveDryRunResponse {
     invalidRows: number;
   };
   preview?: {
-    valid: Array<{ rowNumber: number; customerName: string; ae: string; oakId: number | null }>;
+    valid: GoLiveBatchValidRowPreview[];
     invalid: Array<{ rowNumber: number; reasons: string[]; raw: { customerName: string; ae: string; oakId: number | null } }>;
   };
+  warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
+  error?: string;
+}
+
+interface GoLiveCommitResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport: number;
+    imported: number;
+    failed: number;
+    duplicates: number;
+    updated?: number;
+  };
+  errors?: Array<{ rowNumber: number; oakId: number | null; error: string }>;
+  warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
   error?: string;
 }
 
@@ -65,6 +100,51 @@ interface GoLiveAutoImportResponse {
   updatedAt?: string | null;
   error?: string;
 }
+
+interface GoLiveImportRun {
+  id: string;
+  triggered_by: 'manual' | 'cron';
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  to_import: number;
+  auto_import_enabled: boolean;
+  skipped: boolean;
+  reason: string | null;
+}
+
+interface GoLiveImportRunItem {
+  id: string;
+  run_id: string;
+  row_number: number | null;
+  oak_id: number | null;
+  level: 'error' | 'warning' | 'duplicate';
+  message: string;
+  created_at: string;
+}
+
+const GO_LIVE_BATCH_FIELD_MAPPING: Array<{
+  source: string;
+  target: string;
+  transform: string;
+  required?: boolean;
+}> = [
+  { source: 'GL-Date', target: 'go_lives.go_live_date', transform: 'dd.mm.yyyy -> ISO Datum', required: true },
+  { source: 'Oak ID', target: 'go_lives.oak_id', transform: 'Integer', required: true },
+  { source: 'Customer Name', target: 'go_lives.customer_name', transform: 'Trim / String', required: true },
+  { source: 'monthly subs', target: 'go_lives.subs_monthly', transform: 'Numerisch', required: true },
+  { source: 'monthly subs', target: 'go_lives.subs_arr', transform: 'subs_monthly x 12' },
+  { source: 'Terminal sold', target: 'go_lives.has_terminal', transform: 'Ja/Nein -> Boolean' },
+  { source: 'Provisionsrelevant', target: 'go_lives.commission_relevant', transform: 'Ja/Nein -> Boolean' },
+  { source: 'Partnerships J/N', target: 'go_lives.partner_id', transform: 'Ja -> Partner-Matching aktiv' },
+  { source: 'Partnerschaftsname', target: 'go_lives.partner_id', transform: 'Name-Matching auf partners.id' },
+  { source: 'Enterprise', target: 'go_lives.is_enterprise', transform: 'Ja/Nein -> Boolean' },
+  { source: 'Pay Value after 3 month', target: 'go_lives.pay_arr', transform: 'Numerisch (ARR)' },
+  { source: 'AE', target: 'go_lives.user_id', transform: 'Name-Matching auf users.id', required: true },
+];
 
 // Role display names
 const ROLE_LABELS: Record<UserRole, string> = {
@@ -135,6 +215,15 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [batchError, setBatchError] = useState('');
   const [batchResult, setBatchResult] = useState<GoLiveDryRunResponse | null>(null);
   const [lastBatchCheckAt, setLastBatchCheckAt] = useState<string | null>(null);
+  const [batchImportLoading, setBatchImportLoading] = useState(false);
+  const [batchImportError, setBatchImportError] = useState('');
+  const [batchImportResult, setBatchImportResult] = useState<GoLiveCommitResponse | null>(null);
+  const [lastBatchImportAt, setLastBatchImportAt] = useState<string | null>(null);
+  const [importHistoryLoading, setImportHistoryLoading] = useState(false);
+  const [importHistoryError, setImportHistoryError] = useState('');
+  const [importRuns, setImportRuns] = useState<GoLiveImportRun[]>([]);
+  const [selectedImportRunId, setSelectedImportRunId] = useState<string | null>(null);
+  const [selectedImportRunItems, setSelectedImportRunItems] = useState<GoLiveImportRunItem[]>([]);
   
   // ========== NEW ARR: GRUNDEINSTELLUNGEN ==========
   const [newArrYear, setNewArrYear] = useState(currentYear);
@@ -224,7 +313,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const selectedGoLiveTargetUser =
     assignableGoLiveUsers.find((u) => u.id === goLiveUserId) || assignableGoLiveUsers[0] || user;
 
-  const { settings: goLiveTargetSettings } = useSettingsForUser(goLiveUserId || undefined, currentYear);
   const { addGoLive: addGoLiveForTargetUser, refetch: refetchGoLivesForTargetUser } = useGoLivesForUser(
     goLiveUserId || undefined,
     currentYear
@@ -271,6 +359,66 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   };
 
+  const handleRunGoLiveBatchImport = async () => {
+    setBatchImportLoading(true);
+    setBatchImportError('');
+    try {
+      const response = await fetch('/api/goLive/sync', { method: 'POST' });
+      const data = (await response.json()) as GoLiveCommitResponse;
+      if (!response.ok || !data.success) {
+        setBatchImportResult(null);
+        setBatchImportError(data.error || 'Manueller Import fehlgeschlagen');
+        return;
+      }
+      setBatchImportResult(data);
+      setLastBatchImportAt(new Date().toISOString());
+      await loadImportHistory();
+    } catch (err: any) {
+      setBatchImportResult(null);
+      setBatchImportError(err?.message || 'Manueller Import fehlgeschlagen');
+    } finally {
+      setBatchImportLoading(false);
+    }
+  };
+
+  const loadImportHistory = useCallback(async () => {
+    setImportHistoryLoading(true);
+    setImportHistoryError('');
+    try {
+      const response = await fetch('/api/goLive/sync/history?limit=20', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as GoLiveImportRun[];
+      setImportRuns(runs);
+      if (!selectedImportRunId && runs.length > 0) {
+        setSelectedImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setImportHistoryLoading(false);
+    }
+  }, [selectedImportRunId]);
+
+  const loadImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/goLive/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedImportRunItems((data.items || []) as GoLiveImportRunItem[]);
+    } catch (err: any) {
+      setImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
   const loadAutoImportState = useCallback(async () => {
     setAutoImportLoading(true);
     setAutoImportMessage('');
@@ -292,8 +440,14 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   useEffect(() => {
     if (activeTab === 'goLives') {
       loadAutoImportState();
+      loadImportHistory();
     }
-  }, [activeTab, loadAutoImportState]);
+  }, [activeTab, loadAutoImportState, loadImportHistory]);
+
+  useEffect(() => {
+    if (activeTab !== 'goLives' || !selectedImportRunId) return;
+    loadImportRunItems(selectedImportRunId);
+  }, [activeTab, selectedImportRunId, loadImportRunItems]);
 
   const handleAutoImportToggle = async (enabled: boolean) => {
     setAutoImportEnabled(enabled);
@@ -320,6 +474,30 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setAutoImportSaving(false);
     }
   };
+
+  const formatBatchPreviewDate = (value: string | null) => {
+    if (!value) return '-';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleDateString('de-DE');
+  };
+
+  const formatBatchPreviewBoolean = (value: boolean | null) => {
+    if (value === null || value === undefined) return '-';
+    return value ? 'Ja' : 'Nein';
+  };
+
+  const getImportRunStatusLabel = (status: GoLiveImportRun['status']) => {
+    if (status === 'success') return 'Erfolgreich';
+    if (status === 'partial') return 'Teilweise';
+    if (status === 'failed') return 'Fehlgeschlagen';
+    return 'Uebersprungen';
+  };
+
+  const latestAutoRun = useMemo(
+    () => importRuns.find((run) => run.triggered_by === 'cron') || null,
+    [importRuns]
+  );
   
   // ========== PLANZAHLEN: LADEN ==========
   const loadPlanzahlen = useCallback(async (year: number) => {
@@ -1348,7 +1526,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 defaultCommissionRelevant={getDefaultCommissionRelevant(selectedGoLiveTargetUser.role)}
                 currentUser={user}
                 targetUserId={goLiveUserId}
-                avgPayBillTerminal={goLiveTargetSettings?.avg_pay_bill || 0}
+                avgPayBillTerminal={avgPayBillTerminal}
                 assignableUsers={assignableGoLiveUsers}
                 selectedUserId={goLiveUserId}
                 onSelectedUserChange={setGoLiveUserId}
@@ -1409,14 +1587,26 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
               <div className="flex items-center gap-3">
                 <button
                   onClick={handleRunGoLiveBatchCheck}
-                  disabled={batchLoading}
+                  disabled={batchLoading || batchImportLoading}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 >
                   {batchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
                 </button>
+                <button
+                  onClick={handleRunGoLiveBatchImport}
+                  disabled={batchImportLoading || batchLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {batchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
                 {lastBatchCheckAt && (
                   <span className="text-xs text-gray-500">
                     Letzter Check: {new Date(lastBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+                {lastBatchImportAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Import: {new Date(lastBatchImportAt).toLocaleString('de-DE')}
                   </span>
                 )}
               </div>
@@ -1424,6 +1614,40 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
               {batchError && (
                 <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
                   {batchError}
+                </div>
+              )}
+
+              {batchImportError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {batchImportError}
+                </div>
+              )}
+
+              {batchImportResult?.stats && (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">To Import</div>
+                      <div className="font-semibold">{batchImportResult.stats.toImport}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{batchImportResult.stats.imported}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{batchImportResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{batchImportResult.stats.failed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Duplikate im Sheet</div>
+                      <div className="font-semibold text-amber-700">{batchImportResult.stats.duplicates}</div>
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -1448,6 +1672,118 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                     </div>
                   </div>
 
+                  <div>
+                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -> Datenbank)</h5>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-60 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Sheet-Spalte</th>
+                              <th className="text-left px-2 py-2 text-gray-600">DB-Feld</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Transformation</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Pflicht</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {GO_LIVE_BATCH_FIELD_MAPPING.map((row) => (
+                              <tr key={`${row.source}-${row.target}`} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{row.source}</td>
+                                <td className="px-2 py-1.5 text-gray-700 font-mono">{row.target}</td>
+                                <td className="px-2 py-1.5 text-gray-600">{row.transform}</td>
+                                <td className="px-2 py-1.5">
+                                  {row.required ? (
+                                    <span className="inline-flex items-center rounded bg-red-50 text-red-700 px-2 py-0.5">Ja</span>
+                                  ) : (
+                                    <span className="inline-flex items-center rounded bg-gray-100 text-gray-600 px-2 py-0.5">Nein</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  {batchResult.preview?.valid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Import-Vorschau (normalisierte Werte)</h5>
+                      <div className="rounded-lg border border-gray-200 overflow-hidden">
+                        <div className="max-h-64 overflow-auto">
+                          <table className="w-full text-xs">
+                            <thead className="bg-gray-50 sticky top-0">
+                              <tr>
+                                <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Oak ID</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Kunde</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Go-Live</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Subs/Monat</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Subs ARR</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Terminal</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Partnership</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Partnerschaftsname</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Pay ARR</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Prov.-relevant</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Enterprise</th>
+                                <th className="text-left px-2 py-2 text-gray-600">AE</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {batchResult.preview.valid.slice(0, 12).map((row) => (
+                                <tr key={row.rowNumber} className="border-t border-gray-100">
+                                  <td className="px-2 py-1.5 text-gray-700">{row.rowNumber}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.oakId ?? '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.customerName || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewDate(row.goLiveDate)}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.monthlySubs ?? '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.monthlySubs !== null && row.monthlySubs !== undefined
+                                      ? Math.round(row.monthlySubs * 12)
+                                      : '-'}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewBoolean(row.hasTerminal)}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {formatBatchPreviewBoolean(row.partnershipsEnabled)}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.partnershipName || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.payValueAfter3Month ?? '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {formatBatchPreviewBoolean(row.commissionRelevant)}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewBoolean(row.enterprise)}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.ae || '-'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Vorschau zeigt die ersten 12 geparsten Zeilen aus dem Dry-Run.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {batchResult.warnings?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-amber-800 mb-2">Warnungen beim Mapping</h5>
+                      <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                        {batchResult.warnings.slice(0, 8).map((w, idx) => (
+                          <div
+                            key={`${w.rowNumber}-${w.oakId}-${idx}`}
+                            className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs"
+                          >
+                            <div className="font-medium text-amber-800">
+                              Zeile {w.rowNumber > 0 ? w.rowNumber : '-'} {w.oakId ? `- OAK ${w.oakId}` : ''}
+                            </div>
+                            <div className="text-amber-700">{w.warning}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
                   {goLiveImportMode === 'manual' && batchResult.preview?.invalid?.length ? (
                     <div>
                       <h5 className="text-sm font-semibold text-gray-700 mb-2">Beispiele fehlerhafte Zeilen</h5>
@@ -1465,6 +1801,132 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   ) : null}
                 </div>
               )}
+
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-sm font-semibold text-gray-700">Import-Historie</h5>
+                  <button
+                    onClick={loadImportHistory}
+                    disabled={importHistoryLoading}
+                    className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {importHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                  </button>
+                </div>
+
+                {importHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {importHistoryError}
+                  </div>
+                ) : null}
+
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
+                  <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
+                  {latestAutoRun ? (
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
+                      <div>
+                        <div className="text-indigo-700">Zeitpunkt</div>
+                        <div>{new Date(latestAutoRun.started_at).toLocaleString('de-DE')}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Status</div>
+                        <div>{getImportRunStatusLabel(latestAutoRun.status)}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Importiert</div>
+                        <div>{latestAutoRun.imported}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Fehler</div>
+                        <div>{latestAutoRun.failed}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Duplikate</div>
+                        <div>{latestAutoRun.duplicates}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Hinweis</div>
+                        <div>{latestAutoRun.reason || (latestAutoRun.skipped ? 'Skipped' : '-')}</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
+                  )}
+                </div>
+
+                {importRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {importRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">
+                                {new Date(run.started_at).toLocaleString('de-DE')}
+                              </td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                              <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedImportRunId && selectedImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">OAK</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.oak_id ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>

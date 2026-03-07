@@ -130,15 +130,15 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         const goLivesTarget = planTargets ? planTargets.goLivesTarget[idx] : r.go_lives_target;
         cumSubsARR += r.subs_actual;
         cumSubsTarget += subsTarget;
-        cumPayARR += r.pay_arr_target_total;
+        cumPayARR += r.pay_actual;
         cumPayTarget += payTarget;
         return {
           name,
           month: idx + 1,
           subsARR: r.subs_actual,
           subsTarget,
-          // Pay IST wie Jahresübersicht: pay_arr_target_total (M0/Target-Summe)
-          payARR: r.pay_arr_target_total,
+          // Pay IST: Finance-Actual oder Forecast (zentrale Berechnungslogik)
+          payARR: r.pay_actual,
           payTarget,
           goLives: r.go_lives_count,
           goLivesTarget,
@@ -181,8 +181,8 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       summary.monthly_results.forEach((result, idx) => {
         data[idx].subsARR += result.subs_actual;
         data[idx].subsTarget += result.subs_target;
-        // Pay IST wie Jahresübersicht: pay_arr_target_total (M0/Target-Summe)
-        data[idx].payARR += result.pay_arr_target_total;
+        // Pay IST: Finance-Actual oder Forecast (zentrale Berechnungslogik)
+        data[idx].payARR += result.pay_actual;
         data[idx].payTarget += result.pay_target;
         data[idx].goLives += result.go_lives_count;
         data[idx].goLivesTarget += result.go_lives_target;
@@ -250,7 +250,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         terminal_penetration: goLives > 0 ? terminals / goLives : 0,
         subs_actual: m?.subsARR ?? 0,
         subs_target: m?.subsTarget ?? 0,
-        // Pay IST wie Jahresübersicht: pay_arr_target_total (M0/Target-Summe)
+        // Pay IST: Finance-Actual oder Forecast
         pay_actual: m?.payARR ?? 0,
         pay_target: m?.payTarget ?? 0,
       };

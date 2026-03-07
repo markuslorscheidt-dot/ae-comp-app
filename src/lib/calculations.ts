@@ -54,6 +54,19 @@ export function getTerminalRate(
 }
 
 /**
+ * PAY IST für Reporting:
+ * 1) Finance-Actual (pay_arr), falls vorhanden
+ * 2) sonst Go-Live Forecast (pay_arr_target)
+ * 3) sonst Settings-Default bei Terminal (avg_pay_bill * 12)
+ */
+function getEffectivePayArr(gl: GoLive, settings: AESettings): number {
+  if (gl.pay_arr !== null && gl.pay_arr !== undefined) return gl.pay_arr;
+  if (gl.pay_arr_target !== null && gl.pay_arr_target !== undefined) return gl.pay_arr_target;
+  if (gl.has_terminal) return (settings.avg_pay_bill || 0) * 12;
+  return 0;
+}
+
+/**
  * Berechnet das Monatsergebnis
  * Für ARR-Tracking: Alle Go-Lives zählen
  * Für Provision: Nur commission_relevant Go-Lives
@@ -81,7 +94,7 @@ export function calculateMonthlyResult(
   
   // ARR-Werte (alle Go-Lives)
   const subsActualTotal = monthGoLives.reduce((sum, gl) => sum + (gl.subs_arr || 0), 0);
-  const payActualTotal = monthGoLives.reduce((sum, gl) => sum + (gl.pay_arr || 0), 0);
+  const payActualTotal = monthGoLives.reduce((sum, gl) => sum + getEffectivePayArr(gl, settings), 0);
   
   // Pay ARR Target (Summe der Targets bei Go-Live, alle Go-Lives)
   const payArrTargetTotal = monthGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || 0), 0);
