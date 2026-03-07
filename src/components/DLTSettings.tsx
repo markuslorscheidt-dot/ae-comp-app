@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { User, UserRole, UserRoleHistoryRecord, ProvisionTier, AESettings, GoLive, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, BUSINESS_AREA_LABELS, BusinessArea, MONTH_NAMES, DEFAULT_SETTINGS, DEFAULT_SUBS_TIERS, DEFAULT_PAY_TIERS, calculateMonthlySubsTargets, calculateTotalGoLives } from '@/lib/types';
+import { User, UserRole, UserRoleHistoryRecord, ProvisionTier, AESettings, GoLive, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, BUSINESS_AREA_LABELS, BusinessArea, DEFAULT_SETTINGS, DEFAULT_SUBS_TIERS, DEFAULT_PAY_TIERS, calculateMonthlySubsTargets, calculateTotalGoLives } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
-import { useAllUsers, useMultiUserData, useAllSettings, useGoLivesForUser } from '@/lib/hooks';
+import { useAllUsers, useAllSettings, useGoLivesForUser } from '@/lib/hooks';
 import { getPermissions } from '@/lib/permissions';
 import { formatCurrency, calculateOTEProjections, validateOTESettings } from '@/lib/calculations';
 import { supabase } from '@/lib/supabase';
@@ -101,6 +101,117 @@ interface GoLiveAutoImportResponse {
   error?: string;
 }
 
+interface ChurnDryRunResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+  };
+  preview?: {
+    valid: Array<{
+      rowNumber: number;
+      glMonth: string | null;
+      churnMonth: string | null;
+      oakId: number | null;
+      customerName: string;
+      churnReason: string;
+      packageName: string;
+      totalArrLost: number | null;
+      subsRevenueLost: number | null;
+      payRevenueLost: number | null;
+      scheduled: boolean | null;
+    }>;
+    invalid: Array<{
+      rowNumber: number;
+      reasons: string[];
+      raw: { customerName: string; oakId: number | null };
+    }>;
+  };
+  error?: string;
+}
+
+interface ChurnCommitResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport: number;
+    imported: number;
+    failed: number;
+    duplicates: number;
+    updated?: number;
+  };
+  errors?: Array<{ rowNumber: number; oakId: number | null; error: string }>;
+  warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
+  error?: string;
+}
+
+interface ChurnAutoImportResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
+interface UpDownsellsDryRunResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+  };
+  preview?: {
+    valid: Array<{
+      rowNumber: number;
+      eventMonth: string | null;
+      oakId: number | null;
+      customerName: string;
+      netGrowthArr: number | null;
+      netLossArr: number | null;
+    }>;
+    invalid: Array<{
+      rowNumber: number;
+      reasons: string[];
+      raw: { customerName: string; oakId: number | null };
+    }>;
+  };
+  error?: string;
+}
+
+interface UpDownsellsCommitResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport: number;
+    imported: number;
+    failed: number;
+    duplicates: number;
+    updated?: number;
+  };
+  errors?: Array<{ rowNumber: number; oakId: number | null; error: string }>;
+  warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
+  error?: string;
+}
+
+interface UpDownsellsAutoImportResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
 interface GoLiveManualLockResponse {
   success: boolean;
   enabled?: boolean;
@@ -133,6 +244,58 @@ interface GoLiveImportRunItem {
   created_at: string;
 }
 
+interface ChurnImportRun {
+  id: string;
+  triggered_by: 'manual' | 'cron';
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  updated?: number;
+  to_import: number;
+  auto_import_enabled: boolean;
+  skipped: boolean;
+  reason: string | null;
+}
+
+interface ChurnImportRunItem {
+  id: string;
+  run_id: string;
+  row_number: number | null;
+  oak_id: number | null;
+  level: 'error' | 'warning' | 'duplicate';
+  message: string;
+  created_at: string;
+}
+
+interface UpDownsellsImportRun {
+  id: string;
+  triggered_by: 'manual' | 'cron';
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  updated?: number;
+  to_import: number;
+  auto_import_enabled: boolean;
+  skipped: boolean;
+  reason: string | null;
+}
+
+interface UpDownsellsImportRunItem {
+  id: string;
+  run_id: string;
+  row_number: number | null;
+  oak_id: number | null;
+  level: 'error' | 'warning' | 'duplicate';
+  message: string;
+  created_at: string;
+}
+
 const GO_LIVE_BATCH_FIELD_MAPPING: Array<{
   source: string;
   target: string;
@@ -151,6 +314,44 @@ const GO_LIVE_BATCH_FIELD_MAPPING: Array<{
   { source: 'Enterprise', target: 'go_lives.is_enterprise', transform: 'Ja/Nein -> Boolean' },
   { source: 'Pay Value after 3 month', target: 'go_lives.pay_arr', transform: 'Numerisch (ARR)' },
   { source: 'AE', target: 'go_lives.user_id', transform: 'Name-Matching auf users.id', required: true },
+];
+
+const CHURN_BATCH_FIELD_MAPPING: Array<{
+  source: string;
+  target: string;
+  transform: string;
+  required?: boolean;
+}> = [
+  { source: 'GL Month', target: 'churn_events.gl_month', transform: 'YYYY-MM -> YYYY-MM-01', required: true },
+  { source: 'Churn Month', target: 'churn_events.churn_month', transform: 'YYYY-MM -> YYYY-MM-01', required: true },
+  { source: 'Oak ID', target: 'churn_events.oak_id', transform: 'Integer (Business Key)', required: true },
+  { source: 'Customer Name', target: 'churn_events.customer_name', transform: 'Trim / String', required: true },
+  { source: 'COO', target: 'churn_events.coo', transform: 'String (optional)' },
+  { source: 'Churn Reason', target: 'churn_events.churn_reason', transform: 'String' },
+  { source: 'Package', target: 'churn_events.package_name', transform: 'String' },
+  { source: 'Total ARR Lost', target: 'churn_events.total_arr_lost', transform: 'Numerisch (DE/EN Format)' },
+  { source: 'Subs Revenue Lost', target: 'churn_events.subs_revenue_lost', transform: 'Numerisch (DE/EN Format)' },
+  { source: 'Pay Revenue Lost', target: 'churn_events.pay_revenue_lost', transform: 'Numerisch (DE/EN Format)' },
+  { source: 'Scheduled', target: 'churn_events.scheduled', transform: 'Y/N oder Ja/Nein -> Boolean' },
+];
+
+const UP_DOWNSELLS_BATCH_FIELD_MAPPING: Array<{
+  source: string;
+  target: string;
+  transform: string;
+  required?: boolean;
+}> = [
+  {
+    source: 'Upgrade / Downgrade Month',
+    target: 'up_downsells_events.event_month',
+    transform: 'YYYY-MM -> YYYY-MM-01',
+    required: true,
+  },
+  { source: 'Oak ID', target: 'up_downsells_events.oak_id', transform: 'Integer', required: true },
+  { source: 'Customer Name', target: 'up_downsells_events.customer_name', transform: 'Trim / String', required: true },
+  { source: 'Net Growth ARR', target: 'up_downsells_events.net_growth_arr', transform: 'Numerisch (DE/EN Format)' },
+  { source: 'Net Loss ARR', target: 'up_downsells_events.net_loss_arr', transform: 'Numerisch (DE/EN Format)' },
+  { source: 'Net Growth + Net Loss', target: 'up_downsells_events.net_arr', transform: 'Berechnet' },
 ];
 
 // Role display names
@@ -202,12 +403,106 @@ const NEW_ARR_DEFAULTS = {
   avgPayBillTipping: 30,
 };
 
-type SettingsTab = 'users' | 'goLives' | 'permissions' | 'areas' | 'planning' | 'system';
+const EXPANDING_ARR_DEFAULTS = {
+  totalUpgrades: [12, 27, 45, 53, 50, 45, 44, 50, 36, 36, 30, 32],
+  totalDowngrades: [-2, -3, -1, 0, -3, -2, -2, -1, -1, -1, -1, -3],
+  netUpgradeDowngradeArr: [14440, 18565, 18565, 22691, 20629, 18565, 18565, 20628, 18061, 18060, 10567, 6946],
+};
+
+const EMPTY_MONTH_VALUES = Array.from({ length: 12 }, () => 0);
+
+interface ExpandingArrData {
+  upgrade_downgrade: {
+    total_upgrades: number[];
+    total_downgrades: number[];
+    net_upgrade_downgrade_arr: number[];
+  };
+}
+
+interface ChurnArrData {
+  invoiced_churn: {
+    target_count: number[];
+    actual_count: number[];
+    target_arr: number[];
+    actual_arr: number[];
+  };
+  in_month_churn: {
+    target_count: number[];
+    target_arr: number[];
+  };
+}
+
+function normalizeMonthlyArray(value: unknown): number[] {
+  if (!Array.isArray(value)) return [...EMPTY_MONTH_VALUES];
+  const sanitized = value.map((v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  });
+  const firstTwelve = sanitized.slice(0, 12);
+  if (firstTwelve.length < 12) {
+    return [...firstTwelve, ...Array.from({ length: 12 - firstTwelve.length }, () => 0)];
+  }
+  return firstTwelve;
+}
+
+function parseChurnArrData(raw: unknown): ChurnArrData {
+  const data = raw && typeof raw === 'object' ? (raw as any) : {};
+  const invoiced = data.invoiced_churn && typeof data.invoiced_churn === 'object' ? data.invoiced_churn : {};
+  const inMonth = data.in_month_churn && typeof data.in_month_churn === 'object' ? data.in_month_churn : {};
+
+  return {
+    invoiced_churn: {
+      target_count: normalizeMonthlyArray(invoiced.target_count),
+      actual_count: normalizeMonthlyArray(invoiced.actual_count),
+      target_arr: normalizeMonthlyArray(invoiced.target_arr),
+      actual_arr: normalizeMonthlyArray(invoiced.actual_arr),
+    },
+    in_month_churn: {
+      target_count: normalizeMonthlyArray(inMonth.target_count),
+      target_arr: normalizeMonthlyArray(inMonth.target_arr),
+    },
+  };
+}
+
+function parseExpandingArrData(raw: unknown): ExpandingArrData {
+  const data = raw && typeof raw === 'object' ? (raw as any) : {};
+  const upgradeDowngrade =
+    data.upgrade_downgrade && typeof data.upgrade_downgrade === 'object' ? data.upgrade_downgrade : {};
+
+  const upgrades = normalizeMonthlyArray(upgradeDowngrade.total_upgrades);
+  const downgrades = normalizeMonthlyArray(upgradeDowngrade.total_downgrades);
+  const netArr = normalizeMonthlyArray(upgradeDowngrade.net_upgrade_downgrade_arr);
+
+  const hasAnyData =
+    upgrades.some((v) => v !== 0) || downgrades.some((v) => v !== 0) || netArr.some((v) => v !== 0);
+
+  if (!hasAnyData) {
+    return {
+      upgrade_downgrade: {
+        total_upgrades: [...EXPANDING_ARR_DEFAULTS.totalUpgrades],
+        total_downgrades: [...EXPANDING_ARR_DEFAULTS.totalDowngrades],
+        net_upgrade_downgrade_arr: [...EXPANDING_ARR_DEFAULTS.netUpgradeDowngradeArr],
+      },
+    };
+  }
+
+  return {
+    upgrade_downgrade: {
+      total_upgrades: upgrades,
+      total_downgrades: downgrades,
+      net_upgrade_downgrade_arr: netArr,
+    },
+  };
+}
+
+type SettingsTab = 'users' | 'imports' | 'permissions' | 'areas' | 'planning' | 'system';
+type ImportSubTab = 'newBusinessGoLives' | 'churnImports' | 'upDownsellsImport';
 
 export default function DLTSettings({ user }: DLTSettingsProps) {
   const { t } = useLanguage();
   const currentYear = new Date().getFullYear();
   const [activeTab, setActiveTab] = useState<SettingsTab>('users');
+  const [activeImportSubTab, setActiveImportSubTab] = useState<ImportSubTab>('newBusinessGoLives');
   const [searchTerm, setSearchTerm] = useState('');
   const [filterRole, setFilterRole] = useState<UserRole | 'all'>('all');
   const [planningYear, setPlanningYear] = useState(currentYear);
@@ -235,6 +530,44 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [importRuns, setImportRuns] = useState<GoLiveImportRun[]>([]);
   const [selectedImportRunId, setSelectedImportRunId] = useState<string | null>(null);
   const [selectedImportRunItems, setSelectedImportRunItems] = useState<GoLiveImportRunItem[]>([]);
+  const [churnImportMode, setChurnImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [churnAutoImportEnabled, setChurnAutoImportEnabled] = useState(false);
+  const [churnAutoImportLoading, setChurnAutoImportLoading] = useState(false);
+  const [churnAutoImportSaving, setChurnAutoImportSaving] = useState(false);
+  const [churnAutoImportMessage, setChurnAutoImportMessage] = useState('');
+  const [churnBatchLoading, setChurnBatchLoading] = useState(false);
+  const [churnBatchError, setChurnBatchError] = useState('');
+  const [churnBatchResult, setChurnBatchResult] = useState<ChurnDryRunResponse | null>(null);
+  const [lastChurnBatchCheckAt, setLastChurnBatchCheckAt] = useState<string | null>(null);
+  const [churnBatchImportLoading, setChurnBatchImportLoading] = useState(false);
+  const [churnBatchImportError, setChurnBatchImportError] = useState('');
+  const [churnBatchImportResult, setChurnBatchImportResult] = useState<ChurnCommitResponse | null>(null);
+  const [lastChurnBatchImportAt, setLastChurnBatchImportAt] = useState<string | null>(null);
+  const [churnImportHistoryLoading, setChurnImportHistoryLoading] = useState(false);
+  const [churnImportHistoryError, setChurnImportHistoryError] = useState('');
+  const [churnImportRuns, setChurnImportRuns] = useState<ChurnImportRun[]>([]);
+  const [selectedChurnImportRunId, setSelectedChurnImportRunId] = useState<string | null>(null);
+  const [selectedChurnImportRunItems, setSelectedChurnImportRunItems] = useState<ChurnImportRunItem[]>([]);
+  const [upDownsellsImportMode, setUpDownsellsImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [upDownsellsAutoImportEnabled, setUpDownsellsAutoImportEnabled] = useState(false);
+  const [upDownsellsAutoImportLoading, setUpDownsellsAutoImportLoading] = useState(false);
+  const [upDownsellsAutoImportSaving, setUpDownsellsAutoImportSaving] = useState(false);
+  const [upDownsellsAutoImportMessage, setUpDownsellsAutoImportMessage] = useState('');
+  const [upDownsellsBatchLoading, setUpDownsellsBatchLoading] = useState(false);
+  const [upDownsellsBatchError, setUpDownsellsBatchError] = useState('');
+  const [upDownsellsBatchResult, setUpDownsellsBatchResult] = useState<UpDownsellsDryRunResponse | null>(null);
+  const [lastUpDownsellsBatchCheckAt, setLastUpDownsellsBatchCheckAt] = useState<string | null>(null);
+  const [upDownsellsBatchImportLoading, setUpDownsellsBatchImportLoading] = useState(false);
+  const [upDownsellsBatchImportError, setUpDownsellsBatchImportError] = useState('');
+  const [upDownsellsBatchImportResult, setUpDownsellsBatchImportResult] = useState<UpDownsellsCommitResponse | null>(null);
+  const [lastUpDownsellsBatchImportAt, setLastUpDownsellsBatchImportAt] = useState<string | null>(null);
+  const [upDownsellsImportHistoryLoading, setUpDownsellsImportHistoryLoading] = useState(false);
+  const [upDownsellsImportHistoryError, setUpDownsellsImportHistoryError] = useState('');
+  const [upDownsellsImportRuns, setUpDownsellsImportRuns] = useState<UpDownsellsImportRun[]>([]);
+  const [selectedUpDownsellsImportRunId, setSelectedUpDownsellsImportRunId] = useState<string | null>(null);
+  const [selectedUpDownsellsImportRunItems, setSelectedUpDownsellsImportRunItems] = useState<
+    UpDownsellsImportRunItem[]
+  >([]);
   
   // ========== NEW ARR: GRUNDEINSTELLUNGEN ==========
   const [newArrYear, setNewArrYear] = useState(currentYear);
@@ -261,6 +594,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const terminalSalesPercentRef = useRef(terminalSalesPercent);
   const tippingPercentRef = useRef(tippingPercent);
   const loadingFromDbRef = useRef(false);
+  const churnLoadingFromDbRef = useRef(false);
   
   // Business Pay Terminals, Terminal Sales und Tipping (monatlich)
   const [businessPayTerminals, setBusinessPayTerminals] = useState<number[]>([]);
@@ -271,9 +605,39 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [avgSubsBill, setAvgSubsBill] = useState(NEW_ARR_DEFAULTS.avgSubsBill);
   const [avgPayBillTerminal, setAvgPayBillTerminal] = useState(NEW_ARR_DEFAULTS.avgPayBillTerminal);
   const [avgPayBillTipping, setAvgPayBillTipping] = useState(NEW_ARR_DEFAULTS.avgPayBillTipping);
+
+  // ========== 2. EXPANDING ARR (manuelle Eingabe) ==========
+  const [expandingTotalUpgrades, setExpandingTotalUpgrades] = useState<number[]>([
+    ...EXPANDING_ARR_DEFAULTS.totalUpgrades,
+  ]);
+  const [expandingTotalDowngrades, setExpandingTotalDowngrades] = useState<number[]>([
+    ...EXPANDING_ARR_DEFAULTS.totalDowngrades,
+  ]);
+  const [expandingNetUpgradeDowngradeArr, setExpandingNetUpgradeDowngradeArr] = useState<number[]>([
+    ...EXPANDING_ARR_DEFAULTS.netUpgradeDowngradeArr,
+  ]);
+
+  // ========== 3. CHURN ARR (manuelle Eingabe) ==========
+  const [invoicedChurnTargetCount, setInvoicedChurnTargetCount] = useState<number[]>([...EMPTY_MONTH_VALUES]);
+  const [invoicedChurnActualCount, setInvoicedChurnActualCount] = useState<number[]>([...EMPTY_MONTH_VALUES]);
+  const [invoicedChurnTargetArr, setInvoicedChurnTargetArr] = useState<number[]>([...EMPTY_MONTH_VALUES]);
+  const [invoicedChurnActualArr, setInvoicedChurnActualArr] = useState<number[]>([...EMPTY_MONTH_VALUES]);
+  const [inMonthChurnTargetCount, setInMonthChurnTargetCount] = useState<number[]>([...EMPTY_MONTH_VALUES]);
+  const [inMonthChurnTargetArr, setInMonthChurnTargetArr] = useState<number[]>([...EMPTY_MONTH_VALUES]);
+  const [churnAutoSaving, setChurnAutoSaving] = useState(false);
+  const [lastChurnAutoSaveAt, setLastChurnAutoSaveAt] = useState<string | null>(null);
+  const [churnAutoSaveError, setChurnAutoSaveError] = useState<string | null>(null);
   
   // UI State
   const [businessTargetsExpanded, setBusinessTargetsExpanded] = useState(true);
+  const [planningSectionsExpanded, setPlanningSectionsExpanded] = useState({
+    newArr: true,
+    expandingArr: true,
+    churnArr: true,
+    newClients: true,
+    churnedClients: true,
+    endingClients: true,
+  });
   const [saving, setSaving] = useState(false);
   const [loadingPlanzahlen, setLoadingPlanzahlen] = useState(true);
   const [saveMessage, setSaveMessage] = useState('');
@@ -434,6 +798,168 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const handleRunChurnBatchCheck = async () => {
+    setChurnBatchLoading(true);
+    setChurnBatchError('');
+    try {
+      const response = await fetch('/api/churn/sync', { method: 'GET' });
+      const data = (await response.json()) as ChurnDryRunResponse;
+      if (!response.ok || !data.success) {
+        setChurnBatchResult(null);
+        setChurnBatchError(data.error || 'Batch-Pruefung fehlgeschlagen');
+        return;
+      }
+      setChurnBatchResult(data);
+      setLastChurnBatchCheckAt(new Date().toISOString());
+    } catch (err: any) {
+      setChurnBatchResult(null);
+      setChurnBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
+    } finally {
+      setChurnBatchLoading(false);
+    }
+  };
+
+  const handleRunChurnBatchImport = async () => {
+    setChurnBatchImportLoading(true);
+    setChurnBatchImportError('');
+    try {
+      const response = await fetch('/api/churn/sync', { method: 'POST' });
+      const data = (await response.json()) as ChurnCommitResponse;
+      if (!response.ok || !data.success) {
+        setChurnBatchImportResult(null);
+        setChurnBatchImportError(data.error || 'Manueller Import fehlgeschlagen');
+        return;
+      }
+      setChurnBatchImportResult(data);
+      setLastChurnBatchImportAt(new Date().toISOString());
+      await loadChurnImportHistory();
+    } catch (err: any) {
+      setChurnBatchImportResult(null);
+      setChurnBatchImportError(err?.message || 'Manueller Import fehlgeschlagen');
+    } finally {
+      setChurnBatchImportLoading(false);
+    }
+  };
+
+  const loadChurnImportHistory = useCallback(async () => {
+    setChurnImportHistoryLoading(true);
+    setChurnImportHistoryError('');
+    try {
+      const response = await fetch('/api/churn/sync/history?limit=20', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setChurnImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as ChurnImportRun[];
+      setChurnImportRuns(runs);
+      if (!selectedChurnImportRunId && runs.length > 0) {
+        setSelectedChurnImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setChurnImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setChurnImportHistoryLoading(false);
+    }
+  }, [selectedChurnImportRunId]);
+
+  const loadChurnImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/churn/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setChurnImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedChurnImportRunItems((data.items || []) as ChurnImportRunItem[]);
+    } catch (err: any) {
+      setChurnImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
+  const handleRunUpDownsellsBatchCheck = async () => {
+    setUpDownsellsBatchLoading(true);
+    setUpDownsellsBatchError('');
+    try {
+      const response = await fetch('/api/upDownsells/sync', { method: 'GET' });
+      const data = (await response.json()) as UpDownsellsDryRunResponse;
+      if (!response.ok || !data.success) {
+        setUpDownsellsBatchResult(null);
+        setUpDownsellsBatchError(data.error || 'Batch-Pruefung fehlgeschlagen');
+        return;
+      }
+      setUpDownsellsBatchResult(data);
+      setLastUpDownsellsBatchCheckAt(new Date().toISOString());
+    } catch (err: any) {
+      setUpDownsellsBatchResult(null);
+      setUpDownsellsBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
+    } finally {
+      setUpDownsellsBatchLoading(false);
+    }
+  };
+
+  const handleRunUpDownsellsBatchImport = async () => {
+    setUpDownsellsBatchImportLoading(true);
+    setUpDownsellsBatchImportError('');
+    try {
+      const response = await fetch('/api/upDownsells/sync', { method: 'POST' });
+      const data = (await response.json()) as UpDownsellsCommitResponse;
+      if (!response.ok || !data.success) {
+        setUpDownsellsBatchImportResult(null);
+        setUpDownsellsBatchImportError(data.error || 'Manueller Import fehlgeschlagen');
+        return;
+      }
+      setUpDownsellsBatchImportResult(data);
+      setLastUpDownsellsBatchImportAt(new Date().toISOString());
+      await loadUpDownsellsImportHistory();
+    } catch (err: any) {
+      setUpDownsellsBatchImportResult(null);
+      setUpDownsellsBatchImportError(err?.message || 'Manueller Import fehlgeschlagen');
+    } finally {
+      setUpDownsellsBatchImportLoading(false);
+    }
+  };
+
+  const loadUpDownsellsImportHistory = useCallback(async () => {
+    setUpDownsellsImportHistoryLoading(true);
+    setUpDownsellsImportHistoryError('');
+    try {
+      const response = await fetch('/api/upDownsells/sync/history?limit=20', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setUpDownsellsImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as UpDownsellsImportRun[];
+      setUpDownsellsImportRuns(runs);
+      if (!selectedUpDownsellsImportRunId && runs.length > 0) {
+        setSelectedUpDownsellsImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setUpDownsellsImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setUpDownsellsImportHistoryLoading(false);
+    }
+  }, [selectedUpDownsellsImportRunId]);
+
+  const loadUpDownsellsImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/upDownsells/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setUpDownsellsImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedUpDownsellsImportRunItems((data.items || []) as UpDownsellsImportRunItem[]);
+    } catch (err: any) {
+      setUpDownsellsImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
   const loadAutoImportState = useCallback(async () => {
     setAutoImportLoading(true);
     setAutoImportMessage('');
@@ -449,6 +975,42 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
     } finally {
       setAutoImportLoading(false);
+    }
+  }, []);
+
+  const loadChurnAutoImportState = useCallback(async () => {
+    setChurnAutoImportLoading(true);
+    setChurnAutoImportMessage('');
+    try {
+      const response = await fetch('/api/churn/sync/auto-import', { method: 'GET' });
+      const data = (await response.json()) as ChurnAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setChurnAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setChurnAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      setChurnAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+    } finally {
+      setChurnAutoImportLoading(false);
+    }
+  }, []);
+
+  const loadUpDownsellsAutoImportState = useCallback(async () => {
+    setUpDownsellsAutoImportLoading(true);
+    setUpDownsellsAutoImportMessage('');
+    try {
+      const response = await fetch('/api/upDownsells/sync/auto-import', { method: 'GET' });
+      const data = (await response.json()) as UpDownsellsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setUpDownsellsAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setUpDownsellsAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      setUpDownsellsAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+    } finally {
+      setUpDownsellsAutoImportLoading(false);
     }
   }, []);
 
@@ -471,17 +1033,40 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'goLives') {
+    if (activeTab === 'imports') {
       loadManualGoLiveWriteLockState();
       loadAutoImportState();
       loadImportHistory();
+      loadChurnAutoImportState();
+      loadChurnImportHistory();
+      loadUpDownsellsAutoImportState();
+      loadUpDownsellsImportHistory();
     }
-  }, [activeTab, loadManualGoLiveWriteLockState, loadAutoImportState, loadImportHistory]);
+  }, [
+    activeTab,
+    loadManualGoLiveWriteLockState,
+    loadAutoImportState,
+    loadImportHistory,
+    loadChurnAutoImportState,
+    loadChurnImportHistory,
+    loadUpDownsellsAutoImportState,
+    loadUpDownsellsImportHistory,
+  ]);
 
   useEffect(() => {
-    if (activeTab !== 'goLives' || !selectedImportRunId) return;
+    if (activeTab !== 'imports' || !selectedImportRunId) return;
     loadImportRunItems(selectedImportRunId);
   }, [activeTab, selectedImportRunId, loadImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedChurnImportRunId) return;
+    loadChurnImportRunItems(selectedChurnImportRunId);
+  }, [activeTab, selectedChurnImportRunId, loadChurnImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedUpDownsellsImportRunId) return;
+    loadUpDownsellsImportRunItems(selectedUpDownsellsImportRunId);
+  }, [activeTab, selectedUpDownsellsImportRunId, loadUpDownsellsImportRunItems]);
 
   const handleAutoImportToggle = async (enabled: boolean) => {
     setAutoImportEnabled(enabled);
@@ -506,6 +1091,60 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
     } finally {
       setAutoImportSaving(false);
+    }
+  };
+
+  const handleChurnAutoImportToggle = async (enabled: boolean) => {
+    setChurnAutoImportEnabled(enabled);
+    setChurnAutoImportSaving(true);
+    setChurnAutoImportMessage('');
+    try {
+      const response = await fetch('/api/churn/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as ChurnAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setChurnAutoImportEnabled(!enabled);
+        setChurnAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setChurnAutoImportEnabled(Boolean(data.enabled));
+      setChurnAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
+    } catch (err: any) {
+      setChurnAutoImportEnabled(!enabled);
+      setChurnAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setChurnAutoImportSaving(false);
+    }
+  };
+
+  const handleUpDownsellsAutoImportToggle = async (enabled: boolean) => {
+    setUpDownsellsAutoImportEnabled(enabled);
+    setUpDownsellsAutoImportSaving(true);
+    setUpDownsellsAutoImportMessage('');
+    try {
+      const response = await fetch('/api/upDownsells/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as UpDownsellsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setUpDownsellsAutoImportEnabled(!enabled);
+        setUpDownsellsAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setUpDownsellsAutoImportEnabled(Boolean(data.enabled));
+      setUpDownsellsAutoImportMessage(
+        enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.'
+      );
+    } catch (err: any) {
+      setUpDownsellsAutoImportEnabled(!enabled);
+      setUpDownsellsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setUpDownsellsAutoImportSaving(false);
     }
   };
 
@@ -563,6 +1202,13 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     return parsed.toLocaleDateString('de-DE');
   };
 
+  const formatBatchPreviewMonth = (value: string | null) => {
+    if (!value) return '-';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}`;
+  };
+
   const formatBatchPreviewBoolean = (value: boolean | null) => {
     if (value === null || value === undefined) return '-';
     return value ? 'Ja' : 'Nein';
@@ -579,24 +1225,39 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     () => importRuns.find((run) => run.triggered_by === 'cron') || null,
     [importRuns]
   );
+
+  const latestChurnAutoRun = useMemo(
+    () => churnImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [churnImportRuns]
+  );
+
+  const latestUpDownsellsAutoRun = useMemo(
+    () => upDownsellsImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [upDownsellsImportRuns]
+  );
   
   // ========== PLANZAHLEN: LADEN ==========
   const loadPlanzahlen = useCallback(async (year: number) => {
     setLoadingPlanzahlen(true);
+    setLastChurnAutoSaveAt(null);
+    setChurnAutoSaveError(null);
     try {
       const { data, error } = await supabase
         .from('dlt_planzahlen')
         .select('*')
         .eq('year', year)
-        .single();
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
       
-      if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
+      if (error) {
         console.error('Fehler beim Laden der Planzahlen:', error);
         return;
       }
       
       if (data) {
         loadingFromDbRef.current = true;
+        churnLoadingFromDbRef.current = true;
         setPlanzahlenId(data.id);
         setNewArrRegion(data.region || 'DACH');
         setBusinessInbound(data.business_inbound || NEW_ARR_DEFAULTS.inbound);
@@ -618,6 +1279,31 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         setAvgSubsBill(data.avg_subs_bill || NEW_ARR_DEFAULTS.avgSubsBill);
         setAvgPayBillTerminal(data.avg_pay_bill_terminal || NEW_ARR_DEFAULTS.avgPayBillTerminal);
         setAvgPayBillTipping(data.avg_pay_bill_tipping || NEW_ARR_DEFAULTS.avgPayBillTipping);
+
+        const expanding = parseExpandingArrData(data.expanding_arr_data);
+        setExpandingTotalUpgrades(expanding.upgrade_downgrade.total_upgrades);
+        setExpandingTotalDowngrades(expanding.upgrade_downgrade.total_downgrades);
+        setExpandingNetUpgradeDowngradeArr(expanding.upgrade_downgrade.net_upgrade_downgrade_arr);
+
+        const churn = parseChurnArrData(data.churn_arr_data);
+        setInvoicedChurnTargetCount(churn.invoiced_churn.target_count);
+        setInvoicedChurnActualCount(churn.invoiced_churn.actual_count);
+        setInvoicedChurnTargetArr(churn.invoiced_churn.target_arr);
+        setInvoicedChurnActualArr(churn.invoiced_churn.actual_arr);
+        setInMonthChurnTargetCount(churn.in_month_churn.target_count);
+        setInMonthChurnTargetArr(churn.in_month_churn.target_arr);
+      } else {
+        setPlanzahlenId(null);
+        setExpandingTotalUpgrades([...EXPANDING_ARR_DEFAULTS.totalUpgrades]);
+        setExpandingTotalDowngrades([...EXPANDING_ARR_DEFAULTS.totalDowngrades]);
+        setExpandingNetUpgradeDowngradeArr([...EXPANDING_ARR_DEFAULTS.netUpgradeDowngradeArr]);
+        churnLoadingFromDbRef.current = true;
+        setInvoicedChurnTargetCount([...EMPTY_MONTH_VALUES]);
+        setInvoicedChurnActualCount([...EMPTY_MONTH_VALUES]);
+        setInvoicedChurnTargetArr([...EMPTY_MONTH_VALUES]);
+        setInvoicedChurnActualArr([...EMPTY_MONTH_VALUES]);
+        setInMonthChurnTargetCount([...EMPTY_MONTH_VALUES]);
+        setInMonthChurnTargetArr([...EMPTY_MONTH_VALUES]);
       }
     } catch (err) {
       console.error('Fehler beim Laden:', err);
@@ -640,6 +1326,42 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   }, [activeTab]);
   
   // ========== PLANZAHLEN: SPEICHERN ==========
+  const buildExpandingArrPayload = useCallback(
+    () => ({
+      upgrade_downgrade: {
+        total_upgrades: expandingTotalUpgrades,
+        total_downgrades: expandingTotalDowngrades,
+        net_upgrade_downgrade_arr: expandingNetUpgradeDowngradeArr,
+      },
+      source_note: 'Manual app entry',
+    }),
+    [expandingTotalUpgrades, expandingTotalDowngrades, expandingNetUpgradeDowngradeArr]
+  );
+
+  const buildChurnArrPayload = useCallback(
+    () => ({
+      invoiced_churn: {
+        target_count: invoicedChurnTargetCount,
+        actual_count: invoicedChurnActualCount,
+        target_arr: invoicedChurnTargetArr,
+        actual_arr: invoicedChurnActualArr,
+      },
+      in_month_churn: {
+        target_count: inMonthChurnTargetCount,
+        target_arr: inMonthChurnTargetArr,
+      },
+      source_note: 'Manual app entry',
+    }),
+    [
+      invoicedChurnTargetCount,
+      invoicedChurnActualCount,
+      invoicedChurnTargetArr,
+      invoicedChurnActualArr,
+      inMonthChurnTargetCount,
+      inMonthChurnTargetArr,
+    ]
+  );
+
   const savePlanzahlen = async () => {
     setSaving(true);
     setSaveMessage('');
@@ -663,8 +1385,8 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         avg_pay_bill_terminal: avgPayBillTerminal,
         avg_pay_bill_tipping: avgPayBillTipping,
         // Platzhalter für weitere Bereiche
-        expanding_arr_data: {},
-        churn_arr_data: {},
+        expanding_arr_data: buildExpandingArrPayload(),
+        churn_arr_data: buildChurnArrPayload(),
         new_clients_data: {},
         churned_clients_data: {},
         ending_clients_data: {},
@@ -750,6 +1472,65 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setSaving(false);
     }
   };
+
+  const saveChurnArrOnly = useCallback(async () => {
+    if (loadingPlanzahlen) return;
+    setChurnAutoSaving(true);
+    setChurnAutoSaveError(null);
+    try {
+      const timestamp = new Date().toISOString();
+      const payload = {
+        year: newArrYear,
+        region: newArrRegion,
+        churn_arr_data: buildChurnArrPayload(),
+        updated_at: timestamp,
+      };
+
+      if (planzahlenId) {
+        const { error } = await supabase
+          .from('dlt_planzahlen')
+          .update(payload)
+          .eq('id', planzahlenId);
+        if (error) throw error;
+      } else {
+        const { data: existing, error: existingError } = await supabase
+          .from('dlt_planzahlen')
+          .select('id')
+          .eq('year', newArrYear)
+          .order('updated_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (existingError) throw existingError;
+
+        if (existing?.id) {
+          const { error: updateError } = await supabase
+            .from('dlt_planzahlen')
+            .update(payload)
+            .eq('id', existing.id);
+          if (updateError) throw updateError;
+          setPlanzahlenId(existing.id);
+        } else {
+          const { data: inserted, error: insertError } = await supabase
+            .from('dlt_planzahlen')
+            .insert({ ...payload, created_at: timestamp })
+            .select('id')
+            .single();
+          if (insertError) throw insertError;
+          if (inserted?.id) setPlanzahlenId(inserted.id);
+        }
+      }
+
+      setLastChurnAutoSaveAt(new Date().toISOString());
+    } catch (err: any) {
+      console.error('Fehler beim Auto-Save (CHURN ARR):', err);
+      const errorMessage = err?.message || 'Unbekannter Fehler';
+      setChurnAutoSaveError(errorMessage);
+      setSaveMessage(`Fehler Auto-Save CHURN: ${errorMessage}`);
+    } finally {
+      setChurnAutoSaving(false);
+    }
+  }, [loadingPlanzahlen, planzahlenId, newArrYear, newArrRegion, buildChurnArrPayload]);
   
   // Filter plannable users for planning tab
   const plannableUsers = useMemo(() => 
@@ -798,10 +1579,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     setAePayTiers(nextPayTiers);
     setSelectedAEId((prev) => (prev && plannableUsers.some((u) => u.id === prev) ? prev : plannableUsers[0].id));
   }, [plannableUsers, allSettings]);
-  
-  // Load multi-user data for planning
-  const userIds = useMemo(() => plannableUsers.map(u => u.id), [plannableUsers]);
-  const { data: multiUserData, loading: planningLoading } = useMultiUserData(userIds, planningYear);
   
   // Check permissions
   const permissions = getPermissions(user.role);
@@ -1000,6 +1777,30 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     setBusinessTerminalSales(newTermSales);
     setBusinessTipping(newTermSales.map(ts => Math.round(ts * pTip / 100)));
   }, [businessGoLives, payTerminalsPercent, terminalSalesPercent, tippingPercent]);
+
+  useEffect(() => {
+    if (activeTab !== 'planning' || loadingPlanzahlen) return;
+    if (churnLoadingFromDbRef.current) {
+      churnLoadingFromDbRef.current = false;
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      saveChurnArrOnly();
+    }, 700);
+
+    return () => clearTimeout(timeoutId);
+  }, [
+    activeTab,
+    loadingPlanzahlen,
+    invoicedChurnTargetCount,
+    invoicedChurnActualCount,
+    invoicedChurnTargetArr,
+    invoicedChurnActualArr,
+    inMonthChurnTargetCount,
+    inMonthChurnTargetArr,
+    saveChurnArrOnly,
+  ]);
   
   // ========== NEW ARR: HANDLER ==========
   const handleBusinessChange = (category: 'inbound' | 'outbound' | 'partnerships', month: number, value: number) => {
@@ -1020,6 +1821,46 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const handleBusinessTippingChange = (month: number, value: number) => {
     setBusinessTipping(prev => { const n = [...prev]; n[month] = value; return n; });
   };
+
+  const updateMonthlyValues = (
+    setter: (updater: (prev: number[]) => number[]) => void,
+    month: number,
+    value: number
+  ) => {
+    setter((prev) => {
+      const next = [...prev];
+      next[month] = Number.isFinite(value) ? value : 0;
+      return next;
+    });
+  };
+
+  const toNegativeOrZero = (value: number) => {
+    if (!Number.isFinite(value) || value === 0) return 0;
+    return -Math.abs(value);
+  };
+
+  const sumMonthlyValues = (values: number[]) => values.reduce((sum, current) => sum + (current || 0), 0);
+
+  const applyInMonthTargetsFromInvoiced = () => {
+    setInMonthChurnTargetCount((prev) => {
+      const next = [...prev];
+      for (let i = 0; i < 11; i += 1) next[i] = invoicedChurnTargetCount[i + 1] || 0;
+      next[11] = prev[11] || 0;
+      return next;
+    });
+    setInMonthChurnTargetArr((prev) => {
+      const next = [...prev];
+      for (let i = 0; i < 11; i += 1) next[i] = invoicedChurnTargetArr[i + 1] || 0;
+      next[11] = prev[11] || 0;
+      return next;
+    });
+  };
+
+  const togglePlanningSection = (
+    section: 'newArr' | 'expandingArr' | 'churnArr' | 'newClients' | 'churnedClients' | 'endingClients'
+  ) => {
+    setPlanningSectionsExpanded((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
   
   const recalculateBusinessDerived = useCallback(() => {
     const pPay = payTerminalsPercentRef.current;
@@ -1035,67 +1876,13 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   // Tab configuration
   const tabs: { id: SettingsTab; label: string; icon: string }[] = [
     { id: 'users', label: t('dlt.settings.users'), icon: '👥' },
-    { id: 'goLives', label: '+New Business Go-Lives', icon: '➕' },
     { id: 'permissions', label: t('dlt.settings.permissions'), icon: '🔐' },
+    { id: 'imports', label: 'Importe', icon: '📥' },
     { id: 'areas', label: t('dlt.settings.areas'), icon: '🏢' },
     { id: 'planning', label: t('dlt.settings.planning'), icon: '📊' },
     { id: 'system', label: t('dlt.settings.system'), icon: '⚙️' }
   ];
   
-  // Calculate aggregated planning data
-  const planningData = useMemo(() => {
-    if (!multiUserData || multiUserData.length === 0) return null;
-    
-    // Aggregate monthly targets across all AEs
-    const monthlyTotals = Array(12).fill(null).map((_, idx) => ({
-      month: idx + 1,
-      monthName: MONTH_NAMES[idx],
-      goLivesTarget: 0,
-      subsTarget: 0,
-      payTarget: 0,
-      aeCount: 0
-    }));
-    
-    let totalOTE = 0;
-    let totalSubsYearly = 0;
-    let totalPayYearly = 0;
-    let totalGoLivesYearly = 0;
-    
-    multiUserData.forEach(({ settings }) => {
-      if (!settings) return;
-      
-      totalOTE += settings.ote || 0;
-      
-      settings.monthly_go_live_targets?.forEach((target, idx) => {
-        monthlyTotals[idx].goLivesTarget += target;
-        totalGoLivesYearly += target;
-      });
-      
-      settings.monthly_subs_targets?.forEach((target, idx) => {
-        monthlyTotals[idx].subsTarget += target;
-        totalSubsYearly += target;
-      });
-      
-      settings.monthly_pay_targets?.forEach((target, idx) => {
-        monthlyTotals[idx].payTarget += target;
-        totalPayYearly += target;
-      });
-      
-      monthlyTotals.forEach((m) => {
-        m.aeCount = plannableUsers.length;
-      });
-    });
-    
-    return {
-      monthlyTotals,
-      totalOTE,
-      totalSubsYearly,
-      totalPayYearly,
-      totalGoLivesYearly,
-      aeCount: plannableUsers.length
-    };
-  }, [multiUserData, plannableUsers]);
-
   const selectedAEUser = useMemo(
     () => plannableUsers.find((u) => u.id === selectedAEId) || null,
     [plannableUsers, selectedAEId]
@@ -1584,9 +2371,46 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         </div>
       )}
 
-      {/* Go-Lives Tab */}
-      {activeTab === 'goLives' && (
+      {/* Imports Tab */}
+      {activeTab === 'imports' && (
         <div className="space-y-6">
+          <div className="bg-white rounded-xl shadow-sm p-4">
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setActiveImportSubTab('newBusinessGoLives')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'newBusinessGoLives'
+                    ? 'bg-blue-50 border-blue-300 text-blue-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                +New Business Go-Lives
+              </button>
+              <button
+                onClick={() => setActiveImportSubTab('churnImports')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'churnImports'
+                    ? 'bg-red-50 border-red-300 text-red-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Churn - Importe
+              </button>
+              <button
+                onClick={() => setActiveImportSubTab('upDownsellsImport')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'upDownsellsImport'
+                    ? 'bg-purple-50 border-purple-300 text-purple-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Up-Downsells Import
+              </button>
+            </div>
+          </div>
+
+          {activeImportSubTab === 'newBusinessGoLives' && (
+            <>
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h3 className="text-lg font-semibold text-gray-800 mb-2">Manuelle Go-Live-Erfassung</h3>
             <p className="text-sm text-gray-500 mb-4">
@@ -1784,7 +2608,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   </div>
 
                   <div>
-                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -> Datenbank)</h5>
+                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -&gt; Datenbank)</h5>
                     <div className="rounded-lg border border-gray-200 overflow-hidden">
                       <div className="max-h-60 overflow-auto">
                         <table className="w-full text-xs">
@@ -2040,6 +2864,765 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
               </div>
             </div>
           </div>
+            </>
+          )}
+
+          {activeImportSubTab === 'churnImports' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">Google-Sheet Batch Import</h4>
+                <p className="text-sm text-gray-500">
+                  Pruefe eingehende Churn-Daten als Stapel und entscheide dann ueber den Import.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setChurnImportMode('manual')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    churnImportMode === 'manual'
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Manuell pruefen
+                </button>
+                <button
+                  onClick={() => setChurnImportMode('automatic')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    churnImportMode === 'automatic'
+                      ? 'bg-green-50 border-green-300 text-green-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Automatisch einlaufen
+                </button>
+              </div>
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={churnAutoImportEnabled}
+                  disabled={churnAutoImportLoading || churnAutoImportSaving}
+                  onChange={(e) => handleChurnAutoImportToggle(e.target.checked)}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+                <div>Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.</div>
+                {churnAutoImportLoading ? <div>Status wird geladen...</div> : null}
+                {churnAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                {churnAutoImportMessage ? <div>{churnAutoImportMessage}</div> : null}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunChurnBatchCheck}
+                  disabled={churnBatchLoading || churnBatchImportLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {churnBatchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
+                </button>
+                <button
+                  onClick={handleRunChurnBatchImport}
+                  disabled={churnBatchImportLoading || churnBatchLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {churnBatchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
+                {lastChurnBatchCheckAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Check: {new Date(lastChurnBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+                {lastChurnBatchImportAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Import: {new Date(lastChurnBatchImportAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+              </div>
+
+              {churnBatchError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{churnBatchError}</div>
+              )}
+
+              {churnBatchImportError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {churnBatchImportError}
+                </div>
+              )}
+
+              {churnBatchImportResult?.stats && (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">To Import</div>
+                      <div className="font-semibold">{churnBatchImportResult.stats.toImport}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{churnBatchImportResult.stats.imported}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{churnBatchImportResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{churnBatchImportResult.stats.failed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Duplikate im Sheet</div>
+                      <div className="font-semibold text-amber-700">{churnBatchImportResult.stats.duplicates}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {churnBatchResult?.stats && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Sheet Zeilen</div>
+                      <div className="text-xl font-semibold">{churnBatchResult.stats.totalRowsFromSheet}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Geparst</div>
+                      <div className="text-xl font-semibold">{churnBatchResult.stats.parsedRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-green-50 p-3 border border-green-200">
+                      <div className="text-green-700">Importierbar</div>
+                      <div className="text-xl font-semibold text-green-700">{churnBatchResult.stats.validRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-red-50 p-3 border border-red-200">
+                      <div className="text-red-700">Fehlerhaft</div>
+                      <div className="text-xl font-semibold text-red-700">{churnBatchResult.stats.invalidRows}</div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -&gt; Datenbank)</h5>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-60 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Sheet-Spalte</th>
+                              <th className="text-left px-2 py-2 text-gray-600">DB-Feld</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Transformation</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Pflicht</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {CHURN_BATCH_FIELD_MAPPING.map((row) => (
+                              <tr key={`${row.source}-${row.target}`} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{row.source}</td>
+                                <td className="px-2 py-1.5 text-gray-700 font-mono">{row.target}</td>
+                                <td className="px-2 py-1.5 text-gray-600">{row.transform}</td>
+                                <td className="px-2 py-1.5">
+                                  {row.required ? (
+                                    <span className="inline-flex items-center rounded bg-red-50 text-red-700 px-2 py-0.5">Ja</span>
+                                  ) : (
+                                    <span className="inline-flex items-center rounded bg-gray-100 text-gray-600 px-2 py-0.5">Nein</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  {churnBatchResult.preview?.valid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Import-Vorschau (normalisierte Werte)</h5>
+                      <div className="rounded-lg border border-gray-200 overflow-hidden">
+                        <div className="max-h-64 overflow-auto">
+                          <table className="w-full text-xs">
+                            <thead className="bg-gray-50 sticky top-0">
+                              <tr>
+                                <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Oak ID</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Kunde</th>
+                                <th className="text-left px-2 py-2 text-gray-600">GL Month</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Churn Month</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Reason</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Package</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Total ARR Lost</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Subs Lost</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Pay Lost</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Scheduled</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {churnBatchResult.preview.valid.slice(0, 12).map((row) => (
+                                <tr key={row.rowNumber} className="border-t border-gray-100">
+                                  <td className="px-2 py-1.5 text-gray-700">{row.rowNumber}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.oakId ?? '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.customerName || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewMonth(row.glMonth)}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewMonth(row.churnMonth)}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.churnReason || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.packageName || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.totalArrLost !== null && row.totalArrLost !== undefined
+                                      ? formatCurrency(row.totalArrLost)
+                                      : '-'}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.subsRevenueLost !== null && row.subsRevenueLost !== undefined
+                                      ? formatCurrency(row.subsRevenueLost)
+                                      : '-'}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.payRevenueLost !== null && row.payRevenueLost !== undefined
+                                      ? formatCurrency(row.payRevenueLost)
+                                      : '-'}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewBoolean(row.scheduled)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Vorschau zeigt die ersten 12 geparsten Zeilen aus dem Dry-Run.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {churnBatchResult.warnings?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-amber-800 mb-2">Warnungen beim Mapping</h5>
+                      <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                        {churnBatchResult.warnings.slice(0, 8).map((w, idx) => (
+                          <div
+                            key={`${w.rowNumber}-${w.oakId}-${idx}`}
+                            className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs"
+                          >
+                            <div className="font-medium text-amber-800">
+                              Zeile {w.rowNumber > 0 ? w.rowNumber : '-'} {w.oakId ? `- OAK ${w.oakId}` : ''}
+                            </div>
+                            <div className="text-amber-700">{w.warning}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {churnImportMode === 'manual' && churnBatchResult.preview?.invalid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Beispiele fehlerhafte Zeilen</h5>
+                      <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                        {churnBatchResult.preview.invalid.slice(0, 6).map((row) => (
+                          <div key={row.rowNumber} className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs">
+                            <div className="font-medium text-red-700">
+                              Zeile {row.rowNumber} - {row.raw.customerName || 'Ohne Kundenname'}
+                            </div>
+                            <div className="text-red-600">{row.reasons.join(', ')}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-sm font-semibold text-gray-700">Import-Historie</h5>
+                  <button
+                    onClick={loadChurnImportHistory}
+                    disabled={churnImportHistoryLoading}
+                    className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {churnImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                  </button>
+                </div>
+
+                {churnImportHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {churnImportHistoryError}
+                  </div>
+                ) : null}
+
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
+                  <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
+                  {latestChurnAutoRun ? (
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
+                      <div>
+                        <div className="text-indigo-700">Zeitpunkt</div>
+                        <div>{new Date(latestChurnAutoRun.started_at).toLocaleString('de-DE')}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Status</div>
+                        <div>{getImportRunStatusLabel(latestChurnAutoRun.status)}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Importiert</div>
+                        <div>{latestChurnAutoRun.imported}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Fehler</div>
+                        <div>{latestChurnAutoRun.failed}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Duplikate</div>
+                        <div>{latestChurnAutoRun.duplicates}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Hinweis</div>
+                        <div>{latestChurnAutoRun.reason || (latestChurnAutoRun.skipped ? 'Skipped' : '-')}</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
+                  )}
+                </div>
+
+                {churnImportRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {churnImportRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedChurnImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedChurnImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">
+                                {new Date(run.started_at).toLocaleString('de-DE')}
+                              </td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                              <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedChurnImportRunId && selectedChurnImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">OAK</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedChurnImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.oak_id ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {activeImportSubTab === 'upDownsellsImport' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">Google-Sheet Batch Import</h4>
+                <p className="text-sm text-gray-500">
+                  Pruefe eingehende Up-/Downsell-Daten als Stapel und entscheide dann ueber den Import.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setUpDownsellsImportMode('manual')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    upDownsellsImportMode === 'manual'
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Manuell pruefen
+                </button>
+                <button
+                  onClick={() => setUpDownsellsImportMode('automatic')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    upDownsellsImportMode === 'automatic'
+                      ? 'bg-green-50 border-green-300 text-green-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Automatisch einlaufen
+                </button>
+              </div>
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={upDownsellsAutoImportEnabled}
+                  disabled={upDownsellsAutoImportLoading || upDownsellsAutoImportSaving}
+                  onChange={(e) => handleUpDownsellsAutoImportToggle(e.target.checked)}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+                <div>Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.</div>
+                {upDownsellsAutoImportLoading ? <div>Status wird geladen...</div> : null}
+                {upDownsellsAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                {upDownsellsAutoImportMessage ? <div>{upDownsellsAutoImportMessage}</div> : null}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunUpDownsellsBatchCheck}
+                  disabled={upDownsellsBatchLoading || upDownsellsBatchImportLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {upDownsellsBatchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
+                </button>
+                <button
+                  onClick={handleRunUpDownsellsBatchImport}
+                  disabled={upDownsellsBatchImportLoading || upDownsellsBatchLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {upDownsellsBatchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
+                {lastUpDownsellsBatchCheckAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Check: {new Date(lastUpDownsellsBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+                {lastUpDownsellsBatchImportAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Import: {new Date(lastUpDownsellsBatchImportAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+              </div>
+
+              {upDownsellsBatchError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {upDownsellsBatchError}
+                </div>
+              )}
+
+              {upDownsellsBatchImportError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {upDownsellsBatchImportError}
+                </div>
+              )}
+
+              {upDownsellsBatchImportResult?.stats && (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">To Import</div>
+                      <div className="font-semibold">{upDownsellsBatchImportResult.stats.toImport}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{upDownsellsBatchImportResult.stats.imported}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{upDownsellsBatchImportResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{upDownsellsBatchImportResult.stats.failed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Duplikate im Sheet</div>
+                      <div className="font-semibold text-amber-700">{upDownsellsBatchImportResult.stats.duplicates}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {upDownsellsBatchResult?.stats && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Sheet Zeilen</div>
+                      <div className="text-xl font-semibold">{upDownsellsBatchResult.stats.totalRowsFromSheet}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Geparst</div>
+                      <div className="text-xl font-semibold">{upDownsellsBatchResult.stats.parsedRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-green-50 p-3 border border-green-200">
+                      <div className="text-green-700">Importierbar</div>
+                      <div className="text-xl font-semibold text-green-700">{upDownsellsBatchResult.stats.validRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-red-50 p-3 border border-red-200">
+                      <div className="text-red-700">Fehlerhaft</div>
+                      <div className="text-xl font-semibold text-red-700">{upDownsellsBatchResult.stats.invalidRows}</div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -&gt; Datenbank)</h5>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-60 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Sheet-Spalte</th>
+                              <th className="text-left px-2 py-2 text-gray-600">DB-Feld</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Transformation</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Pflicht</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {UP_DOWNSELLS_BATCH_FIELD_MAPPING.map((row) => (
+                              <tr key={`${row.source}-${row.target}`} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{row.source}</td>
+                                <td className="px-2 py-1.5 text-gray-700 font-mono">{row.target}</td>
+                                <td className="px-2 py-1.5 text-gray-600">{row.transform}</td>
+                                <td className="px-2 py-1.5">
+                                  {row.required ? (
+                                    <span className="inline-flex items-center rounded bg-red-50 text-red-700 px-2 py-0.5">Ja</span>
+                                  ) : (
+                                    <span className="inline-flex items-center rounded bg-gray-100 text-gray-600 px-2 py-0.5">Nein</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  {upDownsellsBatchResult.preview?.valid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Import-Vorschau (normalisierte Werte)</h5>
+                      <div className="rounded-lg border border-gray-200 overflow-hidden">
+                        <div className="max-h-64 overflow-auto">
+                          <table className="w-full text-xs">
+                            <thead className="bg-gray-50 sticky top-0">
+                              <tr>
+                                <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Oak ID</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Kunde</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Monat</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Net Growth ARR</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Net Loss ARR</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {upDownsellsBatchResult.preview.valid.slice(0, 12).map((row) => (
+                                <tr key={row.rowNumber} className="border-t border-gray-100">
+                                  <td className="px-2 py-1.5 text-gray-700">{row.rowNumber}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.oakId ?? '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.customerName || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewMonth(row.eventMonth)}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.netGrowthArr !== null && row.netGrowthArr !== undefined
+                                      ? formatCurrency(row.netGrowthArr)
+                                      : '-'}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.netLossArr !== null && row.netLossArr !== undefined
+                                      ? formatCurrency(row.netLossArr)
+                                      : '-'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Vorschau zeigt die ersten 12 geparsten Zeilen aus dem Dry-Run.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {upDownsellsImportMode === 'manual' && upDownsellsBatchResult.preview?.invalid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Beispiele fehlerhafte Zeilen</h5>
+                      <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                        {upDownsellsBatchResult.preview.invalid.slice(0, 6).map((row) => (
+                          <div key={row.rowNumber} className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs">
+                            <div className="font-medium text-red-700">
+                              Zeile {row.rowNumber} - {row.raw.customerName || 'Ohne Kundenname'}
+                            </div>
+                            <div className="text-red-600">{row.reasons.join(', ')}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-sm font-semibold text-gray-700">Import-Historie</h5>
+                  <button
+                    onClick={loadUpDownsellsImportHistory}
+                    disabled={upDownsellsImportHistoryLoading}
+                    className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {upDownsellsImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                  </button>
+                </div>
+
+                {upDownsellsImportHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {upDownsellsImportHistoryError}
+                  </div>
+                ) : null}
+
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
+                  <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
+                  {latestUpDownsellsAutoRun ? (
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
+                      <div>
+                        <div className="text-indigo-700">Zeitpunkt</div>
+                        <div>{new Date(latestUpDownsellsAutoRun.started_at).toLocaleString('de-DE')}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Status</div>
+                        <div>{getImportRunStatusLabel(latestUpDownsellsAutoRun.status)}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Importiert</div>
+                        <div>{latestUpDownsellsAutoRun.imported}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Fehler</div>
+                        <div>{latestUpDownsellsAutoRun.failed}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Duplikate</div>
+                        <div>{latestUpDownsellsAutoRun.duplicates}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Hinweis</div>
+                        <div>{latestUpDownsellsAutoRun.reason || (latestUpDownsellsAutoRun.skipped ? 'Skipped' : '-')}</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
+                  )}
+                </div>
+
+                {upDownsellsImportRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {upDownsellsImportRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedUpDownsellsImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedUpDownsellsImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">
+                                {new Date(run.started_at).toLocaleString('de-DE')}
+                              </td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                              <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedUpDownsellsImportRunId && selectedUpDownsellsImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">OAK</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedUpDownsellsImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.oak_id ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2193,15 +3776,19 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
 
           {/* 1. NEW ARR */}
           <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-green-500">
-            <div className="px-6 py-4 border-b border-gray-200 bg-green-50">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-green-50 cursor-pointer"
+              onClick={() => togglePlanningSection('newArr')}
+            >
               <div className="flex items-center gap-3">
                 <span className="text-2xl">📈</span>
                 <div>
                   <h3 className="text-lg font-semibold text-gray-800">1. NEW ARR</h3>
                   <p className="text-sm text-gray-500">Neuer ARR aus Neukundengeschäft</p>
                 </div>
+                <span className="ml-auto text-gray-500">{planningSectionsExpanded.newArr ? '▼' : '▶'}</span>
               </div>
-              {/* Quick Stats */}
+              {planningSectionsExpanded.newArr && (
               <div className="grid grid-cols-2 md:grid-cols-7 gap-2 mt-4 text-center">
                 <div className="bg-blue-50 rounded-lg p-2 border border-blue-200">
                   <div className="text-xs text-blue-600">Go-Lives</div>
@@ -2232,8 +3819,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   <div className="text-lg font-bold text-purple-700">{formatCurrency(yearlySubsArr + yearlyPayArr)}</div>
                 </div>
               </div>
+              )}
             </div>
             
+            {planningSectionsExpanded.newArr && (
             <div className="p-6 space-y-6">
               {/* ========== 1. GRUNDEINSTELLUNGEN ========== */}
               <div className="bg-gray-50 rounded-lg p-4">
@@ -2612,86 +4201,424 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 </div>
               </div>
             </div>
+            )}
           </div>
 
           {/* 2. EXPANDING ARR */}
           <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-blue-500">
-            <div className="px-6 py-4 border-b border-gray-200 bg-blue-50">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-blue-50 cursor-pointer"
+              onClick={() => togglePlanningSection('expandingArr')}
+            >
               <div className="flex items-center gap-3">
                 <span className="text-2xl">🚀</span>
                 <div>
                   <h3 className="text-lg font-semibold text-gray-800">2. EXPANDING ARR</h3>
                   <p className="text-sm text-gray-500">ARR aus Bestandskundenwachstum (Upselling, Cross-Selling)</p>
                 </div>
+                <span className="ml-auto text-gray-500">{planningSectionsExpanded.expandingArr ? '▼' : '▶'}</span>
               </div>
             </div>
+            {planningSectionsExpanded.expandingArr && (
             <div className="p-6">
-              <p className="text-gray-400 text-center py-8">Platzhalter für EXPANDING ARR Daten</p>
+              <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs text-blue-700 mb-4">
+                Monatliche Targets fuer Upgrade/Downgrade koennen hier gepflegt werden.
+              </div>
+              <div className="space-y-3 overflow-x-auto">
+                <div className="min-w-[980px]">
+                  <div className="grid grid-cols-12 gap-1 mb-1">
+                    {MONTHS.map((m) => (
+                      <div key={`expanding-header-${m}`} className="text-center text-xs text-gray-500 font-medium">
+                        {m}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-700">TOTAL Upgrades (Package + Add-On)</span>
+                        <span className="text-xs text-gray-500">Jahressumme: {sumMonthlyValues(expandingTotalUpgrades)}</span>
+                      </div>
+                      <div className="grid grid-cols-12 gap-1">
+                        {MONTHS.map((m, i) => (
+                          <input
+                            key={`expanding-upgrades-${m}`}
+                            type="number"
+                            value={expandingTotalUpgrades[i] ?? 0}
+                            onChange={(e) =>
+                              updateMonthlyValues(
+                                setExpandingTotalUpgrades,
+                                i,
+                                parseInt(e.target.value, 10) || 0
+                              )
+                            }
+                            className="w-full px-1 py-1 text-center border border-green-200 rounded text-sm bg-white"
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-700">TOTAL Downgrades (Package + Add-On)</span>
+                        <span className="text-xs text-gray-500">Jahressumme: {sumMonthlyValues(expandingTotalDowngrades)}</span>
+                      </div>
+                      <div className="grid grid-cols-12 gap-1">
+                        {MONTHS.map((m, i) => (
+                          <input
+                            key={`expanding-downgrades-${m}`}
+                            type="number"
+                            value={expandingTotalDowngrades[i] ?? 0}
+                            onChange={(e) =>
+                              updateMonthlyValues(
+                                setExpandingTotalDowngrades,
+                                i,
+                                parseInt(e.target.value, 10) || 0
+                              )
+                            }
+                            className="w-full px-1 py-1 text-center border border-orange-200 rounded text-sm bg-white"
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-700">Net Upgrade Downgrade ARR</span>
+                        <span className="text-xs text-gray-500">
+                          Jahressumme: {formatCurrency(sumMonthlyValues(expandingNetUpgradeDowngradeArr))}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-12 gap-1">
+                        {MONTHS.map((m, i) => (
+                          <input
+                            key={`expanding-net-arr-${m}`}
+                            type="number"
+                            step="0.01"
+                            value={expandingNetUpgradeDowngradeArr[i] ?? 0}
+                            onChange={(e) =>
+                              updateMonthlyValues(
+                                setExpandingNetUpgradeDowngradeArr,
+                                i,
+                                parseFloat(e.target.value) || 0
+                              )
+                            }
+                            className="w-full px-1 py-1 text-center border border-blue-200 rounded text-sm bg-white"
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
+            )}
           </div>
 
           {/* 3. CHURN ARR */}
           <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-red-500">
-            <div className="px-6 py-4 border-b border-gray-200 bg-red-50">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-red-50 cursor-pointer"
+              onClick={() => togglePlanningSection('churnArr')}
+            >
               <div className="flex items-center gap-3">
                 <span className="text-2xl">📉</span>
                 <div>
                   <h3 className="text-lg font-semibold text-gray-800">3. CHURN ARR</h3>
                   <p className="text-sm text-gray-500">Verlorener ARR durch Kündigungen und Downgrades</p>
                 </div>
+                <span className="ml-auto text-gray-500">{planningSectionsExpanded.churnArr ? '▼' : '▶'}</span>
               </div>
             </div>
-            <div className="p-6">
-              <p className="text-gray-400 text-center py-8">Platzhalter für CHURN ARR Daten</p>
+            {planningSectionsExpanded.churnArr && (
+            <div className="p-6 space-y-6">
+              <div className="rounded-lg border border-red-100 bg-red-50 p-3 text-xs text-red-700">
+                Die Werte werden manuell gepflegt. Negative Zahlen repräsentieren Churn.
+              </div>
+              <div className="space-y-2 text-xs">
+                {churnAutoSaving ? (
+                  <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-blue-700">
+                    Auto-Save aktiv: CHURN ARR wird gespeichert...
+                  </div>
+                ) : null}
+                {churnAutoSaveError ? (
+                  <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-red-700">
+                    Auto-Save fehlgeschlagen: {churnAutoSaveError}
+                  </div>
+                ) : null}
+                {!churnAutoSaving && !churnAutoSaveError ? (
+                  <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-emerald-700">
+                    {lastChurnAutoSaveAt
+                      ? `Zuletzt automatisch gespeichert: ${new Date(lastChurnAutoSaveAt).toLocaleString('de-DE')}`
+                      : 'Auto-Save aktiv: CHURN ARR wird bei Eingabe automatisch gespeichert.'}
+                  </div>
+                ) : null}
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-md font-bold text-gray-800">Invoiced Churn</h4>
+                  <div className="text-xs text-gray-500">Quelle: Looker Messenger Churn Dash (manuell uebertragen)</div>
+                </div>
+                <div className="space-y-3 overflow-x-auto">
+                  <div className="min-w-[980px]">
+                    <div className="grid grid-cols-12 gap-1 mb-1">
+                      {MONTHS.map((m) => (
+                        <div key={`invoiced-header-${m}`} className="text-center text-xs text-gray-500 font-medium">
+                          {m}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="space-y-2">
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-700">Invoiced Churn Target</span>
+                          <span className="text-xs text-gray-500">Jahressumme: {sumMonthlyValues(invoicedChurnTargetCount)}</span>
+                        </div>
+                        <div className="grid grid-cols-12 gap-1">
+                          {MONTHS.map((m, i) => (
+                            <input
+                              key={`invoiced-target-count-${m}`}
+                              type="number"
+                              value={invoicedChurnTargetCount[i] ?? 0}
+                              onChange={(e) =>
+                                updateMonthlyValues(
+                                  setInvoicedChurnTargetCount,
+                                  i,
+                                  toNegativeOrZero(parseInt(e.target.value, 10) || 0)
+                                )
+                              }
+                              className="w-full px-1 py-1 text-center border border-red-200 rounded text-sm bg-white"
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-700">Invoiced Churn Actual</span>
+                          <span className="text-xs text-gray-500">Jahressumme: {sumMonthlyValues(invoicedChurnActualCount)}</span>
+                        </div>
+                        <div className="grid grid-cols-12 gap-1">
+                          {MONTHS.map((m, i) => (
+                            <input
+                              key={`invoiced-actual-count-${m}`}
+                              type="number"
+                              value={invoicedChurnActualCount[i] ?? 0}
+                              onChange={(e) =>
+                                updateMonthlyValues(
+                                  setInvoicedChurnActualCount,
+                                  i,
+                                  toNegativeOrZero(parseInt(e.target.value, 10) || 0)
+                                )
+                              }
+                              className="w-full px-1 py-1 text-center border border-red-200 rounded text-sm bg-white"
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-700">Invoiced Churn Target ARR</span>
+                          <span className="text-xs text-gray-500">Jahressumme: {formatCurrency(sumMonthlyValues(invoicedChurnTargetArr))}</span>
+                        </div>
+                        <div className="grid grid-cols-12 gap-1">
+                          {MONTHS.map((m, i) => (
+                            <input
+                              key={`invoiced-target-arr-${m}`}
+                              type="number"
+                              step="0.01"
+                              value={invoicedChurnTargetArr[i] ?? 0}
+                              onChange={(e) =>
+                                updateMonthlyValues(
+                                  setInvoicedChurnTargetArr,
+                                  i,
+                                  toNegativeOrZero(parseFloat(e.target.value) || 0)
+                                )
+                              }
+                              className="w-full px-1 py-1 text-center border border-red-200 rounded text-sm bg-white"
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-700">Invoiced Churn Actual ARR</span>
+                          <span className="text-xs text-gray-500">Jahressumme: {formatCurrency(sumMonthlyValues(invoicedChurnActualArr))}</span>
+                        </div>
+                        <div className="grid grid-cols-12 gap-1">
+                          {MONTHS.map((m, i) => (
+                            <input
+                              key={`invoiced-actual-arr-${m}`}
+                              type="number"
+                              step="0.01"
+                              value={invoicedChurnActualArr[i] ?? 0}
+                              onChange={(e) =>
+                                updateMonthlyValues(
+                                  setInvoicedChurnActualArr,
+                                  i,
+                                  toNegativeOrZero(parseFloat(e.target.value) || 0)
+                                )
+                              }
+                              className="w-full px-1 py-1 text-center border border-red-200 rounded text-sm bg-white"
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-gray-200">
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-md font-bold text-gray-800">In Month Churn</h4>
+                  <button
+                    type="button"
+                    onClick={applyInMonthTargetsFromInvoiced}
+                    className="text-xs px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-50"
+                  >
+                    Aus Invoiced (naechster Monat) ableiten
+                  </button>
+                </div>
+                <div className="text-xs text-gray-500 mb-2">
+                  Jan-Nov werden aus Invoiced Feb-Dez abgeleitet. Dez bleibt manuell fuer Jan Folgejahr.
+                </div>
+                <div className="space-y-3 overflow-x-auto">
+                  <div className="min-w-[980px]">
+                    <div className="grid grid-cols-12 gap-1 mb-1">
+                      {MONTHS.map((m) => (
+                        <div key={`inmonth-header-${m}`} className="text-center text-xs text-gray-500 font-medium">
+                          {m}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="space-y-2">
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-700">In Month Churn Target</span>
+                          <span className="text-xs text-gray-500">Jahressumme: {sumMonthlyValues(inMonthChurnTargetCount)}</span>
+                        </div>
+                        <div className="grid grid-cols-12 gap-1">
+                          {MONTHS.map((m, i) => (
+                            <input
+                              key={`inmonth-target-count-${m}`}
+                              type="number"
+                              value={inMonthChurnTargetCount[i] ?? 0}
+                              onChange={(e) =>
+                                updateMonthlyValues(
+                                  setInMonthChurnTargetCount,
+                                  i,
+                                  toNegativeOrZero(parseInt(e.target.value, 10) || 0)
+                                )
+                              }
+                              className="w-full px-1 py-1 text-center border border-red-200 rounded text-sm bg-white"
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm font-medium text-gray-700">In Month Churn Target ARR</span>
+                          <span className="text-xs text-gray-500">Jahressumme: {formatCurrency(sumMonthlyValues(inMonthChurnTargetArr))}</span>
+                        </div>
+                        <div className="grid grid-cols-12 gap-1">
+                          {MONTHS.map((m, i) => (
+                            <input
+                              key={`inmonth-target-arr-${m}`}
+                              type="number"
+                              step="0.01"
+                              value={inMonthChurnTargetArr[i] ?? 0}
+                              onChange={(e) =>
+                                updateMonthlyValues(
+                                  setInMonthChurnTargetArr,
+                                  i,
+                                  toNegativeOrZero(parseFloat(e.target.value) || 0)
+                                )
+                              }
+                              className="w-full px-1 py-1 text-center border border-red-200 rounded text-sm bg-white"
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
+            )}
           </div>
 
           {/* 4. New clients */}
           <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-emerald-500">
-            <div className="px-6 py-4 border-b border-gray-200 bg-emerald-50">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-emerald-50 cursor-pointer"
+              onClick={() => togglePlanningSection('newClients')}
+            >
               <div className="flex items-center gap-3">
                 <span className="text-2xl">👥</span>
                 <div>
                   <h3 className="text-lg font-semibold text-gray-800">4. New clients</h3>
                   <p className="text-sm text-gray-500">Anzahl neuer Kunden</p>
                 </div>
+                <span className="ml-auto text-gray-500">{planningSectionsExpanded.newClients ? '▼' : '▶'}</span>
               </div>
             </div>
+            {planningSectionsExpanded.newClients && (
             <div className="p-6">
               <p className="text-gray-400 text-center py-8">Platzhalter für New clients Daten</p>
             </div>
+            )}
           </div>
 
           {/* 5. Churned clients */}
           <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-orange-500">
-            <div className="px-6 py-4 border-b border-gray-200 bg-orange-50">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-orange-50 cursor-pointer"
+              onClick={() => togglePlanningSection('churnedClients')}
+            >
               <div className="flex items-center gap-3">
                 <span className="text-2xl">🚪</span>
                 <div>
                   <h3 className="text-lg font-semibold text-gray-800">5. Churned clients</h3>
                   <p className="text-sm text-gray-500">Anzahl gekündigter Kunden</p>
                 </div>
+                <span className="ml-auto text-gray-500">{planningSectionsExpanded.churnedClients ? '▼' : '▶'}</span>
               </div>
             </div>
+            {planningSectionsExpanded.churnedClients && (
             <div className="p-6">
               <p className="text-gray-400 text-center py-8">Platzhalter für Churned clients Daten</p>
             </div>
+            )}
           </div>
 
           {/* 6. Ending clients */}
           <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-purple-500">
-            <div className="px-6 py-4 border-b border-gray-200 bg-purple-50">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-purple-50 cursor-pointer"
+              onClick={() => togglePlanningSection('endingClients')}
+            >
               <div className="flex items-center gap-3">
                 <span className="text-2xl">⏰</span>
                 <div>
                   <h3 className="text-lg font-semibold text-gray-800">6. Ending clients</h3>
                   <p className="text-sm text-gray-500">Anzahl auslaufender Kundenverträge</p>
                 </div>
+                <span className="ml-auto text-gray-500">{planningSectionsExpanded.endingClients ? '▼' : '▶'}</span>
               </div>
             </div>
+            {planningSectionsExpanded.endingClients && (
             <div className="p-6">
               <p className="text-gray-400 text-center py-8">Platzhalter für Ending clients Daten</p>
             </div>
+            )}
           </div>
         </div>
       )}
