@@ -101,6 +101,13 @@ interface GoLiveAutoImportResponse {
   error?: string;
 }
 
+interface GoLiveManualLockResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
 interface GoLiveImportRun {
   id: string;
   triggered_by: 'manual' | 'cron';
@@ -207,6 +214,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [goLiveUserId, setGoLiveUserId] = useState('');
   const [goLiveSaveMessage, setGoLiveSaveMessage] = useState('');
   const [goLiveImportMode, setGoLiveImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [manualGoLiveWriteLocked, setManualGoLiveWriteLocked] = useState(true);
+  const [manualGoLiveWriteLockLoading, setManualGoLiveWriteLockLoading] = useState(false);
+  const [manualGoLiveWriteLockSaving, setManualGoLiveWriteLockSaving] = useState(false);
+  const [manualGoLiveWriteLockMessage, setManualGoLiveWriteLockMessage] = useState('');
   const [autoImportEnabled, setAutoImportEnabled] = useState(false);
   const [autoImportLoading, setAutoImportLoading] = useState(false);
   const [autoImportSaving, setAutoImportSaving] = useState(false);
@@ -319,6 +330,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   );
 
   const handleManualGoLiveSubmit = async (goLive: Partial<GoLive>) => {
+    if (manualGoLiveWriteLocked) {
+      return { error: { message: 'Manuelle Go-Live-Erfassung ist aktuell schreibgeschuetzt.' } };
+    }
+
     if (!goLiveUserId) {
       return { error: { message: 'Bitte zuerst einen Ziel-User auswählen.' } };
     }
@@ -437,12 +452,31 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadManualGoLiveWriteLockState = useCallback(async () => {
+    setManualGoLiveWriteLockLoading(true);
+    setManualGoLiveWriteLockMessage('');
+    try {
+      const response = await fetch('/api/goLive/manual-lock', { method: 'GET' });
+      const data = (await response.json()) as GoLiveManualLockResponse;
+      if (!response.ok || !data.success) {
+        setManualGoLiveWriteLockMessage(data.error || 'Schreibschutz-Status konnte nicht geladen werden.');
+        return;
+      }
+      setManualGoLiveWriteLocked(Boolean(data.enabled));
+    } catch (err: any) {
+      setManualGoLiveWriteLockMessage(err?.message || 'Schreibschutz-Status konnte nicht geladen werden.');
+    } finally {
+      setManualGoLiveWriteLockLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'goLives') {
+      loadManualGoLiveWriteLockState();
       loadAutoImportState();
       loadImportHistory();
     }
-  }, [activeTab, loadAutoImportState, loadImportHistory]);
+  }, [activeTab, loadManualGoLiveWriteLockState, loadAutoImportState, loadImportHistory]);
 
   useEffect(() => {
     if (activeTab !== 'goLives' || !selectedImportRunId) return;
@@ -472,6 +506,53 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
     } finally {
       setAutoImportSaving(false);
+    }
+  };
+
+  const handleManualGoLiveWriteLockToggle = async (enabled: boolean) => {
+    if (!canToggleManualGoLiveWriteLock) return;
+
+    setManualGoLiveWriteLocked(enabled);
+    setManualGoLiveWriteLockSaving(true);
+    setManualGoLiveWriteLockMessage('');
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const accessToken = session?.access_token;
+
+      if (!accessToken) {
+        setManualGoLiveWriteLocked(!enabled);
+        setManualGoLiveWriteLockMessage('Keine aktive Session gefunden. Bitte neu einloggen.');
+        return;
+      }
+
+      const response = await fetch('/api/goLive/manual-lock', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as GoLiveManualLockResponse;
+      if (!response.ok || !data.success) {
+        setManualGoLiveWriteLocked(!enabled);
+        setManualGoLiveWriteLockMessage(data.error || 'Schreibschutz konnte nicht gespeichert werden.');
+        return;
+      }
+
+      setManualGoLiveWriteLocked(Boolean(data.enabled));
+      setManualGoLiveWriteLockMessage(
+        enabled
+          ? 'Manuelle Go-Live-Erfassung ist jetzt schreibgeschuetzt.'
+          : 'Manuelle Go-Live-Erfassung ist jetzt freigegeben.'
+      );
+    } catch (err: any) {
+      setManualGoLiveWriteLocked(!enabled);
+      setManualGoLiveWriteLockMessage(err?.message || 'Schreibschutz konnte nicht gespeichert werden.');
+    } finally {
+      setManualGoLiveWriteLockSaving(false);
     }
   };
 
@@ -724,6 +805,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   
   // Check permissions
   const permissions = getPermissions(user.role);
+  const canToggleManualGoLiveWriteLock = user.role === 'country_manager';
 
   // Filtered users
   const filteredUsers = useMemo(() => {
@@ -1510,6 +1592,33 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
             <p className="text-sm text-gray-500 mb-4">
               Die manuelle Eingabe wurde aus dem New-Business-Bereich hierher verlagert.
             </p>
+            <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-2">
+              <label className="flex items-center justify-between gap-3">
+                <span className="text-sm text-gray-700">Schreibschutz manuelle Go-Live-Erfassung</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={manualGoLiveWriteLocked}
+                  disabled={
+                    manualGoLiveWriteLockLoading ||
+                    manualGoLiveWriteLockSaving ||
+                    !canToggleManualGoLiveWriteLock
+                  }
+                  onChange={(e) => handleManualGoLiveWriteLockToggle(e.target.checked)}
+                />
+              </label>
+              <div className="text-xs text-gray-500 space-y-1">
+                <div>
+                  Status: {manualGoLiveWriteLocked ? 'Aktiv (gesperrt)' : 'Inaktiv (freigegeben)'}
+                </div>
+                {!canToggleManualGoLiveWriteLock ? (
+                  <div>Nur Country Manager kann den Schreibschutz aendern.</div>
+                ) : null}
+                {manualGoLiveWriteLockLoading ? <div>Status wird geladen...</div> : null}
+                {manualGoLiveWriteLockSaving ? <div>Status wird gespeichert...</div> : null}
+                {manualGoLiveWriteLockMessage ? <div>{manualGoLiveWriteLockMessage}</div> : null}
+              </div>
+            </div>
             {goLiveSaveMessage && (
               <div className="mb-4 rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">
                 {goLiveSaveMessage}
@@ -1530,6 +1639,8 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 assignableUsers={assignableGoLiveUsers}
                 selectedUserId={goLiveUserId}
                 onSelectedUserChange={setGoLiveUserId}
+                readOnly={manualGoLiveWriteLocked}
+                readOnlyReason="Manuelle Go-Live-Erfassung ist aktuell schreibgeschuetzt."
               />
             </div>
 

@@ -20,6 +20,8 @@ interface GoLiveFormProps {
   assignableUsers?: User[];
   selectedUserId?: string;
   onSelectedUserChange?: (userId: string) => void;
+  readOnly?: boolean;
+  readOnlyReason?: string;
 }
 
 export default function GoLiveForm({
@@ -34,6 +36,8 @@ export default function GoLiveForm({
   assignableUsers = [],
   selectedUserId,
   onSelectedUserChange,
+  readOnly = false,
+  readOnlyReason = '',
 }: GoLiveFormProps) {
   const { t } = useLanguage();
   const [customerName, setCustomerName] = useState(initialData?.customer_name || '');
@@ -81,6 +85,7 @@ export default function GoLiveForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (readOnly) return;
     setError('');
     setSuccessMessage('');
     setLoading(true);
@@ -159,7 +164,14 @@ export default function GoLiveForm({
         {initialData ? t('goLive.editTitle') : t('goLive.title')}
       </h2>
 
+      {readOnly ? (
+        <div className="mb-4 p-3 rounded-lg border border-amber-200 bg-amber-50 text-sm text-amber-800">
+          {readOnlyReason || 'Dieses Formular ist aktuell schreibgeschuetzt.'}
+        </div>
+      ) : null}
+
       <form onSubmit={handleSubmit} className="space-y-3 md:space-y-4">
+        <fieldset disabled={readOnly || loading} className="space-y-3 md:space-y-4">
         {/* User Zuordnung */}
         {assignableUsers.length > 0 && onSelectedUserChange && (
           <div>
@@ -439,12 +451,13 @@ export default function GoLiveForm({
           </button>
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || readOnly}
             className="flex-1 py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 transition disabled:opacity-50 text-sm md:text-base"
           >
             {loading ? t('common.loading') : t('common.save')}
           </button>
         </div>
+        </fieldset>
       </form>
     </div>
   );
