@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { getUpDownsellsAutoImportState, runCommitImport } from '../shared';
 
-export async function GET(request: Request) {
+async function handleCronImport(request: Request) {
   const cronSecret = process.env.CRON_SECRET;
 
   if (!cronSecret) {
@@ -12,8 +12,14 @@ export async function GET(request: Request) {
     );
   }
 
+  const url = new URL(request.url);
   const authHeader = request.headers.get('authorization') || '';
-  if (authHeader !== `Bearer ${cronSecret}`) {
+  const bearerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const headerSecret = (request.headers.get('x-cron-secret') || '').trim();
+  const querySecret = (url.searchParams.get('cronSecret') || '').trim();
+  const providedSecret = bearerToken || headerSecret || querySecret;
+
+  if (providedSecret !== cronSecret) {
     return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -66,5 +72,13 @@ export async function GET(request: Request) {
     autoImportEnabled: true,
     autoImportUpdatedAt: autoImportState.updatedAt,
   });
+}
+
+export async function GET(request: Request) {
+  return handleCronImport(request);
+}
+
+export async function POST(request: Request) {
+  return handleCronImport(request);
 }
 
