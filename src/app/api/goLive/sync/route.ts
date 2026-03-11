@@ -165,15 +165,28 @@ function normalizeName(name: string): string {
     .replace(/\s+/g, ' ');
 }
 
+function resolveAeAlias(name: string): string {
+  const normalized = normalizeName(name);
+
+  // Temporary business mapping requested by sales operations:
+  // CSV entries for "Kubi Akyürek" should be assigned to Silke.
+  if (normalized === normalizeName('Kubi Akyürek')) {
+    return 'Silke Hecht-Späth';
+  }
+
+  return name;
+}
+
 function findUserMatch(
   csvName: string,
   users: Array<{ id: string; name: string; email?: string | null }>
 ): { id: string; name: string; email?: string | null } | null {
   if (!csvName || !users.length) return null;
-  const csvNameLower = normalizeName(csvName);
+  const csvNameResolved = resolveAeAlias(csvName);
+  const csvNameLower = normalizeName(csvNameResolved);
   const exactMatch = users.find((u) => normalizeName(u.name) === csvNameLower);
   if (exactMatch) return exactMatch;
-  const nameParts = normalizeName(csvName).split(/[\s-]+/).filter((p) => p.length > 2);
+  const nameParts = normalizeName(csvNameResolved).split(/[\s-]+/).filter((p) => p.length > 2);
   if (nameParts.length === 0) return null;
   const partialMatch = users.find((u) => {
     const userNameLower = normalizeName(u.name);
