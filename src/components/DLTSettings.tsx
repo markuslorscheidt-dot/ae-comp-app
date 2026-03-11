@@ -8,6 +8,8 @@ import { getPermissions } from '@/lib/permissions';
 import { formatCurrency, calculateOTEProjections, validateOTESettings } from '@/lib/calculations';
 import { supabase } from '@/lib/supabase';
 import GoLiveForm from './GoLiveForm';
+import PartnerManagement from './PartnerManagement';
+import SubscriptionPackageManagement from './SubscriptionPackageManagement';
 
 // DLT Planzahlen Datenstruktur
 interface DLTPlanzahlen {
@@ -4861,6 +4863,25 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </div>
+
+              {/* ========== 8. PARTNER & SUBSCRIPTION MANAGEMENT ========== */}
+              <div className="bg-gray-50 rounded-lg p-4 space-y-4">
+                <h4 className="text-md font-bold text-gray-800">
+                  8. Partner & Subscription Management
+                </h4>
+                <p className="text-sm text-gray-600">
+                  Verwaltung von Partnern und Subscription-Paketen direkt im Planning Overview.
+                </p>
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+                  <div className="rounded-lg border border-gray-200 p-4 bg-white">
+                    <PartnerManagement />
+                  </div>
+                  <div className="rounded-lg border border-gray-200 p-4 bg-white">
+                    <SubscriptionPackageManagement />
+                  </div>
                 </div>
               </div>
             </div>
