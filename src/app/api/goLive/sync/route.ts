@@ -78,11 +78,55 @@ function parseDateDeToIso(value: string | undefined): string | null {
   if (!value) return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  const parts = trimmed.split('.');
-  if (parts.length !== 3) return null;
-  const [day, month, year] = parts;
-  if (!day || !month || !year) return null;
-  return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}T00:00:00`;
+
+  // Erwartet DD.MM.YYYY, optional mit Uhrzeit-Suffix (z.B. "02.01.2026 02:00")
+  const match = /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+.*)?$/.exec(trimmed);
+  if (!match) return null;
+
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  if (!Number.isInteger(day) || !Number.isInteger(month) || !Number.isInteger(year)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  const date = new Date(year, month - 1, day);
+  if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return null;
+
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T00:00:00`;
+}
+
+function resolveMonthlySubsFallback(monthlySubs: number | null, packageName: string): number | null {
+  // Business fallback: only replace explicit 0 values from sheet import.
+  if (monthlySubs !== 0) return monthlySubs;
+
+  const normalizedPackage = packageName.toLowerCase().replace(/\s+/g, '');
+
+  if (
+    normalizedPackage === 'kickstart(de)' ||
+    normalizedPackage === 'kickstart(at)' ||
+    normalizedPackage === 'kickstart(ch)'
+  ) {
+    return 109;
+  }
+
+  // Check Power+ before Power because "power+" starts with "power".
+  if (
+    normalizedPackage === 'power+(de)' ||
+    normalizedPackage === 'power+(at)' ||
+    normalizedPackage === 'power+(ch)'
+  ) {
+    return 199;
+  }
+
+  if (
+    normalizedPackage === 'power(de)' ||
+    normalizedPackage === 'power(at)' ||
+    normalizedPackage === 'power(ch)'
+  ) {
+    return 169;
+  }
+
+  return monthlySubs;
 }
 
 function buildHeaderIndexMap(headerRow: string[]) {
@@ -375,6 +419,8 @@ async function extractSheetRows(): Promise<ExtractResult> {
 
     const oakIdNum = parseInt(oakIdRaw, 10);
     const oakId = Number.isInteger(oakIdNum) ? oakIdNum : null;
+    const parsedMonthlySubs = parseNumber(monthlySubsRaw);
+    const resolvedMonthlySubs = resolveMonthlySubsFallback(parsedMonthlySubs, packageRaw);
 
     return {
       rowNumber: headerIndex + 2 + idx,
@@ -382,7 +428,7 @@ async function extractSheetRows(): Promise<ExtractResult> {
       oakId,
       customerName: customerNameRaw.replace(/\s+/g, ' ').trim(),
       coo: cooRaw,
-      monthlySubs: parseNumber(monthlySubsRaw),
+      monthlySubs: resolvedMonthlySubs,
       packageName: packageRaw,
       hasTerminal: parseYesNo(terminalRaw),
       ae: aeRaw,
