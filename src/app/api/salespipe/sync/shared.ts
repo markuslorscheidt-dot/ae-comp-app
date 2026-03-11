@@ -76,6 +76,27 @@ function parseInteger(value: string | undefined): number | null {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+function normalizeName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function resolveOpportunityOwnerAlias(name: string): string {
+  const normalized = normalizeName(name);
+
+  // Temporary business mapping requested by sales operations:
+  // Source rows for "Kubi Akyürek" should be assigned to Silke.
+  if (normalized === normalizeName('Kubi Akyürek')) {
+    return 'Silke Hecht-Späth';
+  }
+
+  return name;
+}
+
 function isValidDateParts(year: number, month: number, day: number): boolean {
   if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return false;
   if (month < 1 || month > 12 || day < 1 || day > 31) return false;
@@ -342,6 +363,7 @@ export async function extractSheetRows(): Promise<ExtractResult> {
     const decisionCriteriaRaw = getCell(row, headerMap, 'Decision Criteria');
     const createdDateRaw = getCell(row, headerMap, 'Erstelldatum');
     const ownerRaw = getCell(row, headerMap, 'Opportunity-Inhaber');
+    const ownerResolved = resolveOpportunityOwnerAlias(ownerRaw);
 
     return {
       rowNumber: headerIndex + 2 + idx,
@@ -360,7 +382,7 @@ export async function extractSheetRows(): Promise<ExtractResult> {
       daysSentQuoteToClose: parseInteger(daysQuoteRaw),
       decisionCriteria: decisionCriteriaRaw,
       createdDate: parseDateToIso(createdDateRaw),
-      opportunityOwner: ownerRaw,
+      opportunityOwner: ownerResolved,
     };
   });
 
