@@ -112,3 +112,123 @@ HAVING COUNT(*) > 1;
 - Source-Dedupe muss sichtbar als Warning dokumentiert sein
 - Fachregeln, wenn moeglich, zentral und wiederverwendbar halten
 - Rechenlogik in `src/lib/calculations.ts` zentralisieren
+
+## 9. Verbindlicher Standard fuer alle neuen Importe
+
+Ab sofort gilt:
+
+- Jeder neue Import wird exakt nach diesem Playbook umgesetzt.
+- Architektur, API-Schnittstellen, Auto-Import-Logik, Historie und UI sind verpflichtend.
+- Abweichungen nur bei expliziter fachlicher Anforderung.
+
+Der Satz
+
+- `Baue ein Import wie in der Dokumentation beschrieben`
+
+ist als vollstaendiger Implementierungsauftrag zu verstehen.
+
+## 10. Konkretes Umsetzungs-Template (Pflicht)
+
+### 10.1 API-Dateistruktur
+
+Fuer jede neue Domain `<domain>`:
+
+- `src/app/api/<domain>/sync/route.ts`
+- `src/app/api/<domain>/sync/shared.ts`
+- `src/app/api/<domain>/sync/auto-import/route.ts`
+- `src/app/api/<domain>/sync/cron/route.ts`
+- `src/app/api/<domain>/sync/history/route.ts`
+
+### 10.2 Endpoints und Verhalten
+
+- `GET /api/<domain>/sync`:
+  - Dry-Run, keine Writes
+  - Header-/Pflichtfeld-Validierung
+  - `stats` + `preview.valid` + `preview.invalid`
+
+- `POST /api/<domain>/sync`:
+  - Commit-Import mit Batch-Upsert
+  - `stats` + `errors` + `warnings`
+  - Run-Logging in Historie
+
+- `GET /api/<domain>/sync/auto-import`:
+  - aktuellen persistenten Toggle-Status liefern
+
+- `PUT /api/<domain>/sync/auto-import`:
+  - Toggle-Status speichern in `import_controls`
+
+- `GET|POST /api/<domain>/sync/cron`:
+  - Secret-geschuetzt
+  - akzeptiert `Authorization: Bearer <CRON_SECRET>`, `x-cron-secret`, optional `cronSecret` Query
+  - fuehrt nur aus, wenn Auto-Import aktiv
+  - loggt `skipped`, wenn Auto-Import aus
+
+- `GET /api/<domain>/sync/history?limit=20`:
+  - letzte Runs
+
+- `GET /api/<domain>/sync/history?runId=<id>`:
+  - Run-Items (Warnings/Errors/Duplicates)
+
+### 10.3 Datenbank / SQL-Migration
+
+Pro Domain eine SQL-Datei `supabase-<domain>-import.sql` mit:
+
+- Zieltabelle `<domain>_events` (oder fachlich passender Name)
+- Unique Business Key als `UNIQUE INDEX` fuer Upsert
+- `updated_at` Trigger
+- Historie-Tabellen:
+  - `<domain>_import_runs`
+  - `<domain>_import_run_items`
+- `import_controls` Eintrag:
+  - `<domain>_auto_import_enabled`
+
+### 10.4 ENV-Konvention
+
+Pflicht:
+
+- `GOOGLE_SHEETS_API_KEY`
+- `GOOGLE_SHEETS_SPREADSHEET_ID`
+- domain-spezifischer Range-Key:
+  - `GOOGLE_SHEETS_RANGE_<DOMAIN>` (z. B. `GOOGLE_SHEETS_RANGE_SALESPIPE`)
+
+Empfehlung:
+
+- In `shared.ts` einen stabilen Default-Range auf den exakten Tabnamen setzen.
+- Bei Range-Fehlern (`Unable to parse range`) eine klare, fachliche Fehlermeldung zur ENV ausgeben.
+
+### 10.5 UI-Standard (DLT Settings > Importe)
+
+Jeder neue Import bekommt einen eigenen Subtab mit identischem Aufbau:
+
+- Modus-Schalter `Manuell pruefen` / `Automatisch einlaufen`
+- Toggle `Auto-Import aktivieren`
+- Buttons:
+  - `Batch pruefen (Dry-Run)`
+  - `Jetzt importieren (Commit)`
+- Ergebnis-Kacheln (`toImport`, `imported`, `updated`, `failed`, `duplicates`)
+- Feld-Mapping-Tabelle (Quelle -> DB -> Transformation -> Pflicht)
+- Vorschau geparster Datensaetze
+- Fehler-/Warnboxen
+- Import-Historie + Run-Details
+- Anzeige `Letzter Auto-Run (Cron)`
+
+### 10.6 Import-Logik-Standard in `shared.ts`
+
+- Parsing robust fuer DE/EN Zahlenformate
+- Datumsparser robust (mind. `YYYY-MM-DD`, `DD.MM.YYYY`, optional Zeit-Suffix)
+- Pflichtvalidierung pro Zeile
+- Source-Dedupe (letzte Zeile gewinnt oder fachlich definiertes Merge)
+- Batch-Upsert mit sauberem `onConflict`
+- Fehler/Warnungen run-item-faehig sammeln
+- finaler Run-Status:
+  - `success | partial | failed | skipped`
+
+## 11. Abnahme-Checkliste (Definition of Done je neuem Import)
+
+- SQL-Migration ausgefuehrt und Tabellen/Indizes vorhanden
+- Dry-Run liefert valide `stats` und nachvollziehbare Vorschau
+- Commit importiert ohne strukturelle Fehler
+- Auto-Import Toggle wirkt persistent
+- Cron-Endpoint mit Secret laeuft und respektiert Toggle
+- Historie + Run-Details werden in UI korrekt angezeigt
+- Vercel ENV fuer Domain-Range gesetzt und dokumentiert
