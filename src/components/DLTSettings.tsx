@@ -212,6 +212,62 @@ interface UpDownsellsAutoImportResponse {
   error?: string;
 }
 
+interface SalespipeDryRunResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+  };
+  preview?: {
+    valid: Array<{
+      rowNumber: number;
+      opportunityName: string;
+      stage: string;
+      oakId: number | null;
+      opportunityId: string;
+      estimatedArr: number | null;
+      probability: number | null;
+      closeDate: string | null;
+      opportunityOwner: string;
+    }>;
+    invalid: Array<{
+      rowNumber: number;
+      reasons: string[];
+      raw: { opportunityName: string; oakId: number | null; opportunityId: string };
+    }>;
+  };
+  error?: string;
+}
+
+interface SalespipeCommitResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport: number;
+    imported: number;
+    failed: number;
+    duplicates: number;
+    updated?: number;
+  };
+  errors?: Array<{ rowNumber: number; oakId: number | null; error: string }>;
+  warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
+  error?: string;
+}
+
+interface SalespipeAutoImportResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
 interface GoLiveManualLockResponse {
   success: boolean;
   enabled?: boolean;
@@ -296,6 +352,32 @@ interface UpDownsellsImportRunItem {
   created_at: string;
 }
 
+interface SalespipeImportRun {
+  id: string;
+  triggered_by: 'manual' | 'cron';
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  updated?: number;
+  to_import: number;
+  auto_import_enabled: boolean;
+  skipped: boolean;
+  reason: string | null;
+}
+
+interface SalespipeImportRunItem {
+  id: string;
+  run_id: string;
+  row_number: number | null;
+  oak_id: number | null;
+  level: 'error' | 'warning' | 'duplicate';
+  message: string;
+  created_at: string;
+}
+
 const GO_LIVE_BATCH_FIELD_MAPPING: Array<{
   source: string;
   target: string;
@@ -352,6 +434,30 @@ const UP_DOWNSELLS_BATCH_FIELD_MAPPING: Array<{
   { source: 'Net Growth ARR', target: 'up_downsells_events.net_growth_arr', transform: 'Numerisch (DE/EN Format)' },
   { source: 'Net Loss ARR', target: 'up_downsells_events.net_loss_arr', transform: 'Numerisch (DE/EN Format)' },
   { source: 'Net Growth + Net Loss', target: 'up_downsells_events.net_arr', transform: 'Berechnet' },
+];
+
+const SALESPIPE_BATCH_FIELD_MAPPING: Array<{
+  source: string;
+  target: string;
+  transform: string;
+  required?: boolean;
+}> = [
+  { source: 'Opportunity-ID', target: 'salespipe_events.opportunity_id', transform: 'String (Business Key)', required: true },
+  { source: 'Opportunity-Name', target: 'salespipe_events.opportunity_name', transform: 'Trim / String', required: true },
+  { source: 'OAKID', target: 'salespipe_events.oak_id', transform: 'Integer (optional)' },
+  { source: 'Rating', target: 'salespipe_events.rating', transform: 'String (optional)' },
+  { source: 'Nächster Schritt', target: 'salespipe_events.next_step', transform: 'String (optional)' },
+  { source: 'Schlusstermin', target: 'salespipe_events.close_date', transform: 'dd.mm.yyyy -> ISO Datum' },
+  { source: 'Letzte Aktivität', target: 'salespipe_events.last_activity_date', transform: 'dd.mm.yyyy -> ISO Datum' },
+  { source: 'Phase', target: 'salespipe_events.stage', transform: 'String (optional)' },
+  { source: 'Estimated ARR', target: 'salespipe_events.estimated_arr', transform: 'Numerisch (DE/EN Format)' },
+  { source: 'Wahrscheinlichkeit (%)', target: 'salespipe_events.probability', transform: 'Numerisch' },
+  { source: 'Lead-Quelle', target: 'salespipe_events.lead_source', transform: 'String (optional)' },
+  { source: 'Days from Demo to Closure', target: 'salespipe_events.days_demo_to_closure', transform: 'Integer (optional)' },
+  { source: 'Days from SentQuote to Close', target: 'salespipe_events.days_sentquote_to_close', transform: 'Integer (optional)' },
+  { source: 'Decision Criteria', target: 'salespipe_events.decision_criteria', transform: 'String (optional)' },
+  { source: 'Erstelldatum', target: 'salespipe_events.created_date', transform: 'dd.mm.yyyy -> ISO Datum' },
+  { source: 'Opportunity-Inhaber', target: 'salespipe_events.opportunity_owner', transform: 'String (optional)' },
 ];
 
 // Role display names
@@ -496,7 +602,7 @@ function parseExpandingArrData(raw: unknown): ExpandingArrData {
 }
 
 type SettingsTab = 'users' | 'imports' | 'permissions' | 'areas' | 'planning' | 'system';
-type ImportSubTab = 'newBusinessGoLives' | 'churnImports' | 'upDownsellsImport';
+type ImportSubTab = 'newBusinessGoLives' | 'churnImports' | 'upDownsellsImport' | 'salespipeImport';
 
 export default function DLTSettings({ user }: DLTSettingsProps) {
   const { t } = useLanguage();
@@ -568,6 +674,28 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [selectedUpDownsellsImportRunItems, setSelectedUpDownsellsImportRunItems] = useState<
     UpDownsellsImportRunItem[]
   >([]);
+  const [salespipeImportMode, setSalespipeImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [salespipeAutoImportEnabled, setSalespipeAutoImportEnabled] = useState(false);
+  const [salespipeAutoImportLoading, setSalespipeAutoImportLoading] = useState(false);
+  const [salespipeAutoImportSaving, setSalespipeAutoImportSaving] = useState(false);
+  const [salespipeAutoImportMessage, setSalespipeAutoImportMessage] = useState('');
+  const [salespipeBatchLoading, setSalespipeBatchLoading] = useState(false);
+  const [salespipeBatchError, setSalespipeBatchError] = useState('');
+  const [salespipeBatchResult, setSalespipeBatchResult] = useState<SalespipeDryRunResponse | null>(null);
+  const [lastSalespipeBatchCheckAt, setLastSalespipeBatchCheckAt] = useState<string | null>(null);
+  const [salespipeBatchImportLoading, setSalespipeBatchImportLoading] = useState(false);
+  const [salespipeBatchImportError, setSalespipeBatchImportError] = useState('');
+  const [salespipeBatchImportResult, setSalespipeBatchImportResult] = useState<SalespipeCommitResponse | null>(
+    null
+  );
+  const [lastSalespipeBatchImportAt, setLastSalespipeBatchImportAt] = useState<string | null>(null);
+  const [salespipeImportHistoryLoading, setSalespipeImportHistoryLoading] = useState(false);
+  const [salespipeImportHistoryError, setSalespipeImportHistoryError] = useState('');
+  const [salespipeImportRuns, setSalespipeImportRuns] = useState<SalespipeImportRun[]>([]);
+  const [selectedSalespipeImportRunId, setSelectedSalespipeImportRunId] = useState<string | null>(null);
+  const [selectedSalespipeImportRunItems, setSelectedSalespipeImportRunItems] = useState<SalespipeImportRunItem[]>(
+    []
+  );
   
   // ========== NEW ARR: GRUNDEINSTELLUNGEN ==========
   const [newArrYear, setNewArrYear] = useState(currentYear);
@@ -960,6 +1088,87 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const handleRunSalespipeBatchCheck = async () => {
+    setSalespipeBatchLoading(true);
+    setSalespipeBatchError('');
+    try {
+      const response = await fetch('/api/salespipe/sync', { method: 'GET' });
+      const data = (await response.json()) as SalespipeDryRunResponse;
+      if (!response.ok || !data.success) {
+        setSalespipeBatchResult(null);
+        setSalespipeBatchError(data.error || 'Batch-Pruefung fehlgeschlagen');
+        return;
+      }
+      setSalespipeBatchResult(data);
+      setLastSalespipeBatchCheckAt(new Date().toISOString());
+    } catch (err: any) {
+      setSalespipeBatchResult(null);
+      setSalespipeBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
+    } finally {
+      setSalespipeBatchLoading(false);
+    }
+  };
+
+  const handleRunSalespipeBatchImport = async () => {
+    setSalespipeBatchImportLoading(true);
+    setSalespipeBatchImportError('');
+    try {
+      const response = await fetch('/api/salespipe/sync', { method: 'POST' });
+      const data = (await response.json()) as SalespipeCommitResponse;
+      if (!response.ok || !data.success) {
+        setSalespipeBatchImportResult(null);
+        setSalespipeBatchImportError(data.error || 'Manueller Import fehlgeschlagen');
+        return;
+      }
+      setSalespipeBatchImportResult(data);
+      setLastSalespipeBatchImportAt(new Date().toISOString());
+      await loadSalespipeImportHistory();
+    } catch (err: any) {
+      setSalespipeBatchImportResult(null);
+      setSalespipeBatchImportError(err?.message || 'Manueller Import fehlgeschlagen');
+    } finally {
+      setSalespipeBatchImportLoading(false);
+    }
+  };
+
+  const loadSalespipeImportHistory = useCallback(async () => {
+    setSalespipeImportHistoryLoading(true);
+    setSalespipeImportHistoryError('');
+    try {
+      const response = await fetch('/api/salespipe/sync/history?limit=20', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setSalespipeImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as SalespipeImportRun[];
+      setSalespipeImportRuns(runs);
+      if (!selectedSalespipeImportRunId && runs.length > 0) {
+        setSelectedSalespipeImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setSalespipeImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setSalespipeImportHistoryLoading(false);
+    }
+  }, [selectedSalespipeImportRunId]);
+
+  const loadSalespipeImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/salespipe/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setSalespipeImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedSalespipeImportRunItems((data.items || []) as SalespipeImportRunItem[]);
+    } catch (err: any) {
+      setSalespipeImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
   const loadAutoImportState = useCallback(async () => {
     setAutoImportLoading(true);
     setAutoImportMessage('');
@@ -1014,6 +1223,24 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadSalespipeAutoImportState = useCallback(async () => {
+    setSalespipeAutoImportLoading(true);
+    setSalespipeAutoImportMessage('');
+    try {
+      const response = await fetch('/api/salespipe/sync/auto-import', { method: 'GET' });
+      const data = (await response.json()) as SalespipeAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setSalespipeAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setSalespipeAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      setSalespipeAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+    } finally {
+      setSalespipeAutoImportLoading(false);
+    }
+  }, []);
+
   const loadManualGoLiveWriteLockState = useCallback(async () => {
     setManualGoLiveWriteLockLoading(true);
     setManualGoLiveWriteLockMessage('');
@@ -1041,6 +1268,8 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadChurnImportHistory();
       loadUpDownsellsAutoImportState();
       loadUpDownsellsImportHistory();
+      loadSalespipeAutoImportState();
+      loadSalespipeImportHistory();
     }
   }, [
     activeTab,
@@ -1051,6 +1280,8 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     loadChurnImportHistory,
     loadUpDownsellsAutoImportState,
     loadUpDownsellsImportHistory,
+    loadSalespipeAutoImportState,
+    loadSalespipeImportHistory,
   ]);
 
   useEffect(() => {
@@ -1067,6 +1298,11 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     if (activeTab !== 'imports' || !selectedUpDownsellsImportRunId) return;
     loadUpDownsellsImportRunItems(selectedUpDownsellsImportRunId);
   }, [activeTab, selectedUpDownsellsImportRunId, loadUpDownsellsImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedSalespipeImportRunId) return;
+    loadSalespipeImportRunItems(selectedSalespipeImportRunId);
+  }, [activeTab, selectedSalespipeImportRunId, loadSalespipeImportRunItems]);
 
   const handleAutoImportToggle = async (enabled: boolean) => {
     setAutoImportEnabled(enabled);
@@ -1145,6 +1381,32 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setUpDownsellsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
     } finally {
       setUpDownsellsAutoImportSaving(false);
+    }
+  };
+
+  const handleSalespipeAutoImportToggle = async (enabled: boolean) => {
+    setSalespipeAutoImportEnabled(enabled);
+    setSalespipeAutoImportSaving(true);
+    setSalespipeAutoImportMessage('');
+    try {
+      const response = await fetch('/api/salespipe/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as SalespipeAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setSalespipeAutoImportEnabled(!enabled);
+        setSalespipeAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setSalespipeAutoImportEnabled(Boolean(data.enabled));
+      setSalespipeAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
+    } catch (err: any) {
+      setSalespipeAutoImportEnabled(!enabled);
+      setSalespipeAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setSalespipeAutoImportSaving(false);
     }
   };
 
@@ -1234,6 +1496,11 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const latestUpDownsellsAutoRun = useMemo(
     () => upDownsellsImportRuns.find((run) => run.triggered_by === 'cron') || null,
     [upDownsellsImportRuns]
+  );
+
+  const latestSalespipeAutoRun = useMemo(
+    () => salespipeImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [salespipeImportRuns]
   );
   
   // ========== PLANZAHLEN: LADEN ==========
@@ -2405,6 +2672,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 }`}
               >
                 Up-Downsells Import
+              </button>
+              <button
+                onClick={() => setActiveImportSubTab('salespipeImport')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'salespipeImport'
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Salespipe Import
               </button>
             </div>
           </div>
@@ -3607,6 +3884,392 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                           </thead>
                           <tbody>
                             {selectedUpDownsellsImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.oak_id ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {activeImportSubTab === 'salespipeImport' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">Google-Sheet Batch Import</h4>
+                <p className="text-sm text-gray-500">
+                  Pruefe eingehende Salespipe-Daten als Stapel und entscheide dann ueber den Import.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setSalespipeImportMode('manual')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    salespipeImportMode === 'manual'
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Manuell pruefen
+                </button>
+                <button
+                  onClick={() => setSalespipeImportMode('automatic')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    salespipeImportMode === 'automatic'
+                      ? 'bg-green-50 border-green-300 text-green-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Automatisch einlaufen
+                </button>
+              </div>
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={salespipeAutoImportEnabled}
+                  disabled={salespipeAutoImportLoading || salespipeAutoImportSaving}
+                  onChange={(e) => handleSalespipeAutoImportToggle(e.target.checked)}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+                <div>Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.</div>
+                {salespipeAutoImportLoading ? <div>Status wird geladen...</div> : null}
+                {salespipeAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                {salespipeAutoImportMessage ? <div>{salespipeAutoImportMessage}</div> : null}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunSalespipeBatchCheck}
+                  disabled={salespipeBatchLoading || salespipeBatchImportLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {salespipeBatchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
+                </button>
+                <button
+                  onClick={handleRunSalespipeBatchImport}
+                  disabled={salespipeBatchImportLoading || salespipeBatchLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {salespipeBatchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
+                {lastSalespipeBatchCheckAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Check: {new Date(lastSalespipeBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+                {lastSalespipeBatchImportAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Import: {new Date(lastSalespipeBatchImportAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+              </div>
+
+              {salespipeBatchError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {salespipeBatchError}
+                </div>
+              )}
+
+              {salespipeBatchImportError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {salespipeBatchImportError}
+                </div>
+              )}
+
+              {salespipeBatchImportResult?.stats && (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">To Import</div>
+                      <div className="font-semibold">{salespipeBatchImportResult.stats.toImport}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{salespipeBatchImportResult.stats.imported}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{salespipeBatchImportResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{salespipeBatchImportResult.stats.failed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Duplikate im Sheet</div>
+                      <div className="font-semibold text-amber-700">{salespipeBatchImportResult.stats.duplicates}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {salespipeBatchResult?.stats && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Sheet Zeilen</div>
+                      <div className="text-xl font-semibold">{salespipeBatchResult.stats.totalRowsFromSheet}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Geparst</div>
+                      <div className="text-xl font-semibold">{salespipeBatchResult.stats.parsedRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-green-50 p-3 border border-green-200">
+                      <div className="text-green-700">Importierbar</div>
+                      <div className="text-xl font-semibold text-green-700">{salespipeBatchResult.stats.validRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-red-50 p-3 border border-red-200">
+                      <div className="text-red-700">Fehlerhaft</div>
+                      <div className="text-xl font-semibold text-red-700">{salespipeBatchResult.stats.invalidRows}</div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -&gt; Datenbank)</h5>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-60 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Sheet-Spalte</th>
+                              <th className="text-left px-2 py-2 text-gray-600">DB-Feld</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Transformation</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Pflicht</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {SALESPIPE_BATCH_FIELD_MAPPING.map((row) => (
+                              <tr key={`${row.source}-${row.target}`} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{row.source}</td>
+                                <td className="px-2 py-1.5 text-gray-700 font-mono">{row.target}</td>
+                                <td className="px-2 py-1.5 text-gray-600">{row.transform}</td>
+                                <td className="px-2 py-1.5">
+                                  {row.required ? (
+                                    <span className="inline-flex items-center rounded bg-red-50 text-red-700 px-2 py-0.5">Ja</span>
+                                  ) : (
+                                    <span className="inline-flex items-center rounded bg-gray-100 text-gray-600 px-2 py-0.5">Nein</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  {salespipeBatchResult.preview?.valid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Import-Vorschau (normalisierte Werte)</h5>
+                      <div className="rounded-lg border border-gray-200 overflow-hidden">
+                        <div className="max-h-64 overflow-auto">
+                          <table className="w-full text-xs">
+                            <thead className="bg-gray-50 sticky top-0">
+                              <tr>
+                                <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Opportunity-ID</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Opportunity</th>
+                                <th className="text-left px-2 py-2 text-gray-600">OAK</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Stage</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Close Date</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Estimated ARR</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Probability</th>
+                                <th className="text-left px-2 py-2 text-gray-600">Owner</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {salespipeBatchResult.preview.valid.slice(0, 12).map((row) => (
+                                <tr key={`${row.rowNumber}-${row.opportunityId}`} className="border-t border-gray-100">
+                                  <td className="px-2 py-1.5 text-gray-700">{row.rowNumber}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.opportunityId || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.opportunityName || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.oakId ?? '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.stage || '-'}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewDate(row.closeDate)}</td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.estimatedArr !== null && row.estimatedArr !== undefined
+                                      ? formatCurrency(row.estimatedArr)
+                                      : '-'}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">
+                                    {row.probability !== null && row.probability !== undefined ? `${row.probability}` : '-'}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-gray-700">{row.opportunityOwner || '-'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Vorschau zeigt die ersten 12 geparsten Zeilen aus dem Dry-Run.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {salespipeBatchResult.warnings?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-amber-800 mb-2">Warnungen beim Mapping</h5>
+                      <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                        {salespipeBatchResult.warnings.slice(0, 8).map((w, idx) => (
+                          <div
+                            key={`${w.rowNumber}-${w.oakId}-${idx}`}
+                            className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs"
+                          >
+                            <div className="font-medium text-amber-800">
+                              Zeile {w.rowNumber > 0 ? w.rowNumber : '-'} {w.oakId ? `- OAK ${w.oakId}` : ''}
+                            </div>
+                            <div className="text-amber-700">{w.warning}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {salespipeImportMode === 'manual' && salespipeBatchResult.preview?.invalid?.length ? (
+                    <div>
+                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Beispiele fehlerhafte Zeilen</h5>
+                      <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                        {salespipeBatchResult.preview.invalid.slice(0, 6).map((row) => (
+                          <div key={row.rowNumber} className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs">
+                            <div className="font-medium text-red-700">
+                              Zeile {row.rowNumber} - {row.raw.opportunityName || 'Ohne Opportunity-Name'}
+                            </div>
+                            <div className="text-red-600">{row.reasons.join(', ')}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-sm font-semibold text-gray-700">Import-Historie</h5>
+                  <button
+                    onClick={loadSalespipeImportHistory}
+                    disabled={salespipeImportHistoryLoading}
+                    className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {salespipeImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                  </button>
+                </div>
+
+                {salespipeImportHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {salespipeImportHistoryError}
+                  </div>
+                ) : null}
+
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
+                  <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
+                  {latestSalespipeAutoRun ? (
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
+                      <div>
+                        <div className="text-indigo-700">Zeitpunkt</div>
+                        <div>{new Date(latestSalespipeAutoRun.started_at).toLocaleString('de-DE')}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Status</div>
+                        <div>{getImportRunStatusLabel(latestSalespipeAutoRun.status)}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Importiert</div>
+                        <div>{latestSalespipeAutoRun.imported}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Fehler</div>
+                        <div>{latestSalespipeAutoRun.failed}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Duplikate</div>
+                        <div>{latestSalespipeAutoRun.duplicates}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Hinweis</div>
+                        <div>{latestSalespipeAutoRun.reason || (latestSalespipeAutoRun.skipped ? 'Skipped' : '-')}</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
+                  )}
+                </div>
+
+                {salespipeImportRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {salespipeImportRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedSalespipeImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedSalespipeImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">
+                                {new Date(run.started_at).toLocaleString('de-DE')}
+                              </td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                              <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedSalespipeImportRunId && selectedSalespipeImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">OAK</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedSalespipeImportRunItems.slice(0, 150).map((item) => (
                               <tr key={item.id} className="border-t border-gray-100">
                                 <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
                                 <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
