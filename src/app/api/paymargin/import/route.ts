@@ -37,6 +37,55 @@ function getServerSupabase() {
   return createClient(supabaseUrl, serviceRoleKey);
 }
 
+async function persistPaymarginImportRun(params: {
+  supabase: ReturnType<typeof createClient>;
+  mode: 'dry-run' | 'commit';
+  status: 'success' | 'failed';
+  sourceFileName: string;
+  year: number;
+  goLiveMonth: number;
+  seasonalFactor: number;
+  stats: {
+    rowsParsed: number;
+    rowsValid: number;
+    rowsSkippedNoOak: number;
+    rowsSkippedInvalidMargin: number;
+    rowsSkippedNoMatch: number;
+    rowsMatchedGoLives: number;
+    rowsWouldUpdate: number;
+    rowsUpdated: number;
+    duplicateOakRows: number;
+  };
+  reason?: string;
+}) {
+  const { supabase, mode, status, sourceFileName, year, goLiveMonth, seasonalFactor, stats, reason } = params;
+
+  const { error } = await supabase.from('paymargin_import_runs').insert({
+    mode,
+    status,
+    source_file_name: sourceFileName,
+    year,
+    go_live_month: goLiveMonth,
+    seasonal_factor: seasonalFactor,
+    rows_parsed: stats.rowsParsed,
+    rows_valid: stats.rowsValid,
+    rows_skipped_no_oak: stats.rowsSkippedNoOak,
+    rows_skipped_invalid_margin: stats.rowsSkippedInvalidMargin,
+    rows_skipped_no_match: stats.rowsSkippedNoMatch,
+    rows_matched_go_lives: stats.rowsMatchedGoLives,
+    rows_would_update: stats.rowsWouldUpdate,
+    rows_updated: stats.rowsUpdated,
+    duplicate_oak_rows: stats.duplicateOakRows,
+    reason: reason || null,
+    created_at: new Date().toISOString(),
+  });
+
+  if (error) {
+    // Logging darf den Import nicht scheitern lassen.
+    console.error('Paymargin Import-Run Logging fehlgeschlagen:', error.message);
+  }
+}
+
 export async function POST(request: Request) {
   try {
     const supabase = getServerSupabase();
@@ -77,6 +126,7 @@ export async function POST(request: Request) {
       );
     }
 
+    const sourceFileName = file.name || 'unknown.csv';
     const csvText = await file.text();
     const parsed = Papa.parse<Record<string, unknown>>(csvText, {
       header: true,
@@ -117,23 +167,40 @@ export async function POST(request: Request) {
     const oakIds = validRows.map((r) => r.oakId);
 
     if (oakIds.length === 0) {
+      const stats = {
+        year,
+        goLiveMonth,
+        rowsParsed: rows.length,
+        rowsValid: 0,
+        rowsSkippedNoOak,
+        rowsSkippedInvalidMargin,
+        rowsSkippedNoMatch: 0,
+        rowsMatchedGoLives: 0,
+        rowsWouldUpdate: 0,
+        rowsUpdated: 0,
+        duplicateOakRows,
+      };
+
+      if (!dryRun) {
+        await persistPaymarginImportRun({
+          supabase,
+          mode: 'commit',
+          status: 'success',
+          sourceFileName,
+          year,
+          goLiveMonth,
+          seasonalFactor: seasonalFactors[goLiveMonth - 1] || 1,
+          stats,
+          reason: 'Keine verwertbaren OAK IDs in der CSV gefunden.',
+        });
+      }
+
       return NextResponse.json({
         success: true,
         mode: dryRun ? 'dry-run' : 'commit',
+        sourceFileName,
         warning: 'Keine verwertbaren OAK IDs in der CSV gefunden.',
-        stats: {
-          year,
-          goLiveMonth,
-          rowsParsed: rows.length,
-          rowsValid: 0,
-          rowsSkippedNoOak,
-          rowsSkippedInvalidMargin,
-          rowsSkippedNoMatch: 0,
-          rowsMatchedGoLives: 0,
-          rowsWouldUpdate: 0,
-          rowsUpdated: 0,
-          duplicateOakRows,
-        },
+        stats,
         preview: [],
       });
     }
@@ -209,25 +276,41 @@ export async function POST(request: Request) {
       }
     }
 
+    const stats = {
+      year,
+      goLiveMonth,
+      rowsParsed: rows.length,
+      rowsValid: validRows.length,
+      rowsSkippedNoOak,
+      rowsSkippedInvalidMargin,
+      rowsSkippedNoMatch,
+      rowsMatchedGoLives,
+      rowsWouldUpdate,
+      rowsUpdated,
+      duplicateOakRows,
+    };
+
+    if (!dryRun) {
+      await persistPaymarginImportRun({
+        supabase,
+        mode: 'commit',
+        status: 'success',
+        sourceFileName,
+        year,
+        goLiveMonth,
+        seasonalFactor,
+        stats,
+      });
+    }
+
     return NextResponse.json({
       success: true,
       mode: dryRun ? 'dry-run' : 'commit',
+      sourceFileName,
       warning: duplicateOakRows > 0
         ? `Es wurden ${duplicateOakRows} doppelte OAK-Zeilen gefunden. Je OAK wurde die letzte Zeile verwendet.`
         : undefined,
-      stats: {
-        year,
-        goLiveMonth,
-        rowsParsed: rows.length,
-        rowsValid: validRows.length,
-        rowsSkippedNoOak,
-        rowsSkippedInvalidMargin,
-        rowsSkippedNoMatch,
-        rowsMatchedGoLives,
-        rowsWouldUpdate,
-        rowsUpdated,
-        duplicateOakRows,
-      },
+      stats,
       preview,
     });
   } catch (error: any) {

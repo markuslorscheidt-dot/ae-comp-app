@@ -285,6 +285,7 @@ interface SalespipeAutoImportResponse {
 interface PaymarginImportResponse {
   success: boolean;
   mode?: 'dry-run' | 'commit';
+  sourceFileName?: string;
   stats?: {
     year: number;
     goLiveMonth: number;
@@ -306,6 +307,24 @@ interface PaymarginImportResponse {
     matchedGoLiveIds: string[];
   }>;
   warning?: string;
+  error?: string;
+}
+
+interface PaymarginImportRun {
+  id: string;
+  mode: 'dry-run' | 'commit';
+  status: 'success' | 'failed';
+  source_file_name: string;
+  year: number;
+  go_live_month: number;
+  rows_updated: number;
+  created_at: string;
+}
+
+interface PaymarginImportHistoryResponse {
+  success: boolean;
+  selectedMonthLastRun?: PaymarginImportRun | null;
+  latestRun?: PaymarginImportRun | null;
   error?: string;
 }
 
@@ -746,6 +765,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [paymarginImportLoading, setPaymarginImportLoading] = useState(false);
   const [paymarginImportError, setPaymarginImportError] = useState('');
   const [paymarginImportResult, setPaymarginImportResult] = useState<PaymarginImportResponse | null>(null);
+  const [paymarginHistoryLoading, setPaymarginHistoryLoading] = useState(false);
+  const [paymarginHistoryError, setPaymarginHistoryError] = useState('');
+  const [paymarginSelectedMonthLastRun, setPaymarginSelectedMonthLastRun] = useState<PaymarginImportRun | null>(null);
+  const [paymarginLatestRun, setPaymarginLatestRun] = useState<PaymarginImportRun | null>(null);
   
   // ========== NEW ARR: GRUNDEINSTELLUNGEN ==========
   const [newArrYear, setNewArrYear] = useState(currentYear);
@@ -1240,6 +1263,30 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     });
   };
 
+  const loadPaymarginImportHistory = useCallback(async (year: number, goLiveMonth: number) => {
+    setPaymarginHistoryLoading(true);
+    setPaymarginHistoryError('');
+    try {
+      const response = await fetch(
+        `/api/paymargin/import/history?year=${encodeURIComponent(String(year))}&goLiveMonth=${encodeURIComponent(
+          String(goLiveMonth)
+        )}`,
+        { method: 'GET' }
+      );
+      const data = (await response.json()) as PaymarginImportHistoryResponse;
+      if (!response.ok || !data.success) {
+        setPaymarginHistoryError(data.error || 'Paymargin-Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      setPaymarginSelectedMonthLastRun(data.selectedMonthLastRun || null);
+      setPaymarginLatestRun(data.latestRun || null);
+    } catch (err: any) {
+      setPaymarginHistoryError(err?.message || 'Paymargin-Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setPaymarginHistoryLoading(false);
+    }
+  }, []);
+
   const handleRunPaymarginCsvImport = async (dryRun: boolean) => {
     if (!paymarginCsvFile) {
       setPaymarginImportError('Bitte zuerst eine CSV-Datei auswählen.');
@@ -1266,6 +1313,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         return;
       }
       setPaymarginImportResult(data);
+      if (!dryRun) {
+        await loadPaymarginImportHistory(paymarginImportYear, paymarginGoLiveMonth);
+      }
     } catch (err: any) {
       setPaymarginImportError(err?.message || 'Paymargin-Import fehlgeschlagen.');
     } finally {
@@ -1407,6 +1457,17 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     if (activeTab !== 'imports' || !selectedSalespipeImportRunId) return;
     loadSalespipeImportRunItems(selectedSalespipeImportRunId);
   }, [activeTab, selectedSalespipeImportRunId, loadSalespipeImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || activeImportSubTab !== 'paymarginImport') return;
+    loadPaymarginImportHistory(paymarginImportYear, paymarginGoLiveMonth);
+  }, [
+    activeTab,
+    activeImportSubTab,
+    paymarginImportYear,
+    paymarginGoLiveMonth,
+    loadPaymarginImportHistory,
+  ]);
 
   const handleAutoImportToggle = async (enabled: boolean) => {
     setAutoImportEnabled(enabled);
@@ -4908,6 +4969,27 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                     Erwartete Spalten: OAK ID, Net Margin
                   </p>
                 </div>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-1 text-xs">
+                <div className="text-gray-700">
+                  <span className="font-semibold">CSV für ausgewählte Kohorte ({MONTHS[paymarginGoLiveMonth - 1]} {paymarginImportYear}):</span>{' '}
+                  {paymarginSelectedMonthLastRun
+                    ? `${paymarginSelectedMonthLastRun.source_file_name} (${new Date(
+                        paymarginSelectedMonthLastRun.created_at
+                      ).toLocaleString('de-DE')})`
+                    : 'Noch kein Commit-Import protokolliert.'}
+                </div>
+                <div className="text-gray-700">
+                  <span className="font-semibold">Letzte wirksame CSV-Quelle (aktuelle Datenbasis):</span>{' '}
+                  {paymarginLatestRun
+                    ? `${paymarginLatestRun.source_file_name} — ${MONTHS[paymarginLatestRun.go_live_month - 1]} ${
+                        paymarginLatestRun.year
+                      } (${new Date(paymarginLatestRun.created_at).toLocaleString('de-DE')})`
+                    : 'Noch kein Commit-Import protokolliert.'}
+                </div>
+                {paymarginHistoryLoading ? <div className="text-gray-500">Historie wird geladen...</div> : null}
+                {paymarginHistoryError ? <div className="text-red-700">{paymarginHistoryError}</div> : null}
               </div>
 
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
