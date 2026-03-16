@@ -9,6 +9,7 @@ import {
   GoLive,
   DEFAULT_SUBS_TIERS,
   DEFAULT_PAY_TIERS,
+  DEFAULT_TOTAL_ARR_TIERS,
   DEFAULT_MONTHLY_GO_LIVE_TARGETS,
   DEFAULT_MONTHLY_INBOUND_TARGETS,
   DEFAULT_MONTHLY_OUTBOUND_TARGETS,
@@ -303,6 +304,8 @@ function parseSettings(data: any): AESettings {
   // Pay ARR-Ziele: Aus DB laden ODER aus Sheet ODER berechnet (Legacy)
   const payTargets = data.monthly_pay_targets || data.monthly_pay_arr_targets || 
     calculateMonthlyPayTargets(subsTargets, payArrFactor);
+  const totalArrTargets = data.monthly_total_arr_targets ||
+    subsTargets.map((subs, idx) => (subs || 0) + (payTargets[idx] || 0));
 
   return {
     id: data.id,
@@ -310,6 +313,10 @@ function parseSettings(data: any): AESettings {
     year: data.year,
     region: data.region || 'DACH',
     ote: Number(data.ote) || DEFAULT_SETTINGS.ote,
+    base_salary: Number(data.base_salary) || DEFAULT_SETTINGS.base_salary,
+    variable_ote: Number(data.variable_ote) || Number(data.ote) || DEFAULT_SETTINGS.variable_ote,
+    arr_multiple: Number(data.arr_multiple) || DEFAULT_SETTINGS.arr_multiple,
+    gross_margin_pct: Number(data.gross_margin_pct) || DEFAULT_SETTINGS.gross_margin_pct,
     monthly_go_live_targets: goLiveTargets,
     // NEU: Go-Live Kategorien
     monthly_inbound_targets: inboundTargets,
@@ -323,6 +330,7 @@ function parseSettings(data: any): AESettings {
     pay_arr_factor: payArrFactor,
     monthly_subs_targets: subsTargets,
     monthly_pay_targets: payTargets,
+    monthly_total_arr_targets: totalArrTargets,
     // NEU: Pay ARR direkt aus Sheet
     monthly_pay_arr_targets: data.monthly_pay_arr_targets || null,
     terminal_base: Number(data.terminal_base) || DEFAULT_SETTINGS.terminal_base,
@@ -330,6 +338,7 @@ function parseSettings(data: any): AESettings {
     terminal_penetration_threshold: Number(data.terminal_penetration_threshold) || DEFAULT_SETTINGS.terminal_penetration_threshold,
     subs_tiers: data.subs_tiers || DEFAULT_SUBS_TIERS,
     pay_tiers: data.pay_tiers || DEFAULT_PAY_TIERS,
+    total_arr_tiers: data.total_arr_tiers || DEFAULT_TOTAL_ARR_TIERS,
     // NEU: Google Sheets Integration
     google_sheet_url: data.google_sheet_url || null,
     use_google_sheet: data.use_google_sheet || false,
@@ -391,6 +400,10 @@ export function useSettings(userId: string | undefined) {
     if (updates.year !== undefined) updateData.year = updates.year;
     if (updates.region !== undefined) updateData.region = updates.region;
     if (updates.ote !== undefined) updateData.ote = updates.ote;
+    if (updates.base_salary !== undefined) updateData.base_salary = updates.base_salary;
+    if (updates.variable_ote !== undefined) updateData.variable_ote = updates.variable_ote;
+    if (updates.arr_multiple !== undefined) updateData.arr_multiple = updates.arr_multiple;
+    if (updates.gross_margin_pct !== undefined) updateData.gross_margin_pct = updates.gross_margin_pct;
     if (updates.monthly_go_live_targets !== undefined) updateData.monthly_go_live_targets = updates.monthly_go_live_targets;
     // NEU: Go-Live Kategorien
     if (updates.monthly_inbound_targets !== undefined) updateData.monthly_inbound_targets = updates.monthly_inbound_targets;
@@ -404,6 +417,7 @@ export function useSettings(userId: string | undefined) {
     if (updates.pay_arr_factor !== undefined) updateData.pay_arr_factor = updates.pay_arr_factor;
     if (updates.monthly_subs_targets !== undefined) updateData.monthly_subs_targets = updates.monthly_subs_targets;
     if (updates.monthly_pay_targets !== undefined) updateData.monthly_pay_targets = updates.monthly_pay_targets;
+    if (updates.monthly_total_arr_targets !== undefined) updateData.monthly_total_arr_targets = updates.monthly_total_arr_targets;
     // NEU: Pay ARR direkt
     if (updates.monthly_pay_arr_targets !== undefined) updateData.monthly_pay_arr_targets = updates.monthly_pay_arr_targets;
     if (updates.terminal_base !== undefined) updateData.terminal_base = updates.terminal_base;
@@ -411,6 +425,7 @@ export function useSettings(userId: string | undefined) {
     if (updates.terminal_penetration_threshold !== undefined) updateData.terminal_penetration_threshold = updates.terminal_penetration_threshold;
     if (updates.subs_tiers !== undefined) updateData.subs_tiers = updates.subs_tiers;
     if (updates.pay_tiers !== undefined) updateData.pay_tiers = updates.pay_tiers;
+    if (updates.total_arr_tiers !== undefined) updateData.total_arr_tiers = updates.total_arr_tiers;
     // NEU: Google Sheets Integration
     if (updates.google_sheet_url !== undefined) updateData.google_sheet_url = updates.google_sheet_url;
     if (updates.use_google_sheet !== undefined) updateData.use_google_sheet = updates.use_google_sheet;
@@ -951,6 +966,10 @@ export function useSettingsForUser(userId: string | undefined, year: number = 20
     if (updates.year !== undefined) updateData.year = updates.year;
     if (updates.region !== undefined) updateData.region = updates.region;
     if (updates.ote !== undefined) updateData.ote = updates.ote;
+    if (updates.base_salary !== undefined) updateData.base_salary = updates.base_salary;
+    if (updates.variable_ote !== undefined) updateData.variable_ote = updates.variable_ote;
+    if (updates.arr_multiple !== undefined) updateData.arr_multiple = updates.arr_multiple;
+    if (updates.gross_margin_pct !== undefined) updateData.gross_margin_pct = updates.gross_margin_pct;
     if (updates.monthly_go_live_targets !== undefined) updateData.monthly_go_live_targets = updates.monthly_go_live_targets;
     // NEU: Go-Live Kategorien
     if (updates.monthly_inbound_targets !== undefined) updateData.monthly_inbound_targets = updates.monthly_inbound_targets;
@@ -964,6 +983,7 @@ export function useSettingsForUser(userId: string | undefined, year: number = 20
     if (updates.pay_arr_factor !== undefined) updateData.pay_arr_factor = updates.pay_arr_factor;
     if (updates.monthly_subs_targets !== undefined) updateData.monthly_subs_targets = updates.monthly_subs_targets;
     if (updates.monthly_pay_targets !== undefined) updateData.monthly_pay_targets = updates.monthly_pay_targets;
+    if (updates.monthly_total_arr_targets !== undefined) updateData.monthly_total_arr_targets = updates.monthly_total_arr_targets;
     // NEU: Pay ARR direkt
     if (updates.monthly_pay_arr_targets !== undefined) updateData.monthly_pay_arr_targets = updates.monthly_pay_arr_targets;
     if (updates.terminal_base !== undefined) updateData.terminal_base = updates.terminal_base;
@@ -971,6 +991,7 @@ export function useSettingsForUser(userId: string | undefined, year: number = 20
     if (updates.terminal_penetration_threshold !== undefined) updateData.terminal_penetration_threshold = updates.terminal_penetration_threshold;
     if (updates.subs_tiers !== undefined) updateData.subs_tiers = updates.subs_tiers;
     if (updates.pay_tiers !== undefined) updateData.pay_tiers = updates.pay_tiers;
+    if (updates.total_arr_tiers !== undefined) updateData.total_arr_tiers = updates.total_arr_tiers;
     // NEU: Google Sheets Integration
     if (updates.google_sheet_url !== undefined) updateData.google_sheet_url = updates.google_sheet_url;
     if (updates.use_google_sheet !== undefined) updateData.use_google_sheet = updates.use_google_sheet;

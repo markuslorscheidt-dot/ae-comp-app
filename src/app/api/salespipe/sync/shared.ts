@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
 const SALESPIPE_AUTO_IMPORT_KEY = 'salespipe_auto_import_enabled';
+const SALESPIPE_SOURCE_TAB = 'mirror_salespipe_raw';
+const SALESPIPE_LOG_TAB = 'Import_Log Salespipe';
 
 type ImportTrigger = 'manual' | 'cron';
 type ImportStatus = 'success' | 'partial' | 'failed' | 'skipped';
@@ -162,6 +164,71 @@ function getServerSupabase() {
   return createClient(supabaseUrl, serviceRoleKey);
 }
 
+async function appendGoogleSheetImportLog(params: {
+  triggeredBy: ImportTrigger;
+  status: ImportStatus;
+  autoImportEnabled: boolean;
+  sheetRange?: string | null;
+  skipped?: boolean;
+  reason?: string | null;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport?: number;
+    imported?: number;
+    failed?: number;
+    duplicates?: number;
+    updated?: number;
+  };
+}) {
+  try {
+    const apiKey = process.env.GOOGLE_SHEETS_API_KEY;
+    const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
+    if (!apiKey || !spreadsheetId) return;
+
+    const logRange = `${SALESPIPE_LOG_TAB}!A:Z`;
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
+      logRange
+    )}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&key=${apiKey}`;
+
+    const { triggeredBy, status, autoImportEnabled, sheetRange, skipped = false, reason = null, stats } = params;
+    const values = [[
+      new Date().toISOString(),
+      'salespipe',
+      triggeredBy,
+      status,
+      autoImportEnabled ? 'true' : 'false',
+      skipped ? 'true' : 'false',
+      sheetRange || '',
+      String(stats?.totalRowsFromSheet ?? 0),
+      String(stats?.parsedRows ?? 0),
+      String(stats?.validRows ?? 0),
+      String(stats?.invalidRows ?? 0),
+      String(stats?.toImport ?? 0),
+      String(stats?.imported ?? 0),
+      String(stats?.failed ?? 0),
+      String(stats?.duplicates ?? 0),
+      String(stats?.updated ?? 0),
+      reason || '',
+    ]];
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values }),
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      console.error('Salespipe Google-Sheet-Log fehlgeschlagen:', data?.error?.message || response.statusText);
+    }
+  } catch (e: any) {
+    console.error('Salespipe Google-Sheet-Log Exception:', e?.message || e);
+  }
+}
+
 async function persistImportRun(params: {
   supabase: ReturnType<typeof createClient>;
   triggeredBy: ImportTrigger;
@@ -197,6 +264,16 @@ async function persistImportRun(params: {
       errors = [],
       warnings = [],
     } = params;
+
+    await appendGoogleSheetImportLog({
+      triggeredBy,
+      status,
+      autoImportEnabled,
+      sheetRange,
+      skipped,
+      reason,
+      stats,
+    });
 
     const { data: run, error: runError } = await supabase
       .from('salespipe_import_runs')
@@ -289,7 +366,10 @@ export async function getSalespipeAutoImportState() {
 export async function extractSheetRows(): Promise<ExtractResult> {
   const apiKey = process.env.GOOGLE_SHEETS_API_KEY;
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const range = process.env.GOOGLE_SHEETS_RANGE_SALESPIPE || 'mirror_salespipe_raw!A:Z';
+  const configuredRange = (process.env.GOOGLE_SHEETS_RANGE_SALESPIPE || '').trim();
+  const range = configuredRange && configuredRange !== 'Salespipe!A:Z'
+    ? configuredRange
+    : `${SALESPIPE_SOURCE_TAB}!A:Z`;
 
   if (!apiKey || !spreadsheetId) {
     return {
@@ -311,7 +391,7 @@ export async function extractSheetRows(): Promise<ExtractResult> {
       success: false,
       status: response.status,
       error: apiErrorMessage.includes('Unable to parse range')
-        ? `Google Sheets Range ungueltig: ${range}. Bitte GOOGLE_SHEETS_RANGE_SALESPIPE in .env.local / Vercel auf den exakten Tab-Namen setzen (z. B. mirror_salespipe_raw!A:Z).`
+        ? `Google Sheets Range ungueltig: ${range}. Bitte GOOGLE_SHEETS_RANGE_SALESPIPE in .env.local / Vercel auf den exakten Tab-Namen setzen (z. B. ${SALESPIPE_SOURCE_TAB}!A:Z).`
         : apiErrorMessage,
       details: data,
     };
@@ -518,7 +598,7 @@ export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; a
       decision_criteria: row.decisionCriteria || null,
       created_date: row.createdDate,
       opportunity_owner: row.opportunityOwner || null,
-      source_tab: 'mirror_salespipe_raw',
+      source_tab: SALESPIPE_SOURCE_TAB,
       source_row_number: row.rowNumber,
       updated_at: new Date().toISOString(),
     });

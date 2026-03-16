@@ -1,11 +1,21 @@
 'use client';
 
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { User, UserRole, UserRoleHistoryRecord, ProvisionTier, AESettings, GoLive, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, BUSINESS_AREA_LABELS, BusinessArea, DEFAULT_SETTINGS, DEFAULT_SUBS_TIERS, DEFAULT_PAY_TIERS, calculateMonthlySubsTargets, calculateTotalGoLives } from '@/lib/types';
+import { User, UserRole, UserRoleHistoryRecord, ProvisionTier, AESettings, GoLive, isPlannable, canReceiveGoLives, getDefaultCommissionRelevant, BUSINESS_AREA_LABELS, BusinessArea, DEFAULT_SETTINGS, DEFAULT_SUBS_TIERS, DEFAULT_PAY_TIERS, DEFAULT_TOTAL_ARR_TIERS, calculateMonthlySubsTargets, calculateTotalGoLives } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
 import { useAllUsers, useAllSettings, useGoLivesForUser } from '@/lib/hooks';
 import { getPermissions } from '@/lib/permissions';
-import { formatCurrency, calculateOTEProjections, validateOTESettings } from '@/lib/calculations';
+import {
+  formatCurrency,
+  calculateOTEProjections,
+  validateOTESettings,
+  calculateMultipleCalibration,
+  getProvisionRate,
+  calculateOtc,
+  calculateQuotaFromMultiple,
+  calculateRequiredGrossMarginPctForPayback,
+  calculateRequiredArrMultipleForPayback,
+} from '@/lib/calculations';
 import { supabase } from '@/lib/supabase';
 import GoLiveForm from './GoLiveForm';
 import PartnerManagement from './PartnerManagement';
@@ -40,6 +50,8 @@ interface DLTPlanzahlen {
   created_at?: string;
   updated_at?: string;
 }
+
+type RoleHistorySlice = Pick<UserRoleHistoryRecord, 'role' | 'effective_from' | 'effective_to'>;
 
 interface DLTSettingsProps {
   user: User;
@@ -270,6 +282,33 @@ interface SalespipeAutoImportResponse {
   error?: string;
 }
 
+interface PaymarginImportResponse {
+  success: boolean;
+  mode?: 'dry-run' | 'commit';
+  stats?: {
+    year: number;
+    goLiveMonth: number;
+    rowsParsed: number;
+    rowsValid: number;
+    rowsSkippedNoOak: number;
+    rowsSkippedInvalidMargin: number;
+    rowsSkippedNoMatch: number;
+    rowsMatchedGoLives: number;
+    rowsWouldUpdate: number;
+    rowsUpdated: number;
+    duplicateOakRows: number;
+  };
+  preview?: Array<{
+    oakId: number;
+    netMarginMonthly: number;
+    normalizedMonthly: number;
+    payArr: number;
+    matchedGoLiveIds: string[];
+  }>;
+  warning?: string;
+  error?: string;
+}
+
 interface GoLiveManualLockResponse {
   success: boolean;
   enabled?: boolean;
@@ -497,6 +536,7 @@ const ROLE_COLORS: Partial<Record<UserRole, string>> = {
 
 // Months for Business Targets
 const MONTHS = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+const DEFAULT_SEASONAL_FACTORS = [0.85, 0.9, 1.0, 0.93, 1.0, 1.03, 0.92, 0.88, 1.02, 1.08, 1.15, 1.24];
 
 // Defaultwerte für NEW ARR (DLT Planzahlen Übersicht)
 const NEW_ARR_DEFAULTS = {
@@ -604,7 +644,7 @@ function parseExpandingArrData(raw: unknown): ExpandingArrData {
 }
 
 type SettingsTab = 'users' | 'imports' | 'permissions' | 'areas' | 'planning' | 'system';
-type ImportSubTab = 'newBusinessGoLives' | 'churnImports' | 'upDownsellsImport' | 'salespipeImport';
+type ImportSubTab = 'newBusinessGoLives' | 'churnImports' | 'upDownsellsImport' | 'salespipeImport' | 'paymarginImport';
 
 export default function DLTSettings({ user }: DLTSettingsProps) {
   const { t } = useLanguage();
@@ -698,6 +738,14 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [selectedSalespipeImportRunItems, setSelectedSalespipeImportRunItems] = useState<SalespipeImportRunItem[]>(
     []
   );
+  const [paymarginCsvFile, setPaymarginCsvFile] = useState<File | null>(null);
+  const [paymarginImportYear, setPaymarginImportYear] = useState(currentYear);
+  const [paymarginGoLiveMonth, setPaymarginGoLiveMonth] = useState(1);
+  const [paymarginSeasonalFactors, setPaymarginSeasonalFactors] = useState<number[]>([...DEFAULT_SEASONAL_FACTORS]);
+  const [paymarginImportMode, setPaymarginImportMode] = useState<'dry-run' | 'commit'>('dry-run');
+  const [paymarginImportLoading, setPaymarginImportLoading] = useState(false);
+  const [paymarginImportError, setPaymarginImportError] = useState('');
+  const [paymarginImportResult, setPaymarginImportResult] = useState<PaymarginImportResponse | null>(null);
   
   // ========== NEW ARR: GRUNDEINSTELLUNGEN ==========
   const [newArrYear, setNewArrYear] = useState(currentYear);
@@ -760,6 +808,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   
   // UI State
   const [businessTargetsExpanded, setBusinessTargetsExpanded] = useState(true);
+  const [aeBusinessTargetsExpanded, setAeBusinessTargetsExpanded] = useState(true);
   const [planningSectionsExpanded, setPlanningSectionsExpanded] = useState({
     newArr: true,
     expandingArr: true,
@@ -777,10 +826,21 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [selectedAEId, setSelectedAEId] = useState<string | null>(null);
   const [aePercentages, setAePercentages] = useState<Map<string, number>>(new Map());
   const [aeOTEs, setAeOTEs] = useState<Map<string, number>>(new Map());
+  const [aeBaseSalaries, setAeBaseSalaries] = useState<Map<string, number>>(new Map());
+  const [aeVariableOTEs, setAeVariableOTEs] = useState<Map<string, number>>(new Map());
+  const [aeArrMultiples, setAeArrMultiples] = useState<Map<string, number>>(new Map());
+  const [aeGrossMargins, setAeGrossMargins] = useState<Map<string, number>>(new Map());
   const [aeTerminalBase, setAeTerminalBase] = useState<Map<string, number>>(new Map());
   const [aeTerminalBonus, setAeTerminalBonus] = useState<Map<string, number>>(new Map());
   const [aeSubsTiers, setAeSubsTiers] = useState<Map<string, ProvisionTier[]>>(new Map());
   const [aePayTiers, setAePayTiers] = useState<Map<string, ProvisionTier[]>>(new Map());
+  const [aeTotalArrTiers, setAeTotalArrTiers] = useState<Map<string, ProvisionTier[]>>(new Map());
+  const [whatIfTargetPaybackMonths, setWhatIfTargetPaybackMonths] = useState(6);
+  const [whatIfSolveFor, setWhatIfSolveFor] = useState<'margin' | 'multiple'>('margin');
+  const [whatIfAcv, setWhatIfAcv] = useState(3300);
+  const [tierGuideTargetPayoutAt100, setTierGuideTargetPayoutAt100] = useState(DEFAULT_SETTINGS.variable_ote);
+  const [tierGuideProfile, setTierGuideProfile] = useState<'conservative' | 'balanced' | 'aggressive'>('balanced');
+  const lastTierGuideAEIdRef = useRef<string | null>(null);
   
   // Load all users
   const { users, loading, refetch: refetchUsers, updateUserRole } = useAllUsers();
@@ -789,6 +849,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [savingUser, setSavingUser] = useState(false);
   const [userEditError, setUserEditError] = useState('');
   const [roleHistory, setRoleHistory] = useState<UserRoleHistoryRecord[]>([]);
+  const [aeRoleHistoryByUser, setAeRoleHistoryByUser] = useState<Record<string, RoleHistorySlice[]>>({});
   const [plannedRoleChanges, setPlannedRoleChanges] = useState<Record<string, { role: UserRole; effective_from: string }>>({});
   const [selectedRole, setSelectedRole] = useState<UserRole | ''>('');
   const [roleEffectiveFrom, setRoleEffectiveFrom] = useState(new Date().toISOString().slice(0, 10));
@@ -1170,6 +1231,47 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setSalespipeImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
     }
   }, []);
+
+  const handlePaymarginFactorChange = (idx: number, value: number) => {
+    setPaymarginSeasonalFactors((prev) => {
+      const next = [...prev];
+      next[idx] = Number.isFinite(value) ? value : 1;
+      return next;
+    });
+  };
+
+  const handleRunPaymarginCsvImport = async (dryRun: boolean) => {
+    if (!paymarginCsvFile) {
+      setPaymarginImportError('Bitte zuerst eine CSV-Datei auswählen.');
+      return;
+    }
+    setPaymarginImportLoading(true);
+    setPaymarginImportError('');
+    setPaymarginImportResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', paymarginCsvFile);
+      formData.append('year', String(paymarginImportYear));
+      formData.append('goLiveMonth', String(paymarginGoLiveMonth));
+      formData.append('seasonalFactors', JSON.stringify(paymarginSeasonalFactors));
+      formData.append('dryRun', dryRun ? 'true' : 'false');
+
+      const response = await fetch('/api/paymargin/import', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = (await response.json()) as PaymarginImportResponse;
+      if (!response.ok || !data.success) {
+        setPaymarginImportError(data.error || 'Paymargin-Import fehlgeschlagen.');
+        return;
+      }
+      setPaymarginImportResult(data);
+    } catch (err: any) {
+      setPaymarginImportError(err?.message || 'Paymargin-Import fehlgeschlagen.');
+    } finally {
+      setPaymarginImportLoading(false);
+    }
+  };
 
   const loadAutoImportState = useCallback(async () => {
     setAutoImportLoading(true);
@@ -1689,20 +1791,43 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       // DLT ist ab jetzt die zentrale Quelle für New ARR/Commission Settings pro AE.
       for (const ae of plannableUsers) {
         const percentage = aePercentages.get(ae.id) ?? 0;
-        const inboundTargets = calculateFromPercentage(businessInbound, percentage);
-        const outboundTargets = calculateFromPercentage(businessOutbound, percentage);
-        const partnershipTargets = calculateFromPercentage(businessPartnerships, percentage);
+        const activeInfo = aeActivityByUser.get(ae.id) || { activeFlags: new Array(12).fill(true), activeMonths: 12 };
+        const inboundTargetsRaw = calculateFromPercentage(businessInbound, percentage);
+        const outboundTargetsRaw = calculateFromPercentage(businessOutbound, percentage);
+        const partnershipTargetsRaw = calculateFromPercentage(businessPartnerships, percentage);
+        const goLiveTargetsRaw = calculateTotalGoLives(inboundTargetsRaw, outboundTargetsRaw, partnershipTargetsRaw);
+        const terminalSalesTargetsRaw = goLiveTargetsRaw.map((v) => Math.round(v * terminalSalesPercent / 100));
+        const tippingTargetsRaw = terminalSalesTargetsRaw.map((v) => Math.round(v * tippingPercent / 100));
+        const monthlySubsTargetsRaw = calculateMonthlySubsTargets(goLiveTargetsRaw, avgSubsBill);
+        const monthlyPayTargetsRaw = terminalSalesTargetsRaw.map((ts, i) => (ts * avgPayBillTerminal * 12) + (tippingTargetsRaw[i] * avgPayBillTipping * 12));
+        const rawTotalArrTarget = monthlySubsTargetsRaw.reduce(
+          (sum, v, i) => (activeInfo.activeFlags[i] ? sum + (v || 0) + (monthlyPayTargetsRaw[i] || 0) : sum),
+          0
+        );
+        const baseSalary = aeBaseSalaries.get(ae.id) ?? DEFAULT_SETTINGS.base_salary;
+        const variableOte = aeVariableOTEs.get(ae.id) ?? (aeOTEs.get(ae.id) ?? DEFAULT_SETTINGS.variable_ote);
+        const arrMultiple = aeArrMultiples.get(ae.id) ?? DEFAULT_SETTINGS.arr_multiple;
+        const quotaArr = calculateQuotaFromMultiple(calculateOtc(baseSalary, variableOte), arrMultiple) * (activeInfo.activeMonths / 12);
+        const quotaCalibrationFactor = rawTotalArrTarget > 0 ? quotaArr / rawTotalArrTarget : 1;
+        const inboundTargets = inboundTargetsRaw.map((v, i) => (activeInfo.activeFlags[i] ? Math.max(0, Math.round((v || 0) * quotaCalibrationFactor)) : 0));
+        const outboundTargets = outboundTargetsRaw.map((v, i) => (activeInfo.activeFlags[i] ? Math.max(0, Math.round((v || 0) * quotaCalibrationFactor)) : 0));
+        const partnershipTargets = partnershipTargetsRaw.map((v, i) => (activeInfo.activeFlags[i] ? Math.max(0, Math.round((v || 0) * quotaCalibrationFactor)) : 0));
         const goLiveTargets = calculateTotalGoLives(inboundTargets, outboundTargets, partnershipTargets);
         const terminalSalesTargets = goLiveTargets.map((v) => Math.round(v * terminalSalesPercent / 100));
         const tippingTargets = terminalSalesTargets.map((v) => Math.round(v * tippingPercent / 100));
-        const monthlySubsTargets = calculateMonthlySubsTargets(goLiveTargets, avgSubsBill);
-        const monthlyPayTargets = terminalSalesTargets.map((ts, i) => (ts * avgPayBillTerminal * 12) + (tippingTargets[i] * avgPayBillTipping * 12));
+        const monthlySubsTargets = calculateMonthlySubsTargets(goLiveTargets, avgSubsBill).map((v) => Math.max(0, Math.round(v || 0)));
+        const monthlyPayTargets = terminalSalesTargets.map((ts, i) => Math.max(0, Math.round((ts * avgPayBillTerminal * 12) + (tippingTargets[i] * avgPayBillTipping * 12))));
+        const monthlyTotalArrTargets = monthlySubsTargets.map((subs, i) => (subs || 0) + (monthlyPayTargets[i] || 0));
 
         const payload = {
           user_id: ae.id,
           year: newArrYear,
           region: newArrRegion,
           ote: aeOTEs.get(ae.id) ?? DEFAULT_SETTINGS.ote,
+          base_salary: baseSalary,
+          variable_ote: variableOte,
+          arr_multiple: arrMultiple,
+          gross_margin_pct: aeGrossMargins.get(ae.id) ?? DEFAULT_SETTINGS.gross_margin_pct,
           monthly_inbound_targets: inboundTargets,
           monthly_outbound_targets: outboundTargets,
           monthly_partnerships_targets: partnershipTargets,
@@ -1710,14 +1835,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
           monthly_go_live_targets: goLiveTargets,
           monthly_subs_targets: monthlySubsTargets,
           monthly_pay_targets: monthlyPayTargets,
+          monthly_total_arr_targets: monthlyTotalArrTargets,
           avg_subs_bill: avgSubsBill,
           avg_pay_bill: avgPayBillTerminal,
           avg_pay_bill_tipping: avgPayBillTipping,
           terminal_base: aeTerminalBase.get(ae.id) ?? DEFAULT_SETTINGS.terminal_base,
           terminal_bonus: aeTerminalBonus.get(ae.id) ?? DEFAULT_SETTINGS.terminal_bonus,
           terminal_penetration_threshold: terminalPenetrationThreshold / 100,
-          subs_tiers: aeSubsTiers.get(ae.id) ?? DEFAULT_SUBS_TIERS,
-          pay_tiers: aePayTiers.get(ae.id) ?? DEFAULT_PAY_TIERS,
+          subs_tiers: aeTotalArrTiers.get(ae.id) ?? DEFAULT_TOTAL_ARR_TIERS,
+          pay_tiers: aeTotalArrTiers.get(ae.id) ?? DEFAULT_TOTAL_ARR_TIERS,
+          total_arr_tiers: aeTotalArrTiers.get(ae.id) ?? DEFAULT_TOTAL_ARR_TIERS,
           pay_arr_factor: 0,
           updated_at: new Date().toISOString(),
         };
@@ -1807,6 +1934,46 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     [users]
   );
 
+  useEffect(() => {
+    const loadRoleHistoryForUsers = async () => {
+      if (users.length === 0) {
+        setAeRoleHistoryByUser({});
+        return;
+      }
+
+      const userIds = users.map((u) => u.id);
+      const { data, error } = await supabase
+        .from('user_role_history')
+        .select('user_id, role, effective_from, effective_to')
+        .in('user_id', userIds);
+
+      if (error) {
+        console.error('Fehler beim Laden der Rollenhistorie fuer AE-Kalkulation:', error);
+        setAeRoleHistoryByUser({});
+        return;
+      }
+
+      const grouped: Record<string, RoleHistorySlice[]> = {};
+      (data || []).forEach((entry: { user_id: string; role: UserRole; effective_from: string; effective_to?: string | null }) => {
+        const userId = entry.user_id;
+        if (!grouped[userId]) grouped[userId] = [];
+        grouped[userId].push({
+          role: entry.role,
+          effective_from: entry.effective_from,
+          effective_to: entry.effective_to ?? null,
+        });
+      });
+
+      Object.keys(grouped).forEach((uid) => {
+        grouped[uid].sort((a, b) => a.effective_from.localeCompare(b.effective_from));
+      });
+
+      setAeRoleHistoryByUser(grouped);
+    };
+
+    loadRoleHistoryForUsers();
+  }, [users]);
+
   const calculateFromPercentage = useCallback((businessValues: number[], percentage: number): number[] => {
     return businessValues.map((val) => Math.round(val * percentage / 100));
   }, []);
@@ -1822,10 +1989,15 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
 
     const nextPercentages = new Map<string, number>();
     const nextOTEs = new Map<string, number>();
+    const nextBaseSalaries = new Map<string, number>();
+    const nextVariableOTEs = new Map<string, number>();
+    const nextArrMultiples = new Map<string, number>();
+    const nextGrossMargins = new Map<string, number>();
     const nextTerminalBase = new Map<string, number>();
     const nextTerminalBonus = new Map<string, number>();
     const nextSubsTiers = new Map<string, ProvisionTier[]>();
     const nextPayTiers = new Map<string, ProvisionTier[]>();
+    const nextTotalArrTiers = new Map<string, ProvisionTier[]>();
 
     plannableUsers.forEach((u, idx) => {
       const isLast = idx === plannableUsers.length - 1;
@@ -1834,18 +2006,29 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       const existing = allSettings.find((s) => s.user_id === u.id);
       nextPercentages.set(u.id, existing?.target_percentage ?? defaultPercent);
       nextOTEs.set(u.id, existing?.ote ?? DEFAULT_SETTINGS.ote);
+      nextBaseSalaries.set(u.id, existing?.base_salary ?? DEFAULT_SETTINGS.base_salary);
+      nextVariableOTEs.set(u.id, existing?.variable_ote ?? existing?.ote ?? DEFAULT_SETTINGS.variable_ote);
+      nextArrMultiples.set(u.id, existing?.arr_multiple ?? DEFAULT_SETTINGS.arr_multiple);
+      nextGrossMargins.set(u.id, existing?.gross_margin_pct ?? DEFAULT_SETTINGS.gross_margin_pct);
       nextTerminalBase.set(u.id, existing?.terminal_base ?? DEFAULT_SETTINGS.terminal_base);
       nextTerminalBonus.set(u.id, existing?.terminal_bonus ?? DEFAULT_SETTINGS.terminal_bonus);
-      nextSubsTiers.set(u.id, existing?.subs_tiers ?? DEFAULT_SUBS_TIERS);
-      nextPayTiers.set(u.id, existing?.pay_tiers ?? DEFAULT_PAY_TIERS);
+      const unifiedTiers = existing?.total_arr_tiers ?? existing?.subs_tiers ?? existing?.pay_tiers ?? DEFAULT_TOTAL_ARR_TIERS;
+      nextSubsTiers.set(u.id, unifiedTiers);
+      nextPayTiers.set(u.id, unifiedTiers);
+      nextTotalArrTiers.set(u.id, unifiedTiers);
     });
 
     setAePercentages(nextPercentages);
     setAeOTEs(nextOTEs);
+    setAeBaseSalaries(nextBaseSalaries);
+    setAeVariableOTEs(nextVariableOTEs);
+    setAeArrMultiples(nextArrMultiples);
+    setAeGrossMargins(nextGrossMargins);
     setAeTerminalBase(nextTerminalBase);
     setAeTerminalBonus(nextTerminalBonus);
     setAeSubsTiers(nextSubsTiers);
     setAePayTiers(nextPayTiers);
+    setAeTotalArrTiers(nextTotalArrTiers);
     setSelectedAEId((prev) => (prev && plannableUsers.some((u) => u.id === prev) ? prev : plannableUsers[0].id));
   }, [plannableUsers, allSettings]);
   
@@ -2156,12 +2339,77 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     () => plannableUsers.find((u) => u.id === selectedAEId) || null,
     [plannableUsers, selectedAEId]
   );
+  const isExitedUser = useCallback((user: User) => Boolean(user.exit_date) || user.is_active === false, []);
   const selectedAEPercentage = selectedAEId ? (aePercentages.get(selectedAEId) ?? 0) : 0;
   const selectedAEOTE = selectedAEId ? (aeOTEs.get(selectedAEId) ?? DEFAULT_SETTINGS.ote) : DEFAULT_SETTINGS.ote;
+  const selectedAEBaseSalary = selectedAEId ? (aeBaseSalaries.get(selectedAEId) ?? DEFAULT_SETTINGS.base_salary) : DEFAULT_SETTINGS.base_salary;
+  const selectedAEVariableOTE = selectedAEId ? (aeVariableOTEs.get(selectedAEId) ?? DEFAULT_SETTINGS.variable_ote) : DEFAULT_SETTINGS.variable_ote;
+  const selectedAEArrMultiple = selectedAEId ? (aeArrMultiples.get(selectedAEId) ?? DEFAULT_SETTINGS.arr_multiple) : DEFAULT_SETTINGS.arr_multiple;
+  const selectedAEGrossMargin = selectedAEId ? (aeGrossMargins.get(selectedAEId) ?? DEFAULT_SETTINGS.gross_margin_pct) : DEFAULT_SETTINGS.gross_margin_pct;
   const selectedTerminalBase = selectedAEId ? (aeTerminalBase.get(selectedAEId) ?? DEFAULT_SETTINGS.terminal_base) : DEFAULT_SETTINGS.terminal_base;
   const selectedTerminalBonus = selectedAEId ? (aeTerminalBonus.get(selectedAEId) ?? DEFAULT_SETTINGS.terminal_bonus) : DEFAULT_SETTINGS.terminal_bonus;
   const selectedSubsTiers = selectedAEId ? (aeSubsTiers.get(selectedAEId) ?? DEFAULT_SUBS_TIERS) : DEFAULT_SUBS_TIERS;
   const selectedPayTiers = selectedAEId ? (aePayTiers.get(selectedAEId) ?? DEFAULT_PAY_TIERS) : DEFAULT_PAY_TIERS;
+  const selectedTotalArrTiers = selectedAEId ? (aeTotalArrTiers.get(selectedAEId) ?? DEFAULT_TOTAL_ARR_TIERS) : DEFAULT_TOTAL_ARR_TIERS;
+  const aeActivityByUser = useMemo(() => {
+    const result = new Map<string, { activeFlags: boolean[]; activeMonths: number }>();
+    const normalizeDate = (v?: string | null) => (v ? String(v).slice(0, 10) : null);
+    const monthDate = (month: number) => `${newArrYear}-${String(month).padStart(2, '0')}-01`;
+
+    plannableUsers.forEach((u) => {
+      const history = aeRoleHistoryByUser[u.id] || [];
+      const entryDate = normalizeDate(u.entry_date || u.start_date || null);
+      const exitDate = normalizeDate(u.exit_date || null);
+      const flags: boolean[] = [];
+      const earliestHistoryFrom = history.length > 0 ? normalizeDate(history[0].effective_from) : null;
+
+      for (let month = 1; month <= 12; month += 1) {
+        const currentDate = monthDate(month);
+        const userActive =
+          (!entryDate || currentDate >= entryDate) &&
+          (!exitDate || currentDate <= exitDate);
+
+        if (!userActive) {
+          flags.push(false);
+          continue;
+        }
+
+        const matchingHistory = [...history]
+          .reverse()
+          .find(
+            (h) =>
+              normalizeDate(h.effective_from) !== null &&
+              currentDate >= (normalizeDate(h.effective_from) as string) &&
+              (!normalizeDate(h.effective_to) || currentDate <= (normalizeDate(h.effective_to) as string))
+          );
+
+        let roleAtDate: UserRole | null = null;
+        if (matchingHistory) {
+          roleAtDate = matchingHistory.role;
+        } else if (history.length === 0) {
+          roleAtDate = u.role;
+        } else if (earliestHistoryFrom && currentDate < earliestHistoryFrom) {
+          // Vor dem ersten bekannten Rollenstart keine AE-Relevanz annehmen.
+          roleAtDate = null;
+        } else {
+          // Bei Luecken nach dem ersten Eintrag den zuletzt bekannten Stand verwenden.
+          const latestBefore = [...history]
+            .reverse()
+            .find((h) => normalizeDate(h.effective_from) && currentDate >= (normalizeDate(h.effective_from) as string));
+          roleAtDate = latestBefore?.role || u.role;
+        }
+
+        flags.push(roleAtDate ? isPlannable(roleAtDate) : false);
+      }
+
+      result.set(u.id, {
+        activeFlags: flags,
+        activeMonths: flags.filter(Boolean).length,
+      });
+    });
+
+    return result;
+  }, [plannableUsers, aeRoleHistoryByUser, newArrYear]);
 
   const selectedAEInbound = useMemo(
     () => calculateFromPercentage(businessInbound, selectedAEPercentage),
@@ -2175,9 +2423,77 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     () => calculateFromPercentage(businessPartnerships, selectedAEPercentage),
     [businessPartnerships, selectedAEPercentage, calculateFromPercentage]
   );
-  const selectedAEGoLiveTargets = useMemo(
+  const allMonthsActive = useMemo(() => new Array(12).fill(true), []);
+  const selectedAEActivity = selectedAEId ? aeActivityByUser.get(selectedAEId) : null;
+  const selectedAEActiveFlags = selectedAEActivity?.activeFlags ?? allMonthsActive;
+  const selectedAEActiveMonths = selectedAEActivity?.activeMonths ?? 12;
+  const selectedAEGoLiveTargetsRaw = useMemo(
     () => calculateTotalGoLives(selectedAEInbound, selectedAEOutbound, selectedAEPartnerships),
     [selectedAEInbound, selectedAEOutbound, selectedAEPartnerships]
+  );
+  const selectedAETerminalSalesRawByMonth = useMemo(
+    () => selectedAEGoLiveTargetsRaw.map((v) => Math.round(v * terminalSalesPercent / 100)),
+    [selectedAEGoLiveTargetsRaw, terminalSalesPercent]
+  );
+  const selectedAETippingRawByMonth = useMemo(
+    () => selectedAETerminalSalesRawByMonth.map((v) => Math.round(v * tippingPercent / 100)),
+    [selectedAETerminalSalesRawByMonth, tippingPercent]
+  );
+  const selectedAESubsTargetsRawByMonth = useMemo(
+    () => calculateMonthlySubsTargets(selectedAEGoLiveTargetsRaw, avgSubsBill),
+    [selectedAEGoLiveTargetsRaw, avgSubsBill]
+  );
+  const selectedAEPayTargetsRawByMonth = useMemo(
+    () =>
+      selectedAETerminalSalesRawByMonth.map(
+        (ts, i) => (ts * avgPayBillTerminal * 12) + (selectedAETippingRawByMonth[i] * avgPayBillTipping * 12)
+      ),
+    [selectedAETerminalSalesRawByMonth, selectedAETippingRawByMonth, avgPayBillTerminal, avgPayBillTipping]
+  );
+  const selectedAERawTotalArrTarget = useMemo(
+    () =>
+      selectedAESubsTargetsRawByMonth.reduce(
+        (sum, v, i) => (selectedAEActiveFlags[i] ? sum + (v || 0) + (selectedAEPayTargetsRawByMonth[i] || 0) : sum),
+        0
+      ),
+    [selectedAESubsTargetsRawByMonth, selectedAEPayTargetsRawByMonth, selectedAEActiveFlags]
+  );
+  const selectedAEQuotaArr = useMemo(
+    () =>
+      calculateQuotaFromMultiple(
+        calculateOtc(selectedAEBaseSalary, selectedAEVariableOTE),
+        selectedAEArrMultiple
+      ) * (selectedAEActiveMonths / 12),
+    [selectedAEBaseSalary, selectedAEVariableOTE, selectedAEArrMultiple, selectedAEActiveMonths]
+  );
+  const selectedAEQuotaCalibrationFactor = useMemo(
+    () => (selectedAERawTotalArrTarget > 0 ? selectedAEQuotaArr / selectedAERawTotalArrTarget : 1),
+    [selectedAERawTotalArrTarget, selectedAEQuotaArr]
+  );
+  const selectedAEInboundCalibrated = useMemo(
+    () =>
+      selectedAEInbound.map((v, i) =>
+        selectedAEActiveFlags[i] ? Math.max(0, Math.round((v || 0) * selectedAEQuotaCalibrationFactor)) : 0
+      ),
+    [selectedAEInbound, selectedAEQuotaCalibrationFactor, selectedAEActiveFlags]
+  );
+  const selectedAEOutboundCalibrated = useMemo(
+    () =>
+      selectedAEOutbound.map((v, i) =>
+        selectedAEActiveFlags[i] ? Math.max(0, Math.round((v || 0) * selectedAEQuotaCalibrationFactor)) : 0
+      ),
+    [selectedAEOutbound, selectedAEQuotaCalibrationFactor, selectedAEActiveFlags]
+  );
+  const selectedAEPartnershipsCalibrated = useMemo(
+    () =>
+      selectedAEPartnerships.map((v, i) =>
+        selectedAEActiveFlags[i] ? Math.max(0, Math.round((v || 0) * selectedAEQuotaCalibrationFactor)) : 0
+      ),
+    [selectedAEPartnerships, selectedAEQuotaCalibrationFactor, selectedAEActiveFlags]
+  );
+  const selectedAEGoLiveTargets = useMemo(
+    () => calculateTotalGoLives(selectedAEInboundCalibrated, selectedAEOutboundCalibrated, selectedAEPartnershipsCalibrated),
+    [selectedAEInboundCalibrated, selectedAEOutboundCalibrated, selectedAEPartnershipsCalibrated]
   );
   const selectedAEPayTerminalsByMonth = useMemo(
     () => selectedAEGoLiveTargets.map((v) => Math.round(v * payTerminalsPercent / 100)),
@@ -2191,17 +2507,86 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     () => selectedAETerminalSalesByMonth.map((v) => Math.round(v * tippingPercent / 100)),
     [selectedAETerminalSalesByMonth, tippingPercent]
   );
+  const selectedAESubsTargetsByMonth = useMemo(
+    () => calculateMonthlySubsTargets(selectedAEGoLiveTargets, avgSubsBill).map((v) => Math.max(0, Math.round(v || 0))),
+    [selectedAEGoLiveTargets, avgSubsBill]
+  );
+  const selectedAEPayTargetsByMonth = useMemo(
+    () =>
+      selectedAETerminalSalesByMonth.map(
+        (ts, i) => Math.max(0, Math.round((ts * avgPayBillTerminal * 12) + (selectedAETippingByMonth[i] * avgPayBillTipping * 12)))
+      ),
+    [selectedAETerminalSalesByMonth, selectedAETippingByMonth, avgPayBillTerminal, avgPayBillTipping]
+  );
+  const selectedAETotalArrTargetsByMonth = useMemo(
+    () => selectedAESubsTargetsByMonth.map((subs, i) => (subs || 0) + (selectedAEPayTargetsByMonth[i] || 0)),
+    [selectedAESubsTargetsByMonth, selectedAEPayTargetsByMonth]
+  );
+  const selectedAESubsArrCalibrated = useMemo(
+    () => selectedAESubsTargetsByMonth.reduce((sum, v) => sum + (v || 0), 0),
+    [selectedAESubsTargetsByMonth]
+  );
+  const selectedAEPayArrCalibrated = useMemo(
+    () => selectedAEPayTargetsByMonth.reduce((sum, v) => sum + (v || 0), 0),
+    [selectedAEPayTargetsByMonth]
+  );
   const selectedAEGoLives = selectedAEGoLiveTargets.reduce((a, b) => a + b, 0);
   const selectedAEPayTerminals = selectedAEPayTerminalsByMonth.reduce((a, b) => a + b, 0);
   const selectedAETerminalSales = selectedAETerminalSalesByMonth.reduce((a, b) => a + b, 0);
   const selectedAETipping = selectedAETippingByMonth.reduce((a, b) => a + b, 0);
+  const selectedAEInboundTotal = selectedAEInboundCalibrated.reduce((a, b) => a + b, 0);
+  const selectedAEOutboundTotal = selectedAEOutboundCalibrated.reduce((a, b) => a + b, 0);
+  const selectedAEPartnershipsTotal = selectedAEPartnershipsCalibrated.reduce((a, b) => a + b, 0);
   const selectedAEPenetration = selectedAEGoLives > 0 ? selectedAEPayTerminals / selectedAEGoLives : 0;
+
+  useEffect(() => {
+    if (!selectedAEId) return;
+    if (lastTierGuideAEIdRef.current === selectedAEId) return;
+    setTierGuideTargetPayoutAt100(Math.max(0, Math.round(selectedAEVariableOTE || 0)));
+    lastTierGuideAEIdRef.current = selectedAEId;
+  }, [selectedAEId, selectedAEVariableOTE]);
 
   const handleSelectedAEOTEChange = (ote: number) => {
     if (!selectedAEId) return;
     setAeOTEs((prev) => {
       const next = new Map(prev);
       next.set(selectedAEId, ote);
+      return next;
+    });
+  };
+
+  const handleSelectedAEBaseSalaryChange = (value: number) => {
+    if (!selectedAEId) return;
+    setAeBaseSalaries((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, value);
+      return next;
+    });
+  };
+
+  const handleSelectedAEVariableOTEChange = (value: number) => {
+    if (!selectedAEId) return;
+    setAeVariableOTEs((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, value);
+      return next;
+    });
+  };
+
+  const handleSelectedAEArrMultipleChange = (value: number) => {
+    if (!selectedAEId) return;
+    setAeArrMultiples((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, value);
+      return next;
+    });
+  };
+
+  const handleSelectedAEGrossMarginChange = (value: number) => {
+    if (!selectedAEId) return;
+    setAeGrossMargins((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, value);
       return next;
     });
   };
@@ -2248,18 +2633,47 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     });
   };
 
+  const handleSelectedTotalArrTierRateChange = (idx: number, ratePercent: number) => {
+    if (!selectedAEId) return;
+    const current = aeTotalArrTiers.get(selectedAEId) ?? DEFAULT_TOTAL_ARR_TIERS;
+    const nextTiers = [...current];
+    nextTiers[idx] = { ...nextTiers[idx], rate: ratePercent / 100 };
+    setAeTotalArrTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, nextTiers);
+      return next;
+    });
+    // Legacy-Felder synchron halten, solange sie noch verwendet werden.
+    setAeSubsTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, nextTiers);
+      return next;
+    });
+    setAePayTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, nextTiers);
+      return next;
+    });
+  };
+
   const previewSettings: AESettings = {
     id: 'preview',
     user_id: selectedAEId || '',
     year: newArrYear,
     region: newArrRegion,
     ote: selectedAEOTE,
+    base_salary: selectedAEBaseSalary,
+    variable_ote: selectedAEVariableOTE,
+    arr_multiple: selectedAEArrMultiple,
+    gross_margin_pct: selectedAEGrossMargin,
+    active_months_in_year: selectedAEActiveMonths,
     monthly_go_live_targets: selectedAEGoLiveTargets,
-    monthly_subs_targets: calculateMonthlySubsTargets(selectedAEGoLiveTargets, avgSubsBill),
-    monthly_pay_targets: selectedAETerminalSalesByMonth.map((ts, i) => (ts * avgPayBillTerminal * 12) + (selectedAETippingByMonth[i] * avgPayBillTipping * 12)),
-    monthly_inbound_targets: selectedAEInbound,
-    monthly_outbound_targets: selectedAEOutbound,
-    monthly_partnerships_targets: selectedAEPartnerships,
+    monthly_subs_targets: selectedAESubsTargetsByMonth,
+    monthly_pay_targets: selectedAEPayTargetsByMonth,
+    monthly_total_arr_targets: selectedAETotalArrTargetsByMonth,
+    monthly_inbound_targets: selectedAEInboundCalibrated,
+    monthly_outbound_targets: selectedAEOutboundCalibrated,
+    monthly_partnerships_targets: selectedAEPartnershipsCalibrated,
     target_percentage: selectedAEPercentage,
     avg_subs_bill: avgSubsBill,
     avg_pay_bill: avgPayBillTerminal,
@@ -2268,13 +2682,164 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     terminal_base: selectedTerminalBase,
     terminal_bonus: selectedTerminalBonus,
     terminal_penetration_threshold: terminalPenetrationThreshold / 100,
-    subs_tiers: selectedSubsTiers,
-    pay_tiers: selectedPayTiers,
+    subs_tiers: selectedTotalArrTiers,
+    pay_tiers: selectedTotalArrTiers,
+    total_arr_tiers: selectedTotalArrTiers,
     created_at: '',
     updated_at: ''
   };
   const oteValidation = validateOTESettings(previewSettings, selectedAEPayTerminals);
   const oteProjections = calculateOTEProjections(previewSettings, selectedAEPayTerminals);
+  const multipleCalibration = calculateMultipleCalibration(previewSettings, selectedAEPayTerminals);
+  const tierGuideProfileFactors: Record<'conservative' | 'balanced' | 'aggressive', number[]> = {
+    conservative: [0, 0.2, 0.35, 0.6, 1.0, 1.25, 1.6],
+    balanced: [0, 0.25, 0.45, 0.75, 1.0, 1.45, 2.0],
+    aggressive: [0, 0.3, 0.55, 0.85, 1.1, 1.7, 2.4],
+  };
+  const tierGuideArrPoolAt100 = useMemo(
+    () => Math.max(0, tierGuideTargetPayoutAt100 - multipleCalibration.terminalProvisionAt100),
+    [tierGuideTargetPayoutAt100, multipleCalibration.terminalProvisionAt100]
+  );
+  const tierGuideBaseRateAt100 = useMemo(
+    () => (multipleCalibration.totalArrTarget > 0 ? tierGuideArrPoolAt100 / multipleCalibration.totalArrTarget : 0),
+    [tierGuideArrPoolAt100, multipleCalibration.totalArrTarget]
+  );
+  const suggestedTotalArrTiers = useMemo(() => {
+    const factors = tierGuideProfileFactors[tierGuideProfile];
+    return selectedTotalArrTiers.map((tier, index) => {
+      const factor = factors[Math.min(index, factors.length - 1)] ?? 1;
+      return {
+        ...tier,
+        rate: Math.max(0, Number((tierGuideBaseRateAt100 * factor).toFixed(4))),
+      };
+    });
+  }, [selectedTotalArrTiers, tierGuideBaseRateAt100, tierGuideProfile]);
+  const tierGuideCurrentRateAt100 = useMemo(
+    () => getProvisionRate(1.0, selectedTotalArrTiers),
+    [selectedTotalArrTiers]
+  );
+  const tierGuideSuggestedRateAt100 = useMemo(
+    () => getProvisionRate(1.0, suggestedTotalArrTiers),
+    [suggestedTotalArrTiers]
+  );
+  const tierGuideCurrentPayoutAt100 = multipleCalibration.expectedTotalPayoutAt100;
+  const tierGuideSuggestedPayoutAt100 = useMemo(
+    () => (multipleCalibration.totalArrTarget * tierGuideSuggestedRateAt100) + multipleCalibration.terminalProvisionAt100,
+    [multipleCalibration.totalArrTarget, tierGuideSuggestedRateAt100, multipleCalibration.terminalProvisionAt100]
+  );
+  const tierGuideSuggestedRateAt120 = useMemo(
+    () => getProvisionRate(1.2, suggestedTotalArrTiers),
+    [suggestedTotalArrTiers]
+  );
+  const tierGuideDefaultRateAt120 = useMemo(
+    () => getProvisionRate(1.2, DEFAULT_TOTAL_ARR_TIERS),
+    []
+  );
+  const tierGuideSuggestedPayoutAt120 = useMemo(
+    () => (multipleCalibration.totalArrTarget * 1.2 * tierGuideSuggestedRateAt120) + multipleCalibration.terminalProvisionAt100,
+    [multipleCalibration.totalArrTarget, tierGuideSuggestedRateAt120, multipleCalibration.terminalProvisionAt100]
+  );
+  const tierGuideDefaultPayoutAt120 = useMemo(
+    () => (multipleCalibration.totalArrTarget * 1.2 * tierGuideDefaultRateAt120) + multipleCalibration.terminalProvisionAt100,
+    [multipleCalibration.totalArrTarget, tierGuideDefaultRateAt120, multipleCalibration.terminalProvisionAt100]
+  );
+  const tierGuideArrGainAt120 = useMemo(
+    () => Math.max(0, (multipleCalibration.totalArrTarget * 1.2) - multipleCalibration.totalArrTarget),
+    [multipleCalibration.totalArrTarget]
+  );
+  const tierGuideExtraPayoutVsDefaultAt120 = useMemo(
+    () => tierGuideSuggestedPayoutAt120 - tierGuideDefaultPayoutAt120,
+    [tierGuideSuggestedPayoutAt120, tierGuideDefaultPayoutAt120]
+  );
+  const handleApplyTierGuideSuggestion = () => {
+    if (!selectedAEId) return;
+    setAeTotalArrTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, suggestedTotalArrTiers);
+      return next;
+    });
+    // Legacy-Felder synchron halten, solange sie noch verwendet werden.
+    setAeSubsTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, suggestedTotalArrTiers);
+      return next;
+    });
+    setAePayTiers((prev) => {
+      const next = new Map(prev);
+      next.set(selectedAEId, suggestedTotalArrTiers);
+      return next;
+    });
+  };
+  const whatIfRequiredMarginPct = useMemo(
+    () => calculateRequiredGrossMarginPctForPayback(multipleCalibration.otc, multipleCalibration.quotaArr, whatIfTargetPaybackMonths),
+    [multipleCalibration.otc, multipleCalibration.quotaArr, whatIfTargetPaybackMonths]
+  );
+  const whatIfRequiredMultiple = useMemo(
+    () => calculateRequiredArrMultipleForPayback(selectedAEGrossMargin, whatIfTargetPaybackMonths, selectedAEActiveMonths),
+    [selectedAEGrossMargin, whatIfTargetPaybackMonths, selectedAEActiveMonths]
+  );
+  const paybackBenchmark = useMemo(() => {
+    if (whatIfAcv < 15000) {
+      return {
+        segment: 'SMB',
+        sliderMin: 2,
+        sliderMax: 12,
+        excellentMax: 6,
+        goodMax: 9,
+        normalMax: 12,
+      };
+    }
+    if (whatIfAcv < 100000) {
+      return {
+        segment: 'Mid-Market',
+        sliderMin: 3,
+        sliderMax: 24,
+        excellentMax: 10,
+        goodMax: 16,
+        normalMax: 24,
+      };
+    }
+    return {
+      segment: 'Enterprise',
+      sliderMin: 4,
+      sliderMax: 30,
+      excellentMax: 12,
+      goodMax: 20,
+      normalMax: 30,
+    };
+  }, [whatIfAcv]);
+
+  const whatIfPaybackRating = useMemo(() => {
+    const v = whatIfTargetPaybackMonths;
+    if (v <= paybackBenchmark.excellentMax) return { label: 'Ausgezeichnet', color: 'text-emerald-700' };
+    if (v <= paybackBenchmark.goodMax) return { label: 'Gut', color: 'text-green-700' };
+    if (v <= paybackBenchmark.normalMax) return { label: 'Normal', color: 'text-amber-700' };
+    return { label: 'Kritisch', color: 'text-red-700' };
+  }, [whatIfTargetPaybackMonths, paybackBenchmark]);
+
+  const canApplyWhatIf =
+    whatIfSolveFor === 'margin'
+      ? whatIfRequiredMarginPct !== null && whatIfRequiredMarginPct > 0 && whatIfRequiredMarginPct <= 100
+      : whatIfRequiredMultiple !== null && whatIfRequiredMultiple > 0;
+
+  const handleApplyWhatIf = () => {
+    if (!selectedAEId) return;
+    if (whatIfSolveFor === 'margin' && whatIfRequiredMarginPct !== null && whatIfRequiredMarginPct > 0) {
+      handleSelectedAEGrossMarginChange(Math.round(whatIfRequiredMarginPct * 10) / 10);
+      return;
+    }
+    if (whatIfSolveFor === 'multiple' && whatIfRequiredMultiple !== null && whatIfRequiredMultiple > 0) {
+      handleSelectedAEArrMultipleChange(Math.round(whatIfRequiredMultiple * 100) / 100);
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedAEId) return;
+    if (Number.isFinite(multipleCalibration.paybackMonths) && multipleCalibration.paybackMonths > 0) {
+      const roundedCurrent = Math.round(multipleCalibration.paybackMonths * 10) / 10;
+      setWhatIfTargetPaybackMonths(Math.min(paybackBenchmark.sliderMax, Math.max(paybackBenchmark.sliderMin, roundedCurrent)));
+    }
+  }, [selectedAEId, multipleCalibration.paybackMonths, paybackBenchmark.sliderMin, paybackBenchmark.sliderMax]);
 
   if (loading) {
     return (
@@ -2684,6 +3249,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 }`}
               >
                 Salespipe Import
+              </button>
+              <button
+                onClick={() => setActiveImportSubTab('paymarginImport')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'paymarginImport'
+                    ? 'bg-amber-50 border-amber-300 text-amber-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Paymargin CSV Import
               </button>
             </div>
           </div>
@@ -4288,6 +4863,185 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
               </div>
             </div>
           )}
+
+          {activeImportSubTab === 'paymarginImport' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">Paymargin CSV Import</h4>
+                <p className="text-sm text-gray-500">
+                  Lade eine Paymargin-CSV hoch. Pro OAK ID wird ein normalisierter Pay-Ist-Monatswert berechnet
+                  (Net Margin / Monatsfaktor) und als ARR (x12) in die passenden Go-Lives geschrieben.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Go-Live Jahr</label>
+                  <input
+                    type="number"
+                    value={paymarginImportYear}
+                    onChange={(e) => setPaymarginImportYear(parseInt(e.target.value) || currentYear)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Go-Live Monat (Kohorte)</label>
+                  <select
+                    value={paymarginGoLiveMonth}
+                    onChange={(e) => setPaymarginGoLiveMonth(parseInt(e.target.value) || 1)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  >
+                    {MONTHS.map((m, idx) => (
+                      <option key={m} value={idx + 1}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">CSV Datei</label>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(e) => setPaymarginCsvFile(e.target.files?.[0] || null)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Erwartete Spalten: OAK ID, Net Margin
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h5 className="text-sm font-semibold text-amber-800">Saisonfaktoren (frei editierbar)</h5>
+                  <button
+                    type="button"
+                    onClick={() => setPaymarginSeasonalFactors([...DEFAULT_SEASONAL_FACTORS])}
+                    className="px-2 py-1 text-xs border border-amber-300 rounded text-amber-700 hover:bg-amber-100"
+                  >
+                    Standardwerte zurücksetzen
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 lg:grid-cols-12 gap-2">
+                  {MONTHS.map((monthLabel, idx) => (
+                    <div key={monthLabel}>
+                      <label className="block text-xs text-amber-700 mb-1">{monthLabel}</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.1"
+                        value={paymarginSeasonalFactors[idx] ?? 1}
+                        onChange={(e) => handlePaymarginFactorChange(idx, parseFloat(e.target.value) || 1)}
+                        className="w-full px-2 py-1 border border-amber-300 rounded text-sm"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    setPaymarginImportMode('dry-run');
+                    handleRunPaymarginCsvImport(true);
+                  }}
+                  disabled={paymarginImportLoading || !paymarginCsvFile}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {paymarginImportLoading && paymarginImportMode === 'dry-run' ? 'Pruefe...' : 'Dry-Run'}
+                </button>
+                <button
+                  onClick={() => {
+                    setPaymarginImportMode('commit');
+                    handleRunPaymarginCsvImport(false);
+                  }}
+                  disabled={paymarginImportLoading || !paymarginCsvFile}
+                  className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {paymarginImportLoading && paymarginImportMode === 'commit' ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
+                {paymarginCsvFile ? (
+                  <span className="text-xs text-gray-500">Datei: {paymarginCsvFile.name}</span>
+                ) : null}
+              </div>
+
+              {paymarginImportError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {paymarginImportError}
+                </div>
+              ) : null}
+
+              {paymarginImportResult?.stats ? (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-3">
+                  <h5 className="text-sm font-semibold text-green-800">Import-Ergebnis</h5>
+                  <p className="text-xs text-green-800">
+                    Modus: <strong>{paymarginImportResult.mode === 'dry-run' ? 'Dry-Run' : 'Commit'}</strong>
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Zeilen geparst</div>
+                      <div className="font-semibold">{paymarginImportResult.stats.rowsParsed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Zeilen valid</div>
+                      <div className="font-semibold">{paymarginImportResult.stats.rowsValid}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Go-Lives gematcht</div>
+                      <div className="font-semibold text-blue-700">{paymarginImportResult.stats.rowsMatchedGoLives}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Wuerde aktualisieren</div>
+                      <div className="font-semibold text-blue-700">{paymarginImportResult.stats.rowsWouldUpdate}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Go-Lives aktualisiert</div>
+                      <div className="font-semibold text-green-700">{paymarginImportResult.stats.rowsUpdated}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Ohne Match</div>
+                      <div className="font-semibold text-amber-700">{paymarginImportResult.stats.rowsSkippedNoMatch}</div>
+                    </div>
+                  </div>
+                  <p className="text-xs text-green-800">
+                    Ziel-Kohorte: {MONTHS[(paymarginImportResult.stats.goLiveMonth || 1) - 1]} {paymarginImportResult.stats.year}
+                    {' '}| Doppelte OAK-Zeilen im CSV: {paymarginImportResult.stats.duplicateOakRows}
+                  </p>
+                  {paymarginImportResult.warning ? (
+                    <p className="text-xs text-amber-700">{paymarginImportResult.warning}</p>
+                  ) : null}
+
+                  {paymarginImportResult.preview?.length ? (
+                    <div className="rounded-lg border border-gray-200 overflow-hidden bg-white">
+                      <div className="max-h-56 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">OAK ID</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Net Margin (Monat)</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Normalisiert / Monat</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Pay ARR (x12)</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Go-Live IDs</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {paymarginImportResult.preview.map((row) => (
+                              <tr key={`${row.oakId}-${row.payArr}`} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{row.oakId}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{formatCurrency(row.netMarginMonthly)}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{formatCurrency(row.normalizedMonthly)}</td>
+                                <td className="px-2 py-1.5 text-green-700">{formatCurrency(row.payArr)}</td>
+                                <td className="px-2 py-1.5 text-gray-500">{row.matchedGoLiveIds.length}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )}
         </div>
       )}
 
@@ -4677,155 +5431,366 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                       value={selectedAEId || ''}
                       onChange={(e) => setSelectedAEId(e.target.value)}
                       className="w-full px-3 py-2 border border-indigo-300 rounded-lg bg-indigo-50 font-medium"
+                      style={
+                        selectedAEUser && isExitedUser(selectedAEUser)
+                          ? { fontStyle: 'italic', color: '#6b7280' }
+                          : undefined
+                      }
                     >
                       {plannableUsers.map((ae) => (
-                        <option key={ae.id} value={ae.id}>
-                          {ae.name} ({aePercentages.get(ae.id) ?? 0}%)
+                        <option
+                          key={ae.id}
+                          value={ae.id}
+                          style={isExitedUser(ae) ? { fontStyle: 'italic', color: '#6b7280' } : undefined}
+                        >
+                          {ae.name}{isExitedUser(ae) ? ' (ausgetreten)' : ''}
                         </option>
                       ))}
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">OTE für {selectedAEUser?.name || 'AE'}</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Variables OTE für {selectedAEUser?.name || 'AE'}</label>
                     <div className="relative">
                       <span className="absolute left-3 top-2 text-gray-500">€</span>
                       <input
                         type="number"
-                        value={selectedAEOTE}
-                        onChange={(e) => handleSelectedAEOTEChange(parseInt(e.target.value) || 0)}
+                        value={selectedAEVariableOTE}
+                        onChange={(e) => {
+                          const value = parseInt(e.target.value) || 0;
+                          handleSelectedAEVariableOTEChange(value);
+                          handleSelectedAEOTEChange(value);
+                        }}
                         className="w-full pl-8 pr-3 py-2 border border-gray-300 rounded-lg"
                       />
                     </div>
                   </div>
                 </div>
-                {selectedAEUser && (
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-center">
-                    <div className="bg-blue-50 rounded-lg p-2">
-                      <div className="text-xs text-blue-600">Go-Lives</div>
-                      <div className="text-lg font-bold text-blue-700">{selectedAEGoLives}</div>
-                    </div>
-                    <div className="bg-teal-50 rounded-lg p-2">
-                      <div className="text-xs text-teal-600">Terminal</div>
-                      <div className="text-lg font-bold text-teal-700">{selectedAETerminalSales}</div>
-                    </div>
-                    <div className="bg-pink-50 rounded-lg p-2">
-                      <div className="text-xs text-pink-600">Tipping</div>
-                      <div className="text-lg font-bold text-pink-700">{selectedAETipping}</div>
-                    </div>
-                    <div className="bg-green-50 rounded-lg p-2">
-                      <div className="text-xs text-green-600">Subs ARR</div>
-                      <div className="text-lg font-bold text-green-700">{formatCurrency(selectedAEGoLives * avgSubsBill * 12)}</div>
-                    </div>
-                    <div className="bg-orange-50 rounded-lg p-2">
-                      <div className="text-xs text-orange-600">Pay ARR</div>
-                      <div className="text-lg font-bold text-orange-700">{formatCurrency((selectedAETerminalSales * avgPayBillTerminal * 12) + (selectedAETipping * avgPayBillTipping * 12))}</div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Base Salary</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-2 text-gray-500">€</span>
+                      <input
+                        type="number"
+                        value={selectedAEBaseSalary}
+                        onChange={(e) => handleSelectedAEBaseSalaryChange(parseInt(e.target.value) || 0)}
+                        className="w-full pl-8 pr-3 py-2 border border-gray-300 rounded-lg"
+                      />
                     </div>
                   </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">ARR Multiple</label>
+                    <input
+                      type="number"
+                      value={selectedAEArrMultiple}
+                      onChange={(e) => handleSelectedAEArrMultipleChange(parseFloat(e.target.value) || 0)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                      step="0.1"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Gross Margin %</label>
+                    <input
+                      type="number"
+                      value={selectedAEGrossMargin}
+                      onChange={(e) => handleSelectedAEGrossMarginChange(parseFloat(e.target.value) || 0)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                      step="0.1"
+                    />
+                  </div>
+                </div>
+                {selectedAEUser && (
+                  <>
+                    <div className="grid grid-cols-2 md:grid-cols-9 gap-3 text-center">
+                      <div className="bg-violet-50 rounded-lg p-2">
+                        <div className="text-xs text-violet-600">Aktive AE-Monate</div>
+                        <div className="text-lg font-bold text-violet-700">{selectedAEActiveMonths}/12</div>
+                      </div>
+                      <div className="bg-blue-50 rounded-lg p-2">
+                        <div className="text-xs text-blue-600">Go-Lives</div>
+                        <div className="text-lg font-bold text-blue-700">{selectedAEGoLives}</div>
+                      </div>
+                      <div className="bg-teal-50 rounded-lg p-2">
+                        <div className="text-xs text-teal-600">Terminal</div>
+                        <div className="text-lg font-bold text-teal-700">{selectedAETerminalSales}</div>
+                      </div>
+                      <div className="bg-pink-50 rounded-lg p-2">
+                        <div className="text-xs text-pink-600">Tipping</div>
+                        <div className="text-lg font-bold text-pink-700">{selectedAETipping}</div>
+                      </div>
+                      <div className="bg-green-50 rounded-lg p-2">
+                        <div className="text-xs text-green-600">Subs ARR</div>
+                        <div className="text-lg font-bold text-green-700">{formatCurrency(selectedAESubsArrCalibrated)}</div>
+                      </div>
+                      <div className="bg-orange-50 rounded-lg p-2">
+                        <div className="text-xs text-orange-600">Pay ARR</div>
+                        <div className="text-lg font-bold text-orange-700">{formatCurrency(selectedAEPayArrCalibrated)}</div>
+                      </div>
+                      <div className="bg-slate-50 rounded-lg p-2">
+                        <div className="text-xs text-slate-600">OTC</div>
+                        <div className="text-lg font-bold text-slate-700">{formatCurrency(multipleCalibration.otc)}</div>
+                      </div>
+                      <div className="bg-indigo-50 rounded-lg p-2">
+                        <div className="text-xs text-indigo-600">Quota ARR</div>
+                        <div className="text-lg font-bold text-indigo-700">{formatCurrency(multipleCalibration.quotaArr)}</div>
+                      </div>
+                      <div className="bg-amber-50 rounded-lg p-2">
+                        <div className="text-xs text-amber-600">CAC Payback</div>
+                        <div className="text-lg font-bold text-amber-700">
+                          {Number.isFinite(multipleCalibration.paybackMonths) ? `${multipleCalibration.paybackMonths.toFixed(1)} Mon.` : '-'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4 p-4 bg-white border border-indigo-100 rounded-lg">
+                      <div
+                        className="flex items-center justify-between cursor-pointer"
+                        onClick={() => setAeBusinessTargetsExpanded(!aeBusinessTargetsExpanded)}
+                      >
+                        <h5 className="font-semibold text-indigo-900">
+                          Business Targets (AE-Mapping)
+                        </h5>
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm text-gray-600">
+                            {selectedAEGoLives} Go-Lives | {selectedAETerminalSales} Terminal | {selectedAETipping} Tipping
+                          </span>
+                          <span className="text-gray-400">{aeBusinessTargetsExpanded ? '▼' : '▶'}</span>
+                        </div>
+                      </div>
+
+                      {aeBusinessTargetsExpanded && (
+                        <div className="mt-3 space-y-3">
+                      <p className="text-xs text-gray-500">Graue Monate sind ausserhalb des aktiven AE-Zeitraums (vor AE-Start oder nach Austritt).</p>
+                      {[
+                        {
+                          key: 'inbound',
+                          label: 'Inbound',
+                          labelClass: 'text-blue-700',
+                          boxClass: 'border-blue-200 bg-blue-50',
+                          data: selectedAEInboundCalibrated,
+                          total: selectedAEInboundTotal,
+                        },
+                        {
+                          key: 'outbound',
+                          label: 'Outbound',
+                          labelClass: 'text-orange-700',
+                          boxClass: 'border-orange-200 bg-orange-50',
+                          data: selectedAEOutboundCalibrated,
+                          total: selectedAEOutboundTotal,
+                        },
+                        {
+                          key: 'partnerships',
+                          label: 'Partnerships',
+                          labelClass: 'text-purple-700',
+                          boxClass: 'border-purple-200 bg-purple-50',
+                          data: selectedAEPartnershipsCalibrated,
+                          total: selectedAEPartnershipsTotal,
+                        },
+                      ].map((cat) => (
+                        <div key={cat.key}>
+                          <div className="flex items-center justify-between mb-1">
+                            <h6 className={`font-medium ${cat.labelClass}`}>{cat.label}</h6>
+                            <span className="text-sm text-gray-500">Summe: <strong>{cat.total}</strong></span>
+                          </div>
+                          <div className="grid grid-cols-12 gap-1">
+                            {MONTHS.map((m, i) => (
+                              <div key={i} className="text-center">
+                                <label className={`block text-xs ${selectedAEActiveFlags[i] ? 'text-gray-500' : 'text-gray-400'}`}>{m}</label>
+                                <div
+                                  className={`w-full px-1 py-1 text-center border rounded text-sm ${
+                                    selectedAEActiveFlags[i] ? cat.boxClass : 'border-gray-200 bg-gray-100 text-gray-400'
+                                  }`}
+                                >
+                                  {cat.data[i] || 0}
+                                </div>
+                                <div className={`text-[10px] mt-0.5 ${selectedAEActiveFlags[i] ? 'text-gray-400' : 'text-gray-300'}`}>
+                                  {formatCurrency((cat.data[i] || 0) * avgSubsBill * 12)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+
+                      <div className="pt-3 border-t border-gray-200 space-y-2">
+                        <span className="font-medium text-gray-700">Abgeleitete Kennzahlen</span>
+                        {[
+                          {
+                            key: 'pay-terminals',
+                            label: 'Pay Terminals (Hardware)',
+                            labelClass: 'text-green-700',
+                            boxClass: 'border-green-200 bg-green-50',
+                            data: selectedAEPayTerminalsByMonth,
+                            total: selectedAEPayTerminals,
+                          },
+                          {
+                            key: 'terminal-sales',
+                            label: 'Terminal Sales',
+                            labelClass: 'text-teal-700',
+                            boxClass: 'border-teal-200 bg-teal-50',
+                            data: selectedAETerminalSalesByMonth,
+                            total: selectedAETerminalSales,
+                          },
+                          {
+                            key: 'tipping',
+                            label: 'Tipping',
+                            labelClass: 'text-pink-700',
+                            boxClass: 'border-pink-200 bg-pink-50',
+                            data: selectedAETippingByMonth,
+                            total: selectedAETipping,
+                          },
+                        ].map((cat) => (
+                          <div key={cat.key}>
+                            <div className="flex items-center justify-between mb-1">
+                              <h6 className={`font-medium ${cat.labelClass}`}>{cat.label}</h6>
+                              <span className="text-sm text-gray-500">Summe: <strong>{cat.total}</strong></span>
+                            </div>
+                            <div className="grid grid-cols-12 gap-1">
+                              {MONTHS.map((m, i) => (
+                                <div key={i} className="text-center">
+                                  <label className={`block text-xs ${selectedAEActiveFlags[i] ? 'text-gray-500' : 'text-gray-400'}`}>{m}</label>
+                                  <div
+                                    className={`w-full px-1 py-1 text-center border rounded text-sm ${
+                                      selectedAEActiveFlags[i] ? cat.boxClass : 'border-gray-200 bg-gray-100 text-gray-400'
+                                    }`}
+                                  >
+                                    {cat.data[i] || 0}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
                 )}
               </div>
 
-              {/* ========== 6. PROVISIONSMODELL (AE-spezifisch) ========== */}
+              {/* ========== 6. OTE VALIDIERUNG ========== */}
               <div className="bg-gray-50 rounded-lg p-4">
                 <h4 className="text-md font-bold text-gray-800 mb-3">
-                  6. Provisionsmodell <span className="text-sm font-normal text-indigo-600 ml-2">für {selectedAEUser?.name || 'AE'}</span>
+                  6. Multiple & OTE Validierung <span className="text-sm font-normal text-indigo-600 ml-2">für {selectedAEUser?.name || 'AE'}</span>
                 </h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Terminal Basis €</label>
-                    <input
-                      type="number"
-                      value={selectedTerminalBase}
-                      onChange={(e) => handleSelectedTerminalBaseChange(parseInt(e.target.value) || 0)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Terminal Bonus €</label>
-                    <input
-                      type="number"
-                      value={selectedTerminalBonus}
-                      onChange={(e) => handleSelectedTerminalBonusChange(parseInt(e.target.value) || 0)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
+                <div className={`p-4 rounded-lg mb-4 ${Math.abs(multipleCalibration.quotaDeviationPct) <= 10 ? 'bg-green-50 border border-green-200' : 'bg-yellow-50 border border-yellow-200'}`}>
+                  <p className={`font-medium ${Math.abs(multipleCalibration.quotaDeviationPct) <= 10 ? 'text-green-700' : 'text-yellow-700'}`}>
+                    {Math.abs(multipleCalibration.quotaDeviationPct) <= 10
+                      ? `Multiple-Kalibrierung passt (Quota-Abweichung ${multipleCalibration.quotaDeviationPct >= 0 ? '+' : ''}${multipleCalibration.quotaDeviationPct.toFixed(1)}%)`
+                      : `Multiple-Kalibrierung prüfen (Quota-Abweichung ${multipleCalibration.quotaDeviationPct >= 0 ? '+' : ''}${multipleCalibration.quotaDeviationPct.toFixed(1)}%)`
+                    }
+                  </p>
+                  <p className="text-sm text-gray-600 mt-1">
+                    OTC: {formatCurrency(multipleCalibration.otc)} | Multiple: {multipleCalibration.arrMultiple.toFixed(2)}x | Aktiv: {multipleCalibration.activeMonths}/12 Monate | Quota: {formatCurrency(multipleCalibration.quotaArr)} | Total ARR Target: {formatCurrency(multipleCalibration.totalArrTarget)}
+                  </p>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Bruttomarge: {multipleCalibration.grossMarginPct.toFixed(1)}% | CAC Payback: {Number.isFinite(multipleCalibration.paybackMonths) ? `${multipleCalibration.paybackMonths.toFixed(1)} Monate` : 'n/a'}
+                  </p>
                 </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                  <div>
-                    <h5 className="font-medium text-green-700 mb-2">Subs ARR Stufen</h5>
-                    <table className="w-full text-sm">
-                      <tbody>
-                        {selectedSubsTiers.map((tier, i) => (
-                          <tr key={i} className="border-b">
-                            <td className="py-1">{tier.label}</td>
-                            <td className="py-1 text-right">
-                              <input
-                                type="number"
-                                value={(tier.rate * 100).toFixed(1)}
-                                onChange={(e) => handleSelectedSubsTierRateChange(i, parseFloat(e.target.value) || 0)}
-                                className="w-14 px-1 py-0.5 text-right border rounded text-xs"
-                                step="0.1"
-                              />%
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                <div className="p-4 rounded-lg mb-4 bg-indigo-50 border border-indigo-200">
+                  <h5 className="font-medium text-indigo-800 mb-3">What-if: Ziel-Payback Szenario</h5>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                    <div>
+                      <label className="block text-xs text-indigo-700 mb-1">Ø ACV pro Deal (€)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={100}
+                        value={whatIfAcv}
+                        onChange={(e) => setWhatIfAcv(parseInt(e.target.value) || 0)}
+                        className="w-full px-3 py-2 border border-indigo-300 rounded-lg bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-indigo-700 mb-1">Ziel-Payback (Monate)</label>
+                      <input
+                        type="range"
+                        min={paybackBenchmark.sliderMin}
+                        max={paybackBenchmark.sliderMax}
+                        step={0.1}
+                        value={Math.min(paybackBenchmark.sliderMax, Math.max(paybackBenchmark.sliderMin, whatIfTargetPaybackMonths))}
+                        onChange={(e) => {
+                          const next = parseFloat(e.target.value) || paybackBenchmark.sliderMin;
+                          setWhatIfTargetPaybackMonths(
+                            Math.min(paybackBenchmark.sliderMax, Math.max(paybackBenchmark.sliderMin, next))
+                          );
+                        }}
+                        className="w-full"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-indigo-700 mb-1">Monate (genau)</label>
+                      <input
+                        type="number"
+                        min={paybackBenchmark.sliderMin}
+                        max={paybackBenchmark.sliderMax}
+                        step={0.1}
+                        value={whatIfTargetPaybackMonths}
+                        onChange={(e) => {
+                          const next = parseFloat(e.target.value) || paybackBenchmark.sliderMin;
+                          setWhatIfTargetPaybackMonths(
+                            Math.min(paybackBenchmark.sliderMax, Math.max(paybackBenchmark.sliderMin, next))
+                          );
+                        }}
+                        className="w-full px-3 py-2 border border-indigo-300 rounded-lg bg-white"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setWhatIfSolveFor('margin')}
+                        className={`px-3 py-2 rounded-lg text-sm border ${whatIfSolveFor === 'margin' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-indigo-700 border-indigo-300'}`}
+                      >
+                        Löse Marge
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setWhatIfSolveFor('multiple')}
+                        className={`px-3 py-2 rounded-lg text-sm border ${whatIfSolveFor === 'multiple' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-indigo-700 border-indigo-300'}`}
+                      >
+                        Löse Multiple
+                      </button>
+                    </div>
                   </div>
 
-                  <div>
-                    <h5 className="font-medium text-orange-700 mb-2">Pay ARR Stufen</h5>
-                    <table className="w-full text-sm">
-                      <tbody>
-                        {selectedPayTiers.map((tier, i) => (
-                          <tr key={i} className="border-b">
-                            <td className="py-1">{tier.label}</td>
-                            <td className="py-1 text-right">
-                              <input
-                                type="number"
-                                value={(tier.rate * 100).toFixed(1)}
-                                onChange={(e) => handleSelectedPayTierRateChange(i, parseFloat(e.target.value) || 0)}
-                                className="w-14 px-1 py-0.5 text-right border rounded text-xs"
-                                step="0.1"
-                              />%
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div>
-                    <h5 className="font-medium text-blue-700 mb-2">Terminal-Provision (Einmalig)</h5>
-                    <table className="w-full text-sm">
-                      <tbody>
-                        <tr className={`border-b ${selectedAEPenetration < (terminalPenetrationThreshold / 100) ? 'bg-blue-50' : ''}`}>
-                          <td className="py-1">&lt; {terminalPenetrationThreshold}%</td>
-                          <td className="py-1 text-right font-medium">€{selectedTerminalBase}</td>
-                          <td className="py-1 text-right text-xs text-gray-500">pro Terminal</td>
-                        </tr>
-                        <tr className={`border-b ${selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? 'bg-blue-50' : ''}`}>
-                          <td className="py-1">≥ {terminalPenetrationThreshold}%</td>
-                          <td className="py-1 text-right font-medium">€{selectedTerminalBonus}</td>
-                          <td className="py-1 text-right text-xs text-gray-500">pro Terminal</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                    {selectedAEUser && (
-                      <div className={`mt-2 p-2 rounded text-xs ${selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
-                        <strong>{selectedAEUser.name.split(' ')[0]}:</strong> {(selectedAEPenetration * 100).toFixed(0)}% Penetration
-                        {' '}→ <strong>€{selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? selectedTerminalBonus : selectedTerminalBase}</strong> × {selectedAEPayTerminals} = <strong>{formatCurrency(selectedAEPayTerminals * (selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? selectedTerminalBonus : selectedTerminalBase))}</strong>
-                      </div>
+                  <div className="mt-3 text-sm text-indigo-900 space-y-1">
+                    <p className="text-xs text-indigo-700">
+                      Segment: <strong>{paybackBenchmark.segment}</strong> (ACV-abhängige Skala: {paybackBenchmark.sliderMin}-{paybackBenchmark.sliderMax} Monate)
+                      {' '}| Bewertung: <strong className={whatIfPaybackRating.color}>{whatIfPaybackRating.label}</strong>
+                    </p>
+                    {whatIfSolveFor === 'margin' ? (
+                      <>
+                        <p>
+                          Benötigte Gross Margin für {whatIfTargetPaybackMonths.toFixed(1)} Monate:
+                          {' '}
+                          <strong>{whatIfRequiredMarginPct !== null ? `${whatIfRequiredMarginPct.toFixed(1)}%` : 'n/a'}</strong>
+                        </p>
+                        {whatIfRequiredMarginPct !== null && whatIfRequiredMarginPct > 100 && (
+                          <p className="text-red-600 text-xs">
+                            Ziel nicht realistisch mit aktueller Quota (benoetigt &gt; 100% Marge).
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <p>
+                        Benötigtes ARR Multiple für {whatIfTargetPaybackMonths.toFixed(1)} Monate:
+                        {' '}
+                        <strong>{whatIfRequiredMultiple !== null ? `${whatIfRequiredMultiple.toFixed(2)}x` : 'n/a'}</strong>
+                      </p>
                     )}
                   </div>
-                </div>
-              </div>
 
-              {/* ========== 7. OTE VALIDIERUNG ========== */}
-              <div className="bg-gray-50 rounded-lg p-4">
-                <h4 className="text-md font-bold text-gray-800 mb-3">
-                  7. OTE Validierung <span className="text-sm font-normal text-indigo-600 ml-2">für {selectedAEUser?.name || 'AE'}</span>
-                </h4>
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={handleApplyWhatIf}
+                      disabled={!canApplyWhatIf}
+                      className="px-3 py-2 rounded-lg text-sm bg-indigo-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Szenario in Eingaben übernehmen
+                    </button>
+                  </div>
+                </div>
                 <div className={`p-4 rounded-lg mb-4 ${oteValidation.valid ? 'bg-green-50 border border-green-200' : 'bg-yellow-50 border border-yellow-200'}`}>
                   <p className={`font-medium ${oteValidation.valid ? 'text-green-700' : 'text-yellow-700'}`}>
                     {oteValidation.valid
@@ -4863,6 +5828,179 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </div>
+
+              {/* ========== 7. PROVISIONSMODELL (AE-spezifisch) ========== */}
+              <div className="bg-gray-50 rounded-lg p-4">
+                <h4 className="text-md font-bold text-gray-800 mb-3">
+                  7. Provisionsmodell (Unified Total ARR) <span className="text-sm font-normal text-indigo-600 ml-2">für {selectedAEUser?.name || 'AE'}</span>
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Terminal Basis €</label>
+                    <input
+                      type="number"
+                      value={selectedTerminalBase}
+                      onChange={(e) => handleSelectedTerminalBaseChange(parseInt(e.target.value) || 0)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Terminal Bonus €</label>
+                    <input
+                      type="number"
+                      value={selectedTerminalBonus}
+                      onChange={(e) => handleSelectedTerminalBonusChange(parseInt(e.target.value) || 0)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-600 mb-4">
+                  Die Provisionstufen werden auf Gesamt-ARR-Zielerreichung angewandt.
+                  Terminal-Provision bleibt als separater Einmalbetrag aktiv.
+                </p>
+
+                <div className="mb-4 p-4 rounded-lg border border-indigo-200 bg-indigo-50">
+                  <h5 className="font-medium text-indigo-800 mb-3">Guided Tier Setup (betriebswirtschaftlich)</h5>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs text-indigo-700 mb-1">Ziel-Auszahlung bei 100% (€)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={100}
+                        value={tierGuideTargetPayoutAt100}
+                        onChange={(e) => setTierGuideTargetPayoutAt100(Math.max(0, parseInt(e.target.value) || 0))}
+                        className="w-full px-3 py-2 border border-indigo-300 rounded-lg bg-white"
+                      />
+                      <div className="mt-2 flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setTierGuideTargetPayoutAt100(Math.round(selectedAEVariableOTE * 0.9))}
+                          className="px-2 py-1 text-xs rounded border border-indigo-300 bg-white text-indigo-700"
+                        >
+                          90% Var OTE
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTierGuideTargetPayoutAt100(Math.round(selectedAEVariableOTE))}
+                          className="px-2 py-1 text-xs rounded border border-indigo-300 bg-white text-indigo-700"
+                        >
+                          100% Var OTE
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTierGuideTargetPayoutAt100(Math.round(selectedAEVariableOTE * 1.1))}
+                          className="px-2 py-1 text-xs rounded border border-indigo-300 bg-white text-indigo-700"
+                        >
+                          110% Var OTE
+                        </button>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-indigo-700 mb-1">Beschleunigungsprofil</label>
+                      <select
+                        value={tierGuideProfile}
+                        onChange={(e) => setTierGuideProfile(e.target.value as 'conservative' | 'balanced' | 'aggressive')}
+                        className="w-full px-3 py-2 border border-indigo-300 rounded-lg bg-white"
+                      >
+                        <option value="conservative">Konservativ</option>
+                        <option value="balanced">Ausgewogen</option>
+                        <option value="aggressive">Aggressiv</option>
+                      </select>
+                      <p className="mt-2 text-xs text-indigo-700">
+                        ARR-Pool bei 100% (ohne Terminal): <strong>{formatCurrency(tierGuideArrPoolAt100)}</strong>
+                      </p>
+                      <p className="text-xs text-indigo-700">
+                        Empfohlene 100%-Rate: <strong>{(tierGuideBaseRateAt100 * 100).toFixed(2)}%</strong>
+                      </p>
+                    </div>
+                    <div className="flex flex-col justify-end">
+                      <button
+                        type="button"
+                        onClick={handleApplyTierGuideSuggestion}
+                        disabled={!selectedAEId || multipleCalibration.totalArrTarget <= 0}
+                        className="px-3 py-2 rounded-lg text-sm bg-indigo-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        Vorschlag in Total ARR Stufen übernehmen
+                      </button>
+                      <p className="mt-2 text-xs text-gray-600">
+                        Nutzt Quota/Targets + Terminal-Provision als 100%-Anker.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                    <div className="p-2 rounded bg-white border border-indigo-100">
+                      <div className="text-xs text-gray-500">Aktuell Auszahlung bei 100%</div>
+                      <div className="font-semibold text-gray-800">{formatCurrency(tierGuideCurrentPayoutAt100)}</div>
+                      <div className="text-xs text-gray-500">Rate bei 100%: {(tierGuideCurrentRateAt100 * 100).toFixed(2)}%</div>
+                    </div>
+                    <div className="p-2 rounded bg-white border border-indigo-100">
+                      <div className="text-xs text-gray-500">Vorschlag Auszahlung bei 100%</div>
+                      <div className="font-semibold text-indigo-800">{formatCurrency(tierGuideSuggestedPayoutAt100)}</div>
+                      <div className="text-xs text-gray-500">Rate bei 100%: {(tierGuideSuggestedRateAt100 * 100).toFixed(2)}%</div>
+                    </div>
+                    <div className="p-2 rounded bg-white border border-indigo-100">
+                      <div className="text-xs text-gray-500">Vorschlag Auszahlung bei 120%</div>
+                      <div className="font-semibold text-indigo-800">{formatCurrency(tierGuideSuggestedPayoutAt120)}</div>
+                      <div className="text-xs text-gray-500">Rate bei 120%: {(tierGuideSuggestedRateAt120 * 100).toFixed(2)}%</div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        Mehr ARR (120% vs. 100%): <strong>{formatCurrency(tierGuideArrGainAt120)}</strong>
+                      </div>
+                      <div className={`text-xs mt-1 ${tierGuideExtraPayoutVsDefaultAt120 >= 0 ? 'text-amber-700' : 'text-green-700'}`}>
+                        Mehr OTE/Payout vs. Standard (bei 120%): <strong>{tierGuideExtraPayoutVsDefaultAt120 >= 0 ? '+' : ''}{formatCurrency(tierGuideExtraPayoutVsDefaultAt120)}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div>
+                    <h5 className="font-medium text-purple-700 mb-2">Total ARR Stufen</h5>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        {selectedTotalArrTiers.map((tier, i) => (
+                          <tr key={i} className="border-b">
+                            <td className="py-1">{tier.label}</td>
+                            <td className="py-1 text-right">
+                              <input
+                                type="number"
+                                value={(tier.rate * 100).toFixed(1)}
+                                onChange={(e) => handleSelectedTotalArrTierRateChange(i, parseFloat(e.target.value) || 0)}
+                                className="w-14 px-1 py-0.5 text-right border rounded text-xs"
+                                step="0.1"
+                              />%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div>
+                    <h5 className="font-medium text-blue-700 mb-2">Terminal-Provision (Einmalig)</h5>
+                    <table className="w-full text-sm">
+                      <tbody>
+                        <tr className={`border-b ${selectedAEPenetration < (terminalPenetrationThreshold / 100) ? 'bg-blue-50' : ''}`}>
+                          <td className="py-1">&lt; {terminalPenetrationThreshold}%</td>
+                          <td className="py-1 text-right font-medium">€{selectedTerminalBase}</td>
+                          <td className="py-1 text-right text-xs text-gray-500">pro Terminal</td>
+                        </tr>
+                        <tr className={`border-b ${selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? 'bg-blue-50' : ''}`}>
+                          <td className="py-1">≥ {terminalPenetrationThreshold}%</td>
+                          <td className="py-1 text-right font-medium">€{selectedTerminalBonus}</td>
+                          <td className="py-1 text-right text-xs text-gray-500">pro Terminal</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    {selectedAEUser && (
+                      <div className={`mt-2 p-2 rounded text-xs ${selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
+                        <strong>{selectedAEUser.name.split(' ')[0]}:</strong> {(selectedAEPenetration * 100).toFixed(0)}% Penetration
+                        {' '}→ <strong>€{selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? selectedTerminalBonus : selectedTerminalBase}</strong> × {selectedAEPayTerminals} = <strong>{formatCurrency(selectedAEPayTerminals * (selectedAEPenetration >= (terminalPenetrationThreshold / 100) ? selectedTerminalBonus : selectedTerminalBase))}</strong>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
-import { User, isPlannable, canReceiveGoLives, MONTH_NAMES } from '@/lib/types';
+import { User, GoLive, isPlannable, canReceiveGoLives, MONTH_NAMES } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
 import { useAllUsers, useMultiUserData } from '@/lib/hooks';
 import { calculateYearSummary, formatCurrency, formatPercent, getAchievementColor } from '@/lib/calculations';
@@ -49,6 +49,10 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const currentMonth = new Date().getMonth();
   const [selectedYear, setSelectedYear] = useState(currentYear);
   const [reportType, setReportType] = useState<'trend' | 'forecast' | 'ytd'>('trend');
+  const [selectedMonthDetail, setSelectedMonthDetail] = useState<number | null>(null);
+  const [payIstInputsByGoLiveId, setPayIstInputsByGoLiveId] = useState<Record<string, string>>({});
+  const [savingPayIstByGoLiveId, setSavingPayIstByGoLiveId] = useState<Record<string, boolean>>({});
+  const [payIstErrorByGoLiveId, setPayIstErrorByGoLiveId] = useState<Record<string, string>>({});
   const exportRef = useRef<HTMLDivElement>(null);
   
   // Load all users
@@ -92,7 +96,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   // - Settings/Targets: nur plannable Users (AEs)
   const goLiveReceiverIds = useMemo(() => goLiveReceivers.map(u => u.id), [goLiveReceivers]);
   const plannableUserIds = useMemo(() => plannableUsers.map(u => u.id), [plannableUsers]);
-  const { settings: multiSettings, goLives: multiGoLives, combined, loading: dataLoading } = useMultiUserData(
+  const { settings: multiSettings, goLives: multiGoLives, combined, loading: dataLoading, refetch: refetchMultiData } = useMultiUserData(
     goLiveReceiverIds,
     selectedYear,
     plannableUserIds
@@ -235,9 +239,82 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     });
   }, [monthlyData, currentMonth]);
 
+  const allGoLives = useMemo<GoLive[]>(
+    () => combined?.goLives ?? Array.from(multiGoLives?.values() ?? []).flat(),
+    [combined, multiGoLives]
+  );
+
+  const monthDetailGoLives = useMemo(
+    () =>
+      selectedMonthDetail
+        ? allGoLives
+            .filter((g) => g.month === selectedMonthDetail)
+            .sort((a, b) => new Date(a.go_live_date).getTime() - new Date(b.go_live_date).getTime())
+        : [],
+    [allGoLives, selectedMonthDetail]
+  );
+
+  const userNameById = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
+
+  // Gleiche PAY-Logik wie in calculations.ts (Reporting):
+  // 1) pay_arr (Ist), 2) pay_arr_target (Forecast), 3) Terminal-Default aus Settings (avg_pay_bill * 12)
+  const getEffectiveGoLivePayArr = (gl: GoLive): number => {
+    if (gl.pay_arr !== null && gl.pay_arr !== undefined) return gl.pay_arr;
+    if (gl.pay_arr_target !== null && gl.pay_arr_target !== undefined) return gl.pay_arr_target;
+    if (!gl.has_terminal) return 0;
+    const userSettings = multiSettings?.get(gl.user_id);
+    const fallbackAvgPayBill = userSettings?.avg_pay_bill ?? combined?.settings?.avg_pay_bill ?? 0;
+    return fallbackAvgPayBill * 12;
+  };
+
+  useEffect(() => {
+    if (!selectedMonthDetail) return;
+    const nextInputs: Record<string, string> = {};
+    monthDetailGoLives.forEach((gl) => {
+      nextInputs[gl.id] = gl.pay_arr !== null && gl.pay_arr !== undefined
+        ? String(Math.round((gl.pay_arr / 12) * 100) / 100)
+        : '';
+    });
+    setPayIstInputsByGoLiveId(nextInputs);
+    setSavingPayIstByGoLiveId({});
+    setPayIstErrorByGoLiveId({});
+  }, [selectedMonthDetail, monthDetailGoLives]);
+
+  const getDraftPayIstMonthly = (gl: GoLive): number | null => {
+    const raw = (payIstInputsByGoLiveId[gl.id] ?? '').trim();
+    if (!raw) return null;
+    const normalized = raw.replace(',', '.');
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const getEffectiveGoLivePayArrForDisplay = (gl: GoLive): number => {
+    const draftMonthly = getDraftPayIstMonthly(gl);
+    if (draftMonthly !== null) return draftMonthly * 12;
+    return getEffectiveGoLivePayArr(gl);
+  };
+
+  const handleSavePayIstForGoLive = async (gl: GoLive) => {
+    const draftMonthly = getDraftPayIstMonthly(gl);
+    setSavingPayIstByGoLiveId((prev) => ({ ...prev, [gl.id]: true }));
+    setPayIstErrorByGoLiveId((prev) => ({ ...prev, [gl.id]: '' }));
+    const nextPayArr = draftMonthly === null ? null : Math.round(draftMonthly * 12 * 100) / 100;
+
+    const { error } = await supabase
+      .from('go_lives')
+      .update({ pay_arr: nextPayArr, updated_at: new Date().toISOString() })
+      .eq('id', gl.id);
+
+    if (error) {
+      setPayIstErrorByGoLiveId((prev) => ({ ...prev, [gl.id]: error.message || 'Speichern fehlgeschlagen' }));
+    } else {
+      await refetchMultiData();
+    }
+    setSavingPayIstByGoLiveId((prev) => ({ ...prev, [gl.id]: false }));
+  };
+
   // YTD: aus monthlyData (bereits aus combined oder Maps aggregiert)
   const ytdMonthlyResult = useMemo((): YtdMonthlyRow[] => {
-    const allGoLives = combined?.goLives ?? Array.from(multiGoLives?.values() ?? []).flat();
     return Array.from({ length: 12 }, (_, i) => {
       const m = monthlyData[i];
       const goLives = m?.goLives ?? 0;
@@ -738,15 +815,25 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                       <th className="px-4 py-3 text-right text-xs font-medium text-orange-600 uppercase">Pay Plan</th>
                       <th className="px-4 py-3 text-right text-xs font-medium text-orange-600 uppercase">Pay IST</th>
                       <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-blue-600 uppercase">Gesamt ARR Plan</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-blue-700 uppercase">Gesamt ARR Ist</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
                     {ytdMonthlyResult.map((r, idx) => {
                       const subsPct = r.subs_target > 0 ? r.subs_actual / r.subs_target : 0;
                       const payPct = r.pay_target > 0 ? r.pay_actual / r.pay_target : 0;
+                      const totalPlan = r.subs_target + r.pay_target;
+                      const totalActual = r.subs_actual + r.pay_actual;
+                      const totalPct = totalPlan > 0 ? totalActual / totalPlan : 0;
                       const isPast = idx <= currentMonth;
                       return (
-                        <tr key={r.month} className={isPast ? '' : 'text-gray-400'}>
+                        <tr
+                          key={r.month}
+                          className={`transition ${isPast ? 'cursor-pointer hover:bg-blue-50' : 'text-gray-400 cursor-pointer hover:bg-gray-50'}`}
+                          onClick={() => setSelectedMonthDetail(r.month)}
+                        >
                           <td className="px-4 py-3 font-medium">{MONTH_NAMES[r.month - 1]}</td>
                           <td className="px-4 py-3 text-right">{r.go_lives_count}</td>
                           <td className="px-4 py-3 text-right">{r.terminals_count}</td>
@@ -756,6 +843,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                           <td className="px-4 py-3 text-right text-orange-600">{formatCurrency(r.pay_target)}</td>
                           <td className="px-4 py-3 text-right text-orange-700 font-medium">{formatCurrency(r.pay_actual)}</td>
                           <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(payPct)}`}>{formatPercent(payPct)}</td>
+                          <td className="px-4 py-3 text-right text-blue-600">{formatCurrency(totalPlan)}</td>
+                          <td className="px-4 py-3 text-right text-blue-700 font-medium">{formatCurrency(totalActual)}</td>
+                          <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(totalPct)}`}>{formatPercent(totalPct)}</td>
                         </tr>
                       );
                     })}
@@ -775,6 +865,11 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                       <td className={`px-4 py-3 text-right ${getAchievementColor(fullYearTotals.totalPayTarget > 0 ? fullYearTotals.totalPayARR / fullYearTotals.totalPayTarget : 0)}`}>
                         {formatPercent(fullYearTotals.totalPayTarget > 0 ? fullYearTotals.totalPayARR / fullYearTotals.totalPayTarget : 0)}
                       </td>
+                      <td className="px-4 py-3 text-right text-blue-600">{formatCurrency(fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget)}</td>
+                      <td className="px-4 py-3 text-right text-blue-700">{formatCurrency(fullYearTotals.totalSubsARR + fullYearTotals.totalPayARR)}</td>
+                      <td className={`px-4 py-3 text-right ${getAchievementColor((fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) > 0 ? (fullYearTotals.totalSubsARR + fullYearTotals.totalPayARR) / (fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) : 0)}`}>
+                        {formatPercent((fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) > 0 ? (fullYearTotals.totalSubsARR + fullYearTotals.totalPayARR) / (fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) : 0)}
+                      </td>
                     </tr>
                   </tfoot>
                 </table>
@@ -783,6 +878,132 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           </div>
         )}
       </div>
+
+      {selectedMonthDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setSelectedMonthDetail(null)}
+        >
+          <div
+            className="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-xl bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-center justify-between border-b bg-white px-6 py-4">
+              <h3 className="text-lg font-semibold text-gray-800">
+                📅 {MONTH_NAMES[selectedMonthDetail - 1]} {selectedYear} - Go-Lives
+              </h3>
+              <button
+                onClick={() => setSelectedMonthDetail(null)}
+                className="rounded-lg p-2 text-gray-500 transition hover:bg-gray-100"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6">
+              {monthDetailGoLives.length === 0 ? (
+                <div className="py-8 text-center text-gray-500">
+                  {t('monthDetail.noGoLives')}
+                </div>
+              ) : (
+                <>
+                  <div className="mb-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Go-Lives</div>
+                      <div className="text-lg font-bold text-gray-800">{monthDetailGoLives.length}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Terminals</div>
+                      <div className="text-lg font-bold text-blue-700">
+                        {monthDetailGoLives.filter((g) => g.has_terminal).length}
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Subs ARR</div>
+                      <div className="text-lg font-bold text-green-700">
+                        {formatCurrency(monthDetailGoLives.reduce((sum, g) => sum + g.subs_arr, 0))}
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Pay ARR</div>
+                      <div className="text-lg font-bold text-orange-700">
+                        {formatCurrency(monthDetailGoLives.reduce((sum, g) => sum + getEffectiveGoLivePayArrForDisplay(g), 0))}
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Gesamt ARR</div>
+                      <div className="text-lg font-bold text-blue-700">
+                        {formatCurrency(
+                          monthDetailGoLives.reduce((sum, g) => sum + (g.subs_arr || 0) + getEffectiveGoLivePayArrForDisplay(g), 0)
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b bg-gray-50">
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.oakId')}</th>
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('monthDetail.customer')}</th>
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.goLiveDate')}</th>
+                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.assignedTo')}</th>
+                          <th className="px-3 py-2 text-right font-semibold text-green-700">{t('goLive.subsArr')}</th>
+                          <th className="px-3 py-2 text-right font-semibold text-emerald-700">Pay Ist / Monat (€)</th>
+                          <th className="px-3 py-2 text-right font-semibold text-orange-700">{t('goLive.payArr')}</th>
+                          <th className="px-3 py-2 text-right font-semibold text-blue-700">Gesamt ARR</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {monthDetailGoLives.map((gl) => (
+                          <tr key={gl.id} className="border-b last:border-b-0">
+                            <td className="px-3 py-2 text-gray-500">{gl.oak_id || '-'}</td>
+                            <td className="px-3 py-2 font-medium text-gray-800">{gl.customer_name}</td>
+                            <td className="px-3 py-2 text-gray-700">{new Date(gl.go_live_date).toLocaleDateString('de-DE')}</td>
+                            <td className="px-3 py-2 text-gray-700">{userNameById.get(gl.user_id) || '-'}</td>
+                            <td className="px-3 py-2 text-right text-green-700">{formatCurrency(gl.subs_arr)}</td>
+                            <td className="px-3 py-2">
+                              <div className="flex items-center justify-end gap-2">
+                                <input
+                                  type="number"
+                                  value={payIstInputsByGoLiveId[gl.id] ?? ''}
+                                  onChange={(e) =>
+                                    setPayIstInputsByGoLiveId((prev) => ({ ...prev, [gl.id]: e.target.value }))
+                                  }
+                                  disabled={!gl.has_terminal || savingPayIstByGoLiveId[gl.id]}
+                                  placeholder={gl.has_terminal ? 'z.B. 145' : '-'}
+                                  className={`w-24 rounded border px-2 py-1 text-right text-sm ${
+                                    !gl.has_terminal ? 'bg-gray-100 text-gray-400 border-gray-200' : 'border-emerald-300'
+                                  }`}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleSavePayIstForGoLive(gl)}
+                                  disabled={!gl.has_terminal || savingPayIstByGoLiveId[gl.id]}
+                                  className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  {savingPayIstByGoLiveId[gl.id] ? '...' : 'Speichern'}
+                                </button>
+                              </div>
+                              {payIstErrorByGoLiveId[gl.id] ? (
+                                <div className="mt-1 text-right text-xs text-red-600">{payIstErrorByGoLiveId[gl.id]}</div>
+                              ) : null}
+                            </td>
+                            <td className="px-3 py-2 text-right text-orange-700">{formatCurrency(getEffectiveGoLivePayArrForDisplay(gl))}</td>
+                            <td className="px-3 py-2 text-right font-medium text-blue-700">
+                              {formatCurrency((gl.subs_arr || 0) + getEffectiveGoLivePayArrForDisplay(gl))}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

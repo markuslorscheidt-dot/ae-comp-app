@@ -3,6 +3,18 @@
     {
       "path": "/api/goLive/sync/cron",
       "schedule": "0 5 * * *"
+    },
+    {
+      "path": "/api/salespipe/sync/cron",
+      "schedule": "10 5 * * *"
+    },
+    {
+      "path": "/api/churn/sync/cron",
+      "schedule": "20 5 * * *"
+    },
+    {
+      "path": "/api/upDownsells/sync/cron",
+      "schedule": "30 5 * * *"
     }
   ]
 }

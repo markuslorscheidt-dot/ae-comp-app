@@ -163,6 +163,11 @@ export interface AESettings {
   
   // Grundeinstellungen
   ote: number;                      // On-Target Earnings (€57.000)
+  base_salary?: number;             // Fixgehalt (OTC-Bestandteil)
+  variable_ote?: number;            // Variable OTE (OTC-Bestandteil)
+  arr_multiple?: number;            // ARR Multiple (Quota = OTC * Multiple)
+  gross_margin_pct?: number;        // Bruttomarge in Prozent (z. B. 70)
+  active_months_in_year?: number;   // Optional: aktive AE-Monate im Jahr (1-12) fuer anteilige Kalkulation
   
   // Go-Lives pro Monat (für Zielberechnung) - Legacy: Summe aller Kategorien
   monthly_go_live_targets: number[];  // 12 Werte [25, 30, 32, 49, ...]
@@ -184,6 +189,7 @@ export interface AESettings {
   // Berechnete monatliche ARR-Ziele (Subs wird aus Go-Lives berechnet)
   monthly_subs_targets: number[];   // 12 Werte - berechnet: Go-Lives × avg_subs_bill × 12
   monthly_pay_targets: number[];    // 12 Werte - NEU: direkt aus Sheet ODER berechnet
+  monthly_total_arr_targets?: number[]; // 12 Werte - NEU: Gesamt ARR Ziel pro Monat
   
   // NEU: Pay ARR Targets direkt aus Google Sheet (ersetzt Berechnung)
   monthly_pay_arr_targets?: number[];  // 12 Werte - direkt importiert aus Sheet
@@ -196,6 +202,7 @@ export interface AESettings {
   // Provisions-Stufen (frei editierbar)
   subs_tiers: ProvisionTier[];
   pay_tiers: ProvisionTier[];
+  total_arr_tiers?: ProvisionTier[]; // NEU: Gemeinsames Tier-System auf Gesamt ARR
   
   // NEU: Google Sheets Integration
   google_sheet_url?: string;        // URL zum Google Sheet
@@ -339,6 +346,17 @@ export const DEFAULT_PAY_TIERS: ProvisionTier[] = [
   { label: '120%+', min: 1.2, max: 999, rate: 0.05 },
 ];
 
+// Default DACH Total ARR Provisions-Stufen (Unified Tier Model)
+export const DEFAULT_TOTAL_ARR_TIERS: ProvisionTier[] = [
+  { label: '< 50%', min: 0, max: 0.5, rate: 0 },
+  { label: '50% - 70%', min: 0.5, max: 0.7, rate: 0.015 },
+  { label: '70% - 85%', min: 0.7, max: 0.85, rate: 0.02 },
+  { label: '85% - 100%', min: 0.85, max: 1.0, rate: 0.025 },
+  { label: '100% - 110%', min: 1.0, max: 1.1, rate: 0.029 },
+  { label: '110% - 120%', min: 1.1, max: 1.2, rate: 0.04 },
+  { label: '120%+', min: 1.2, max: 999, rate: 0.05 },
+];
+
 // Default Go-Lives pro Monat (aus Excel Screenshot)
 export const DEFAULT_MONTHLY_GO_LIVE_TARGETS = [
   25, 30, 32, 49, 39, 32, 31, 28, 48, 48, 45, 18
@@ -358,6 +376,10 @@ export const DEFAULT_MONTHLY_PARTNERSHIPS_TARGETS = [
 // Default Grundeinstellungen
 export const DEFAULT_SETTINGS = {
   ote: 57000,
+  base_salary: 42000,
+  variable_ote: 15000,
+  arr_multiple: 5,
+  gross_margin_pct: 70,
   avg_subs_bill: 155,
   avg_pay_bill: 50,              // €50 pro Terminal/Monat
   avg_pay_bill_tipping: 30,     // €30 pro Tipping-Terminal/Monat

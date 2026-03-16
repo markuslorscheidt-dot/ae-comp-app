@@ -277,7 +277,7 @@ export async function getChurnAutoImportState() {
 export async function extractSheetRows(): Promise<ExtractResult> {
   const apiKey = process.env.GOOGLE_SHEETS_API_KEY;
   const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const range = process.env.GOOGLE_SHEETS_RANGE_CHURN || 'mirror_Churn!A:Z';
+  const range = process.env.GOOGLE_SHEETS_RANGE_CHURN || 'mirror__Churn!A:Z';
 
   if (!apiKey || !spreadsheetId) {
     return {
@@ -294,10 +294,13 @@ export async function extractSheetRows(): Promise<ExtractResult> {
   const response = await fetch(url, { cache: 'no-store' });
   const data = await response.json();
   if (!response.ok) {
+    const apiErrorMessage = String(data?.error?.message || 'Google Sheets API Fehler');
     return {
       success: false,
       status: response.status,
-      error: data?.error?.message || 'Google Sheets API Fehler',
+      error: apiErrorMessage.includes('Unable to parse range')
+        ? `Google Sheets Range ungueltig: ${range}. Bitte GOOGLE_SHEETS_RANGE_CHURN in .env.local / Vercel auf den exakten Tab-Namen setzen (z. B. mirror__Churn!A:Z).`
+        : apiErrorMessage,
       details: data,
     };
   }

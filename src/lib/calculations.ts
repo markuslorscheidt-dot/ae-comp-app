@@ -6,8 +6,10 @@ import {
   YearSummary,
   OTEProjection,
   MONTH_NAMES,
+  DEFAULT_SETTINGS,
   DEFAULT_SUBS_TIERS,
   DEFAULT_PAY_TIERS,
+  DEFAULT_TOTAL_ARR_TIERS,
   DEFAULT_MONTHLY_GO_LIVE_TARGETS
 } from './types';
 
@@ -34,6 +36,112 @@ export function getCurrentTierLabel(achievement: number, tiers: ProvisionTier[])
     }
   }
   return tiers[tiers.length - 1].label;
+}
+
+/**
+ * OTC = Base Salary + Variable OTE
+ */
+export function calculateOtc(baseSalary: number, variableOte: number): number {
+  return Math.max(0, (baseSalary || 0) + (variableOte || 0));
+}
+
+/**
+ * Quota ARR = OTC * Multiple
+ */
+export function calculateQuotaFromMultiple(otc: number, arrMultiple: number): number {
+  return Math.max(0, otc * (arrMultiple || 0));
+}
+
+/**
+ * CAC Payback (Monate) = OTC / (Quota * Gross Margin) * 12
+ */
+export function calculateCacPaybackMonths(otc: number, quotaArr: number, grossMarginPct: number): number {
+  const contribution = quotaArr * ((grossMarginPct || 0) / 100);
+  if (contribution <= 0) return Infinity;
+  return (otc / contribution) * 12;
+}
+
+/**
+ * Rueckwaertsrechnung: Welche Bruttomarge wird fuer einen Ziel-Payback benoetigt?
+ * Formel umgestellt aus:
+ *   payback = otc / (quota * margin) * 12
+ */
+export function calculateRequiredGrossMarginPctForPayback(
+  otc: number,
+  quotaArr: number,
+  targetPaybackMonths: number
+): number | null {
+  if (otc <= 0 || quotaArr <= 0 || targetPaybackMonths <= 0) return null;
+  const requiredContribution = (otc * 12) / targetPaybackMonths;
+  return (requiredContribution / quotaArr) * 100;
+}
+
+/**
+ * Rueckwaertsrechnung: Welches ARR-Multiple wird fuer einen Ziel-Payback benoetigt?
+ * Mit quota = otc * multiple und:
+ *   payback = otc / (quota * margin) * 12
+ * => multiple = 12 / (payback * margin)
+ */
+export function calculateRequiredArrMultipleForPayback(
+  grossMarginPct: number,
+  targetPaybackMonths: number,
+  activeMonthsInYear: number = 12
+): number | null {
+  const marginFraction = (grossMarginPct || 0) / 100;
+  if (marginFraction <= 0 || targetPaybackMonths <= 0) return null;
+  const monthsFactor = Math.min(12, Math.max(1, Math.round(activeMonthsInYear))) / 12;
+  return 12 / (targetPaybackMonths * marginFraction * monthsFactor);
+}
+
+/**
+ * Liefert zentrale Multiple-/OTC-Kalibrierungskennzahlen.
+ */
+export function calculateMultipleCalibration(settings: AESettings, plannedTerminals: number = 0) {
+  const baseSalary = settings.base_salary ?? 0;
+  const variableOte = settings.variable_ote ?? settings.ote ?? 0;
+  const arrMultiple = settings.arr_multiple ?? DEFAULT_SETTINGS.arr_multiple;
+  const grossMarginPct = settings.gross_margin_pct ?? DEFAULT_SETTINGS.gross_margin_pct;
+
+  const otc = calculateOtc(baseSalary, variableOte);
+  const quotaArrAnnual = calculateQuotaFromMultiple(otc, arrMultiple);
+  const activeMonths = Math.min(12, Math.max(1, Math.round(settings.active_months_in_year ?? 12)));
+  const quotaArr = quotaArrAnnual * (activeMonths / 12);
+  const paybackMonths = calculateCacPaybackMonths(otc, quotaArr, grossMarginPct);
+
+  const totalArrTarget = (settings.monthly_total_arr_targets?.reduce((sum, v) => sum + (v || 0), 0) || 0)
+    || ((settings.monthly_subs_targets?.reduce((sum, v) => sum + (v || 0), 0) || 0)
+      + (settings.monthly_pay_targets?.reduce((sum, v) => sum + (v || 0), 0) || 0));
+
+  const totalTiers = settings.total_arr_tiers || settings.subs_tiers || DEFAULT_TOTAL_ARR_TIERS;
+  const totalRateAt100 = getProvisionRate(1.0, totalTiers);
+  const expectedProvisionAt100 = totalArrTarget * totalRateAt100;
+
+  const yearlyGoLives = settings.monthly_go_live_targets?.reduce((a, b) => a + (b || 0), 0) || 0;
+  const penetration = yearlyGoLives > 0 ? plannedTerminals / yearlyGoLives : 0;
+  const terminalRate = penetration >= settings.terminal_penetration_threshold
+    ? settings.terminal_bonus
+    : settings.terminal_base;
+  const terminalProvisionAt100 = plannedTerminals * terminalRate;
+
+  const expectedTotalPayoutAt100 = expectedProvisionAt100 + terminalProvisionAt100;
+  const quotaDeviationPct = quotaArr > 0 ? ((totalArrTarget - quotaArr) / quotaArr) * 100 : 0;
+
+  return {
+    baseSalary,
+    variableOte,
+    otc,
+    arrMultiple,
+    grossMarginPct,
+    activeMonths,
+    quotaArrAnnual,
+    quotaArr,
+    totalArrTarget,
+    quotaDeviationPct,
+    paybackMonths,
+    expectedProvisionAt100,
+    terminalProvisionAt100,
+    expectedTotalPayoutAt100,
+  };
 }
 
 /**
@@ -156,6 +264,60 @@ export function calculateMonthlyResult(
     m3Provision = payProvision - payM0Provision;
   }
   // Wenn pay_arr noch nicht erfasst: M3 = 0, Clawback = 0 (bleibt bei Init-Werten)
+
+  // ========== UNIFIED TOTAL ARR MODE (mit Legacy-Fallback) ==========
+  // Wenn total_arr_tiers und monthly_total_arr_targets vorhanden sind, wird die Provision
+  // auf Basis von Gesamt-ARR-Zielerreichung gerechnet. Terminal bleibt separat bestehen.
+  const hasUnifiedTotalArrModel = Boolean(
+    settings.total_arr_tiers?.length &&
+      settings.monthly_total_arr_targets?.length
+  );
+
+  if (hasUnifiedTotalArrModel) {
+    const totalTarget = settings.monthly_total_arr_targets?.[month - 1] || 0;
+    const payActualEffectiveCommission = commissionGoLives.reduce(
+      (sum, gl) => sum + getEffectivePayArr(gl, settings),
+      0
+    );
+    const totalActualCommission = subsActualCommission + payActualEffectiveCommission;
+    const totalAchievement = totalTarget > 0 ? totalActualCommission / totalTarget : 0;
+    const totalRate = getProvisionRate(totalAchievement, settings.total_arr_tiers || DEFAULT_TOTAL_ARR_TIERS);
+
+    const unifiedSubsProvision = subsActualCommission * totalRate;
+    const unifiedPayProvision = payActualEffectiveCommission * totalRate;
+    const unifiedCoreProvision = unifiedSubsProvision + unifiedPayProvision;
+    const unifiedTotalProvision = unifiedCoreProvision + terminalProvision;
+
+    return {
+      month,
+      month_name: MONTH_NAMES[month - 1],
+      go_lives_count: goLivesCount,
+      go_lives_target: goLivesTarget,
+      terminals_count: terminalsCount,
+      terminal_penetration: terminalPenetration,
+      subs_target: subsTarget,
+      subs_actual: subsActualTotal,
+      subs_achievement: subsAchievement,
+      subs_rate: totalRate,
+      subs_provision: unifiedSubsProvision,
+      terminal_rate: terminalRate,
+      terminal_provision: terminalProvision,
+      pay_arr_target_total: payArrTargetTotal,
+      pay_target: payTarget,
+      pay_m0_achievement: payTarget > 0 ? payArrTargetCommission / payTarget : 0,
+      pay_m0_rate: totalRate,
+      pay_m0_provision: unifiedPayProvision,
+      pay_actual: payActualTotal,
+      pay_achievement: payTarget > 0 ? payActualEffectiveCommission / payTarget : 0,
+      pay_rate: totalRate,
+      pay_provision: unifiedPayProvision,
+      pay_clawback_base: 0,
+      pay_clawback: 0,
+      m0_provision: unifiedTotalProvision,
+      m3_provision: 0,
+      total_provision: unifiedTotalProvision,
+    };
+  }
   
   // ========== TOTALS ==========
   // M0 Provision: Subs + Terminal + Pay auf Target-Basis
@@ -327,10 +489,14 @@ export function calculateOTEProjections(settings: AESettings, plannedTerminals?:
 
   const yearlySubsTarget = settings.monthly_subs_targets?.reduce((a, b) => a + b, 0) || 0;
   const yearlyPayTarget = settings.monthly_pay_targets?.reduce((a, b) => a + b, 0) || 0;
+  const yearlyTotalTarget =
+    settings.monthly_total_arr_targets?.reduce((a, b) => a + b, 0) || (yearlySubsTarget + yearlyPayTarget);
   const yearlyGoLives = settings.monthly_go_live_targets?.reduce((a, b) => a + b, 0) || 0;
 
   const subsTiers = settings.subs_tiers || DEFAULT_SUBS_TIERS;
   const payTiers = settings.pay_tiers || DEFAULT_PAY_TIERS;
+  const totalTiers = settings.total_arr_tiers || DEFAULT_TOTAL_ARR_TIERS;
+  const hasUnifiedTotalArrModel = Boolean(settings.total_arr_tiers?.length && settings.monthly_total_arr_targets?.length);
   
   // Terminal-Provision: Basierend auf Penetration pro Szenario
   const terminals = plannedTerminals !== undefined ? plannedTerminals : yearlyGoLives;
@@ -345,9 +511,12 @@ export function calculateOTEProjections(settings: AESettings, plannedTerminals?:
     // Finde die passende Rate für diesen Tier
     const subsRate = subsTiers.find(t => t.min === tierMin)?.rate || 0;
     const payRate = payTiers.find(t => t.min === tierMin)?.rate || 0;
+    const totalRate = totalTiers.find(t => t.min === tierMin)?.rate || 0;
 
     // Berechne Provisionen
-    const subsProvision = expectedSubsArr * subsRate;
+    const subsProvision = hasUnifiedTotalArrModel
+      ? (yearlyTotalTarget * factor) * (yearlyTotalTarget > 0 ? (yearlySubsTarget / yearlyTotalTarget) : 0) * totalRate
+      : expectedSubsArr * subsRate;
     
     // Terminal-Provision: Skalierte Anzahl Terminals × Rate
     // Die Terminal-Anzahl wird mit dem Szenario-Faktor skaliert
@@ -357,7 +526,9 @@ export function calculateOTEProjections(settings: AESettings, plannedTerminals?:
     const terminalRate = scaledPenetration >= penetrationThreshold ? settings.terminal_bonus : settings.terminal_base;
     const terminalProvision = scaledTerminals * terminalRate;
     
-    const payProvision = expectedPayArr * payRate;
+    const payProvision = hasUnifiedTotalArrModel
+      ? (yearlyTotalTarget * factor) * (yearlyTotalTarget > 0 ? (yearlyPayTarget / yearlyTotalTarget) : 0) * totalRate
+      : expectedPayArr * payRate;
     const totalProvision = subsProvision + terminalProvision + payProvision;
 
     // Prüfe ob es zum OTE passt (±10%)
