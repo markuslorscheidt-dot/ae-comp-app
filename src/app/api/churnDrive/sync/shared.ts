@@ -452,21 +452,32 @@ async function upsertClientListRows(
     });
   });
 
-  const oakIds = validRows.map((r) => r.oak_id);
+  const dedupedByOakId = new Map<number, any>();
+  validRows.forEach((row) => {
+    // Last row wins to avoid ON CONFLICT touching the same row multiple times in one statement.
+    dedupedByOakId.set(row.oak_id, row);
+  });
+  const dedupedRows = Array.from(dedupedByOakId.values());
+  const duplicateCount = validRows.length - dedupedRows.length;
+  if (duplicateCount > 0) {
+    warnings.push(`client_list: ${duplicateCount} Duplikate nach OAK ID im Source-File erkannt und konsolidiert.`);
+  }
+
+  const oakIds = dedupedRows.map((r) => r.oak_id);
   const { data: existingRows } = oakIds.length
     ? await supabase.from('churn_events').select('oak_id').in('oak_id', oakIds)
     : { data: [] as any[] };
   const existingSet = new Set((existingRows || []).map((r: any) => Number(r.oak_id)));
 
-  const { error } = validRows.length
-    ? await supabase.from('churn_events').upsert(validRows, { onConflict: 'oak_id', ignoreDuplicates: false })
+  const { error } = dedupedRows.length
+    ? await supabase.from('churn_events').upsert(dedupedRows, { onConflict: 'oak_id', ignoreDuplicates: false })
     : { error: null as any };
   if (error) {
     throw new Error(`Client-List Upsert fehlgeschlagen: ${error.message}`);
   }
 
-  const updated = validRows.filter((r) => existingSet.has(r.oak_id)).length;
-  const imported = validRows.length;
+  const updated = dedupedRows.filter((r) => existingSet.has(r.oak_id)).length;
+  const imported = dedupedRows.length;
 
   return { imported, updated, warnings };
 }
@@ -511,21 +522,32 @@ async function upsertScheduledRows(
     });
   });
 
-  const oakIds = validRows.map((r) => r.oak_id);
+  const dedupedByOakId = new Map<number, any>();
+  validRows.forEach((row) => {
+    // Last row wins to avoid ON CONFLICT touching the same row multiple times in one statement.
+    dedupedByOakId.set(row.oak_id, row);
+  });
+  const dedupedRows = Array.from(dedupedByOakId.values());
+  const duplicateCount = validRows.length - dedupedRows.length;
+  if (duplicateCount > 0) {
+    warnings.push(`scheduled_detail: ${duplicateCount} Duplikate nach OAK ID im Source-File erkannt und konsolidiert.`);
+  }
+
+  const oakIds = dedupedRows.map((r) => r.oak_id);
   const { data: existingRows } = oakIds.length
     ? await supabase.from('churn_scheduled_events').select('oak_id').in('oak_id', oakIds)
     : { data: [] as any[] };
   const existingSet = new Set((existingRows || []).map((r: any) => Number(r.oak_id)));
 
-  const { error } = validRows.length
-    ? await supabase.from('churn_scheduled_events').upsert(validRows, { onConflict: 'oak_id', ignoreDuplicates: false })
+  const { error } = dedupedRows.length
+    ? await supabase.from('churn_scheduled_events').upsert(dedupedRows, { onConflict: 'oak_id', ignoreDuplicates: false })
     : { error: null as any };
   if (error) {
     throw new Error(`Scheduled-Detail Upsert fehlgeschlagen: ${error.message}`);
   }
 
-  const updated = validRows.filter((r) => existingSet.has(r.oak_id)).length;
-  const imported = validRows.length;
+  const updated = dedupedRows.filter((r) => existingSet.has(r.oak_id)).length;
+  const imported = dedupedRows.length;
   return { imported, updated, warnings };
 }
 
