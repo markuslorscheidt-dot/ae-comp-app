@@ -50,5 +50,47 @@ export async function GET(request: Request) {
     );
   }
 
-  return NextResponse.json({ success: true, runs: runs || [] });
+  const runList = runs || [];
+  if (runList.length === 0) {
+    return NextResponse.json({ success: true, runs: [] });
+  }
+
+  const runIds = runList.map((run: any) => run.id).filter(Boolean);
+  const { data: items, error: itemsError } = await supabase
+    .from('churn_drive_import_run_items')
+    .select('run_id, level, message')
+    .in('run_id', runIds);
+
+  if (itemsError) {
+    return NextResponse.json(
+      { success: false, error: `Import-Run-Items konnten nicht geladen werden: ${itemsError.message}` },
+      { status: 500 }
+    );
+  }
+
+  const byRun: Record<string, { duplicates: number; hint: string | null }> = {};
+  (items || []).forEach((item: any) => {
+    const runId = String(item.run_id || '');
+    if (!runId) return;
+    if (!byRun[runId]) byRun[runId] = { duplicates: 0, hint: null };
+
+    const message = String(item.message || '');
+    const isDuplicate = item.level === 'duplicate' || /duplikat/i.test(message);
+    if (isDuplicate) byRun[runId].duplicates += 1;
+
+    if (!byRun[runId].hint && item.level === 'warning' && message) {
+      byRun[runId].hint = message;
+    }
+  });
+
+  const enrichedRuns = runList.map((run: any) => {
+    const meta = byRun[String(run.id)] || { duplicates: 0, hint: null };
+    return {
+      ...run,
+      duplicates: Number(meta.duplicates || 0),
+      hint: meta.hint || run.reason || null,
+    };
+  });
+
+  return NextResponse.json({ success: true, runs: enrichedRuns });
 }

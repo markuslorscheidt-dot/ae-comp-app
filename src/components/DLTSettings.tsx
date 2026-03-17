@@ -366,21 +366,23 @@ interface ChurnImportRun {
   status: 'success' | 'partial' | 'failed' | 'skipped';
   started_at: string;
   finished_at: string | null;
+  source_file_name?: string | null;
   imported: number;
   failed: number;
-  duplicates: number;
+  duplicates?: number;
   updated?: number;
-  to_import: number;
+  to_import?: number;
   auto_import_enabled: boolean;
   skipped: boolean;
   reason: string | null;
+  hint?: string | null;
 }
 
 interface ChurnImportRunItem {
   id: string;
   run_id: string;
-  row_number: number | null;
-  oak_id: number | null;
+  row_number?: number | null;
+  oak_id?: number | null;
   level: 'error' | 'warning' | 'duplicate';
   message: string;
   created_at: string;
@@ -1059,7 +1061,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     setChurnImportHistoryLoading(true);
     setChurnImportHistoryError('');
     try {
-      const response = await fetch('/api/churn/sync/history?limit=20', { method: 'GET' });
+      const response = await fetch('/api/churnDrive/sync/history?limit=50', { method: 'GET' });
       const data = await response.json();
       if (!response.ok || !data.success) {
         setChurnImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
@@ -1079,7 +1081,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
 
   const loadChurnImportRunItems = useCallback(async (runId: string) => {
     try {
-      const response = await fetch(`/api/churn/sync/history?runId=${encodeURIComponent(runId)}`, {
+      const response = await fetch(`/api/churnDrive/sync/history?runId=${encodeURIComponent(runId)}`, {
         method: 'GET',
       });
       const data = await response.json();
@@ -1418,7 +1420,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadManualGoLiveWriteLockState();
       loadAutoImportState();
       loadImportHistory();
-      loadChurnAutoImportState();
       loadChurnImportHistory();
       loadUpDownsellsAutoImportState();
       loadUpDownsellsImportHistory();
@@ -1430,7 +1431,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     loadManualGoLiveWriteLockState,
     loadAutoImportState,
     loadImportHistory,
-    loadChurnAutoImportState,
     loadChurnImportHistory,
     loadUpDownsellsAutoImportState,
     loadUpDownsellsImportHistory,
@@ -1651,11 +1651,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const latestAutoRun = useMemo(
     () => importRuns.find((run) => run.triggered_by === 'cron') || null,
     [importRuns]
-  );
-
-  const latestChurnAutoRun = useMemo(
-    () => churnImportRuns.find((run) => run.triggered_by === 'cron') || null,
-    [churnImportRuns]
   );
 
   const latestUpDownsellsAutoRun = useMemo(
@@ -3784,395 +3779,97 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
 
           {activeImportSubTab === 'churnImports' && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
-              <div>
-                <h4 className="text-lg font-semibold text-gray-800 mb-1">Google-Sheet Batch Import</h4>
-                <p className="text-sm text-gray-500">
-                  Pruefe eingehende Churn-Daten als Stapel und entscheide dann ueber den Import.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-lg font-semibold text-gray-800 mb-1">Churn Drive Import-Übersicht (Datenbank)</h4>
+                  <p className="text-sm text-gray-500">
+                    Der alte Google-Sheet-Churn-Import wurde entfernt. Hier siehst du die importierten Churn-Dateien aus der
+                    Datenbank-Historie.
+                  </p>
+                </div>
                 <button
-                  onClick={() => setChurnImportMode('manual')}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
-                    churnImportMode === 'manual'
-                      ? 'bg-blue-50 border-blue-300 text-blue-700'
-                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
-                  }`}
+                  onClick={loadChurnImportHistory}
+                  disabled={churnImportHistoryLoading}
+                  className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
                 >
-                  Manuell pruefen
-                </button>
-                <button
-                  onClick={() => setChurnImportMode('automatic')}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
-                    churnImportMode === 'automatic'
-                      ? 'bg-green-50 border-green-300 text-green-700'
-                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
-                  }`}
-                >
-                  Automatisch einlaufen
+                  {churnImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
                 </button>
               </div>
 
-              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
-                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
-                <input
-                  type="checkbox"
-                  className="h-4 w-4"
-                  checked={churnAutoImportEnabled}
-                  disabled={churnAutoImportLoading || churnAutoImportSaving}
-                  onChange={(e) => handleChurnAutoImportToggle(e.target.checked)}
-                />
-              </label>
-
-              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
-                <div>Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.</div>
-                {churnAutoImportLoading ? <div>Status wird geladen...</div> : null}
-                {churnAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
-                {churnAutoImportMessage ? <div>{churnAutoImportMessage}</div> : null}
-              </div>
-
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={handleRunChurnBatchCheck}
-                  disabled={churnBatchLoading || churnBatchImportLoading}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {churnBatchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
-                </button>
-                <button
-                  onClick={handleRunChurnBatchImport}
-                  disabled={churnBatchImportLoading || churnBatchLoading}
-                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-                >
-                  {churnBatchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
-                </button>
-                {lastChurnBatchCheckAt && (
-                  <span className="text-xs text-gray-500">
-                    Letzter Check: {new Date(lastChurnBatchCheckAt).toLocaleString('de-DE')}
-                  </span>
-                )}
-                {lastChurnBatchImportAt && (
-                  <span className="text-xs text-gray-500">
-                    Letzter Import: {new Date(lastChurnBatchImportAt).toLocaleString('de-DE')}
-                  </span>
-                )}
-              </div>
-
-              {churnBatchError && (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{churnBatchError}</div>
-              )}
-
-              {churnBatchImportError && (
+              {churnImportHistoryError ? (
                 <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-                  {churnBatchImportError}
+                  {churnImportHistoryError}
                 </div>
-              )}
+              ) : null}
 
-              {churnBatchImportResult?.stats && (
-                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
-                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">To Import</div>
-                      <div className="font-semibold">{churnBatchImportResult.stats.toImport}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Importiert</div>
-                      <div className="font-semibold text-green-700">{churnBatchImportResult.stats.imported}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Aktualisiert</div>
-                      <div className="font-semibold text-blue-700">{churnBatchImportResult.stats.updated ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Fehler</div>
-                      <div className="font-semibold text-red-700">{churnBatchImportResult.stats.failed}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Duplikate im Sheet</div>
-                      <div className="font-semibold text-amber-700">{churnBatchImportResult.stats.duplicates}</div>
-                    </div>
-                  </div>
+              {churnImportRuns.length === 0 ? (
+                <div className="text-sm text-gray-500 border border-dashed border-gray-300 rounded-lg p-4">
+                  Noch keine Churn-Import-Läufe protokolliert.
                 </div>
-              )}
-
-              {churnBatchResult?.stats && (
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3 text-sm">
-                    <div className="rounded-lg bg-gray-50 p-3 border">
-                      <div className="text-gray-500">Sheet Zeilen</div>
-                      <div className="text-xl font-semibold">{churnBatchResult.stats.totalRowsFromSheet}</div>
-                    </div>
-                    <div className="rounded-lg bg-gray-50 p-3 border">
-                      <div className="text-gray-500">Geparst</div>
-                      <div className="text-xl font-semibold">{churnBatchResult.stats.parsedRows}</div>
-                    </div>
-                    <div className="rounded-lg bg-green-50 p-3 border border-green-200">
-                      <div className="text-green-700">Importierbar</div>
-                      <div className="text-xl font-semibold text-green-700">{churnBatchResult.stats.validRows}</div>
-                    </div>
-                    <div className="rounded-lg bg-red-50 p-3 border border-red-200">
-                      <div className="text-red-700">Fehlerhaft</div>
-                      <div className="text-xl font-semibold text-red-700">{churnBatchResult.stats.invalidRows}</div>
-                    </div>
-                  </div>
-
-                  <div>
-                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -&gt; Datenbank)</h5>
-                    <div className="rounded-lg border border-gray-200 overflow-hidden">
-                      <div className="max-h-60 overflow-auto">
-                        <table className="w-full text-xs">
-                          <thead className="bg-gray-50 sticky top-0">
-                            <tr>
-                              <th className="text-left px-2 py-2 text-gray-600">Sheet-Spalte</th>
-                              <th className="text-left px-2 py-2 text-gray-600">DB-Feld</th>
-                              <th className="text-left px-2 py-2 text-gray-600">Transformation</th>
-                              <th className="text-left px-2 py-2 text-gray-600">Pflicht</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {CHURN_BATCH_FIELD_MAPPING.map((row) => (
-                              <tr key={`${row.source}-${row.target}`} className="border-t border-gray-100">
-                                <td className="px-2 py-1.5 text-gray-700">{row.source}</td>
-                                <td className="px-2 py-1.5 text-gray-700 font-mono">{row.target}</td>
-                                <td className="px-2 py-1.5 text-gray-600">{row.transform}</td>
-                                <td className="px-2 py-1.5">
-                                  {row.required ? (
-                                    <span className="inline-flex items-center rounded bg-red-50 text-red-700 px-2 py-0.5">Ja</span>
-                                  ) : (
-                                    <span className="inline-flex items-center rounded bg-gray-100 text-gray-600 px-2 py-0.5">Nein</span>
-                                  )}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-
-                  {churnBatchResult.preview?.valid?.length ? (
-                    <div>
-                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Import-Vorschau (normalisierte Werte)</h5>
-                      <div className="rounded-lg border border-gray-200 overflow-hidden">
-                        <div className="max-h-64 overflow-auto">
-                          <table className="w-full text-xs">
-                            <thead className="bg-gray-50 sticky top-0">
-                              <tr>
-                                <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Oak ID</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Kunde</th>
-                                <th className="text-left px-2 py-2 text-gray-600">GL Month</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Churn Month</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Reason</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Package</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Total ARR Lost</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Subs Lost</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Pay Lost</th>
-                                <th className="text-left px-2 py-2 text-gray-600">Scheduled</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {churnBatchResult.preview.valid.slice(0, 12).map((row) => (
-                                <tr key={row.rowNumber} className="border-t border-gray-100">
-                                  <td className="px-2 py-1.5 text-gray-700">{row.rowNumber}</td>
-                                  <td className="px-2 py-1.5 text-gray-700">{row.oakId ?? '-'}</td>
-                                  <td className="px-2 py-1.5 text-gray-700">{row.customerName || '-'}</td>
-                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewMonth(row.glMonth)}</td>
-                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewMonth(row.churnMonth)}</td>
-                                  <td className="px-2 py-1.5 text-gray-700">{row.churnReason || '-'}</td>
-                                  <td className="px-2 py-1.5 text-gray-700">{row.packageName || '-'}</td>
-                                  <td className="px-2 py-1.5 text-gray-700">
-                                    {row.totalArrLost !== null && row.totalArrLost !== undefined
-                                      ? formatCurrency(row.totalArrLost)
-                                      : '-'}
-                                  </td>
-                                  <td className="px-2 py-1.5 text-gray-700">
-                                    {row.subsRevenueLost !== null && row.subsRevenueLost !== undefined
-                                      ? formatCurrency(row.subsRevenueLost)
-                                      : '-'}
-                                  </td>
-                                  <td className="px-2 py-1.5 text-gray-700">
-                                    {row.payRevenueLost !== null && row.payRevenueLost !== undefined
-                                      ? formatCurrency(row.payRevenueLost)
-                                      : '-'}
-                                  </td>
-                                  <td className="px-2 py-1.5 text-gray-700">{formatBatchPreviewBoolean(row.scheduled)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                      <p className="text-xs text-gray-500 mt-2">
-                        Vorschau zeigt die ersten 12 geparsten Zeilen aus dem Dry-Run.
-                      </p>
-                    </div>
-                  ) : null}
-
-                  {churnBatchResult.warnings?.length ? (
-                    <div>
-                      <h5 className="text-sm font-semibold text-amber-800 mb-2">Warnungen beim Mapping</h5>
-                      <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                        {churnBatchResult.warnings.slice(0, 8).map((w, idx) => (
-                          <div
-                            key={`${w.rowNumber}-${w.oakId}-${idx}`}
-                            className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs"
+              ) : (
+                <div className="rounded-lg border border-gray-200 overflow-hidden">
+                  <div className="max-h-80 overflow-auto">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr>
+                          <th className="text-left px-2 py-2 text-gray-600">Datei</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Hinweis</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {churnImportRuns.map((run) => (
+                          <tr
+                            key={run.id}
+                            onClick={() => setSelectedChurnImportRunId(run.id)}
+                            className={`border-t border-gray-100 cursor-pointer ${
+                              selectedChurnImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                            }`}
                           >
-                            <div className="font-medium text-amber-800">
-                              Zeile {w.rowNumber > 0 ? w.rowNumber : '-'} {w.oakId ? `- OAK ${w.oakId}` : ''}
-                            </div>
-                            <div className="text-amber-700">{w.warning}</div>
-                          </div>
+                            <td className="px-2 py-1.5 text-gray-700">{run.source_file_name || '-'}</td>
+                            <td className="px-2 py-1.5 text-gray-700">{new Date(run.started_at).toLocaleString('de-DE')}</td>
+                            <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                            <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                            <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                            <td className="px-2 py-1.5 text-amber-700">{run.duplicates ?? 0}</td>
+                            <td className="px-2 py-1.5 text-gray-700">{run.hint || run.reason || '-'}</td>
+                          </tr>
                         ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {churnImportMode === 'manual' && churnBatchResult.preview?.invalid?.length ? (
-                    <div>
-                      <h5 className="text-sm font-semibold text-gray-700 mb-2">Beispiele fehlerhafte Zeilen</h5>
-                      <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
-                        {churnBatchResult.preview.invalid.slice(0, 6).map((row) => (
-                          <div key={row.rowNumber} className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs">
-                            <div className="font-medium text-red-700">
-                              Zeile {row.rowNumber} - {row.raw.customerName || 'Ohne Kundenname'}
-                            </div>
-                            <div className="text-red-600">{row.reasons.join(', ')}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
-              <div className="space-y-3 pt-1">
-                <div className="flex items-center justify-between">
-                  <h5 className="text-sm font-semibold text-gray-700">Import-Historie</h5>
-                  <button
-                    onClick={loadChurnImportHistory}
-                    disabled={churnImportHistoryLoading}
-                    className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    {churnImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
-                  </button>
-                </div>
-
-                {churnImportHistoryError ? (
-                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
-                    {churnImportHistoryError}
-                  </div>
-                ) : null}
-
-                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
-                  <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
-                  {latestChurnAutoRun ? (
-                    <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
-                      <div>
-                        <div className="text-indigo-700">Zeitpunkt</div>
-                        <div>{new Date(latestChurnAutoRun.started_at).toLocaleString('de-DE')}</div>
-                      </div>
-                      <div>
-                        <div className="text-indigo-700">Status</div>
-                        <div>{getImportRunStatusLabel(latestChurnAutoRun.status)}</div>
-                      </div>
-                      <div>
-                        <div className="text-indigo-700">Importiert</div>
-                        <div>{latestChurnAutoRun.imported}</div>
-                      </div>
-                      <div>
-                        <div className="text-indigo-700">Fehler</div>
-                        <div>{latestChurnAutoRun.failed}</div>
-                      </div>
-                      <div>
-                        <div className="text-indigo-700">Duplikate</div>
-                        <div>{latestChurnAutoRun.duplicates}</div>
-                      </div>
-                      <div>
-                        <div className="text-indigo-700">Hinweis</div>
-                        <div>{latestChurnAutoRun.reason || (latestChurnAutoRun.skipped ? 'Skipped' : '-')}</div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
-                  )}
-                </div>
-
-                {churnImportRuns.length === 0 ? (
-                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
-                    Noch keine Import-Läufe protokolliert.
-                  </div>
-                ) : (
+              {selectedChurnImportRunId && selectedChurnImportRunItems.length > 0 ? (
+                <div>
+                  <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
                   <div className="rounded-lg border border-gray-200 overflow-hidden">
-                    <div className="max-h-52 overflow-auto">
+                    <div className="max-h-48 overflow-auto">
                       <table className="w-full text-xs">
                         <thead className="bg-gray-50 sticky top-0">
                           <tr>
-                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
-                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
-                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
-                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
-                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
-                            <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {churnImportRuns.map((run) => (
-                            <tr
-                              key={run.id}
-                              onClick={() => setSelectedChurnImportRunId(run.id)}
-                              className={`border-t border-gray-100 cursor-pointer ${
-                                selectedChurnImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
-                              }`}
-                            >
-                              <td className="px-2 py-1.5 text-gray-700">
-                                {new Date(run.started_at).toLocaleString('de-DE')}
-                              </td>
-                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
-                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
-                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
-                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
-                              <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                          {selectedChurnImportRunItems.slice(0, 200).map((item) => (
+                            <tr key={item.id} className="border-t border-gray-100">
+                              <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
                   </div>
-                )}
-
-                {selectedChurnImportRunId && selectedChurnImportRunItems.length > 0 ? (
-                  <div>
-                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
-                    <div className="rounded-lg border border-gray-200 overflow-hidden">
-                      <div className="max-h-40 overflow-auto">
-                        <table className="w-full text-xs">
-                          <thead className="bg-gray-50 sticky top-0">
-                            <tr>
-                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
-                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
-                              <th className="text-left px-2 py-2 text-gray-600">OAK</th>
-                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedChurnImportRunItems.slice(0, 150).map((item) => (
-                              <tr key={item.id} className="border-t border-gray-100">
-                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
-                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
-                                <td className="px-2 py-1.5 text-gray-700">{item.oak_id ?? '-'}</td>
-                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
+                </div>
+              ) : null}
             </div>
           )}
 
