@@ -584,17 +584,29 @@ async function upsertSummaryRows(
     });
   });
 
-  const { error } = upserts.length
+  const dedupedByKey = new Map<string, any>();
+  upserts.forEach((row) => {
+    const key = `${row.snapshot_date}|${row.metric_type}|${row.event_month_key}`;
+    // Last row wins to avoid ON CONFLICT touching same target row multiple times.
+    dedupedByKey.set(key, row);
+  });
+  const dedupedUpserts = Array.from(dedupedByKey.values());
+  const duplicateCount = upserts.length - dedupedUpserts.length;
+  if (duplicateCount > 0) {
+    warnings.push(`summary: ${duplicateCount} Duplikate nach snapshot_date/metric_type/event_month erkannt und konsolidiert.`);
+  }
+
+  const { error } = dedupedUpserts.length
     ? await supabase
         .from('churn_rollup_events')
-        .upsert(upserts, { onConflict: 'snapshot_date,metric_type,event_month_key', ignoreDuplicates: false })
+        .upsert(dedupedUpserts, { onConflict: 'snapshot_date,metric_type,event_month_key', ignoreDuplicates: false })
     : { error: null as any };
 
   if (error) {
     throw new Error(`Summary Upsert fehlgeschlagen: ${error.message}`);
   }
 
-  return { imported: upserts.length, updated: 0, warnings };
+  return { imported: dedupedUpserts.length, updated: 0, warnings };
 }
 
 export async function getChurnDriveAutoImportState() {
