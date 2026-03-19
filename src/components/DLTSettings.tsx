@@ -282,30 +282,6 @@ interface SalespipeAutoImportResponse {
   error?: string;
 }
 
-interface SignupsCommitResponse {
-  success: boolean;
-  mode?: string;
-  stats?: {
-    totalRowsFromSheet: number;
-    parsedRows: number;
-    validRows: number;
-    invalidRows: number;
-    toImport: number;
-    imported: number;
-    failed: number;
-    duplicates: number;
-    updated?: number;
-  };
-  error?: string;
-}
-
-interface SignupsAutoImportResponse {
-  success: boolean;
-  enabled?: boolean;
-  updatedAt?: string | null;
-  error?: string;
-}
-
 interface SignupsStatsResponse {
   success: boolean;
   count?: number;
@@ -827,13 +803,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [signupsImportRuns, setSignupsImportRuns] = useState<SignupsImportRun[]>([]);
   const [selectedSignupsImportRunId, setSelectedSignupsImportRunId] = useState<string | null>(null);
   const [selectedSignupsImportRunItems, setSelectedSignupsImportRunItems] = useState<SignupsImportRunItem[]>([]);
-  const [signupsAutoImportEnabled, setSignupsAutoImportEnabled] = useState(false);
-  const [signupsAutoImportLoading, setSignupsAutoImportLoading] = useState(false);
-  const [signupsAutoImportSaving, setSignupsAutoImportSaving] = useState(false);
-  const [signupsAutoImportMessage, setSignupsAutoImportMessage] = useState('');
-  const [signupsManualCommitLoading, setSignupsManualCommitLoading] = useState(false);
-  const [signupsManualCommitError, setSignupsManualCommitError] = useState('');
-  const [signupsManualCommitResult, setSignupsManualCommitResult] = useState<SignupsCommitResponse | null>(null);
   const [signupsEventsCountLoading, setSignupsEventsCountLoading] = useState(false);
   const [signupsEventsCountError, setSignupsEventsCountError] = useState('');
   const [signupsEventsCount, setSignupsEventsCount] = useState<number | null>(null);
@@ -1391,27 +1360,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
-  const handleRunSignupsManualCommit = async () => {
-    setSignupsManualCommitLoading(true);
-    setSignupsManualCommitError('');
-    setSignupsManualCommitResult(null);
-    try {
-      const response = await fetch('/api/signups/sync', { method: 'POST' });
-      const data = (await response.json()) as SignupsCommitResponse;
-      if (!response.ok || !data.success) {
-        setSignupsManualCommitError(data.error || 'Sign-ups Commit-Import fehlgeschlagen.');
-        return;
-      }
-      setSignupsManualCommitResult(data);
-      await loadSignupsImportHistory();
-      await loadSignupsEventsStats();
-    } catch (err: any) {
-      setSignupsManualCommitError(err?.message || 'Sign-ups Commit-Import fehlgeschlagen.');
-    } finally {
-      setSignupsManualCommitLoading(false);
-    }
-  };
-
   const handlePaymarginFactorChange = (idx: number, value: number) => {
     setPaymarginSeasonalFactors((prev) => {
       const next = [...prev];
@@ -1552,24 +1500,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
-  const loadSignupsAutoImportState = useCallback(async () => {
-    setSignupsAutoImportLoading(true);
-    setSignupsAutoImportMessage('');
-    try {
-      const response = await fetch('/api/signups/sync/auto-import', { method: 'GET' });
-      const data = (await response.json()) as SignupsAutoImportResponse;
-      if (!response.ok || !data.success) {
-        setSignupsAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
-        return;
-      }
-      setSignupsAutoImportEnabled(Boolean(data.enabled));
-    } catch (err: any) {
-      setSignupsAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
-    } finally {
-      setSignupsAutoImportLoading(false);
-    }
-  }, []);
-
   const loadManualGoLiveWriteLockState = useCallback(async () => {
     setManualGoLiveWriteLockLoading(true);
     setManualGoLiveWriteLockMessage('');
@@ -1599,7 +1529,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadSalespipeAutoImportState();
       loadSalespipeImportHistory();
       loadSignupsImportHistory();
-      loadSignupsAutoImportState();
       loadSignupsEventsStats();
     }
   }, [
@@ -1613,7 +1542,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     loadSalespipeAutoImportState,
     loadSalespipeImportHistory,
     loadSignupsImportHistory,
-    loadSignupsAutoImportState,
     loadSignupsEventsStats,
   ]);
 
@@ -1756,32 +1684,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setSalespipeAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
     } finally {
       setSalespipeAutoImportSaving(false);
-    }
-  };
-
-  const handleSignupsAutoImportToggle = async (enabled: boolean) => {
-    setSignupsAutoImportEnabled(enabled);
-    setSignupsAutoImportSaving(true);
-    setSignupsAutoImportMessage('');
-    try {
-      const response = await fetch('/api/signups/sync/auto-import', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled }),
-      });
-      const data = (await response.json()) as SignupsAutoImportResponse;
-      if (!response.ok || !data.success) {
-        setSignupsAutoImportEnabled(!enabled);
-        setSignupsAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
-        return;
-      }
-      setSignupsAutoImportEnabled(Boolean(data.enabled));
-      setSignupsAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
-    } catch (err: any) {
-      setSignupsAutoImportEnabled(!enabled);
-      setSignupsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
-    } finally {
-      setSignupsAutoImportSaving(false);
     }
   };
 
@@ -4860,35 +4762,13 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 </button>
               </div>
 
-              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
-                <label className="flex items-center justify-between gap-3">
-                  <span className="text-sm text-gray-700">Sign-ups Auto-Import aktivieren</span>
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4"
-                    checked={signupsAutoImportEnabled}
-                    disabled={signupsAutoImportLoading || signupsAutoImportSaving}
-                    onChange={(e) => handleSignupsAutoImportToggle(e.target.checked)}
-                  />
-                </label>
-                <div className="text-xs text-gray-500 space-y-1">
-                  <div>
-                    Status: {signupsAutoImportEnabled ? 'Aktiviert' : 'Deaktiviert'}
-                  </div>
-                  {signupsAutoImportLoading ? <div>Status wird geladen...</div> : null}
-                  {signupsAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
-                  {signupsAutoImportMessage ? <div>{signupsAutoImportMessage}</div> : null}
-                </div>
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+                Der Sign-ups Import läuft im Apps-Script-Workflow über
+                <code className="mx-1">/api/signups/sync/ingest</code>.
+                Diese Ansicht zeigt nur Datenbank-Status und Import-Historie.
               </div>
 
               <div className="flex items-center gap-3">
-                <button
-                  onClick={handleRunSignupsManualCommit}
-                  disabled={signupsManualCommitLoading}
-                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
-                >
-                  {signupsManualCommitLoading ? 'Importiere...' : 'Sign-ups Commit-Run auslösen'}
-                </button>
                 <button
                   onClick={loadSignupsEventsStats}
                   disabled={signupsEventsCountLoading}
@@ -4897,40 +4777,6 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   {signupsEventsCountLoading ? 'Prüfe DB...' : 'signups_events > 0 prüfen'}
                 </button>
               </div>
-
-              {signupsManualCommitError ? (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-                  {signupsManualCommitError}
-                </div>
-              ) : null}
-
-              {signupsManualCommitResult?.stats ? (
-                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
-                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Commit-Run</h5>
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Importiert</div>
-                      <div className="font-semibold text-green-700">{signupsManualCommitResult.stats.imported}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Fehler</div>
-                      <div className="font-semibold text-red-700">{signupsManualCommitResult.stats.failed}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Duplikate</div>
-                      <div className="font-semibold text-amber-700">{signupsManualCommitResult.stats.duplicates}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Aktualisiert</div>
-                      <div className="font-semibold text-blue-700">{signupsManualCommitResult.stats.updated ?? 0}</div>
-                    </div>
-                    <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">To Import</div>
-                      <div className="font-semibold">{signupsManualCommitResult.stats.toImport}</div>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
 
               <div
                 className={`rounded-lg border p-3 text-sm ${
