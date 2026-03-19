@@ -282,6 +282,37 @@ interface SalespipeAutoImportResponse {
   error?: string;
 }
 
+interface SignupsCommitResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport: number;
+    imported: number;
+    failed: number;
+    duplicates: number;
+    updated?: number;
+  };
+  error?: string;
+}
+
+interface SignupsAutoImportResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
+interface SignupsStatsResponse {
+  success: boolean;
+  count?: number;
+  hasData?: boolean;
+  error?: string;
+}
+
 interface PaymarginImportResponse {
   success: boolean;
   mode?: 'dry-run' | 'commit';
@@ -431,6 +462,32 @@ interface SalespipeImportRun {
 }
 
 interface SalespipeImportRunItem {
+  id: string;
+  run_id: string;
+  row_number: number | null;
+  oak_id: number | null;
+  level: 'error' | 'warning' | 'duplicate';
+  message: string;
+  created_at: string;
+}
+
+interface SignupsImportRun {
+  id: string;
+  triggered_by: 'manual' | 'cron';
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  updated?: number;
+  to_import: number;
+  auto_import_enabled: boolean;
+  skipped: boolean;
+  reason: string | null;
+}
+
+interface SignupsImportRunItem {
   id: string;
   run_id: string;
   row_number: number | null;
@@ -665,7 +722,13 @@ function parseExpandingArrData(raw: unknown): ExpandingArrData {
 }
 
 type SettingsTab = 'users' | 'imports' | 'permissions' | 'areas' | 'planning' | 'system';
-type ImportSubTab = 'newBusinessGoLives' | 'churnImports' | 'upDownsellsImport' | 'salespipeImport' | 'paymarginImport';
+type ImportSubTab =
+  | 'newBusinessGoLives'
+  | 'churnImports'
+  | 'upDownsellsImport'
+  | 'salespipeImport'
+  | 'signupsImport'
+  | 'paymarginImport';
 
 export default function DLTSettings({ user }: DLTSettingsProps) {
   const { t } = useLanguage();
@@ -759,6 +822,21 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [selectedSalespipeImportRunItems, setSelectedSalespipeImportRunItems] = useState<SalespipeImportRunItem[]>(
     []
   );
+  const [signupsImportHistoryLoading, setSignupsImportHistoryLoading] = useState(false);
+  const [signupsImportHistoryError, setSignupsImportHistoryError] = useState('');
+  const [signupsImportRuns, setSignupsImportRuns] = useState<SignupsImportRun[]>([]);
+  const [selectedSignupsImportRunId, setSelectedSignupsImportRunId] = useState<string | null>(null);
+  const [selectedSignupsImportRunItems, setSelectedSignupsImportRunItems] = useState<SignupsImportRunItem[]>([]);
+  const [signupsAutoImportEnabled, setSignupsAutoImportEnabled] = useState(false);
+  const [signupsAutoImportLoading, setSignupsAutoImportLoading] = useState(false);
+  const [signupsAutoImportSaving, setSignupsAutoImportSaving] = useState(false);
+  const [signupsAutoImportMessage, setSignupsAutoImportMessage] = useState('');
+  const [signupsManualCommitLoading, setSignupsManualCommitLoading] = useState(false);
+  const [signupsManualCommitError, setSignupsManualCommitError] = useState('');
+  const [signupsManualCommitResult, setSignupsManualCommitResult] = useState<SignupsCommitResponse | null>(null);
+  const [signupsEventsCountLoading, setSignupsEventsCountLoading] = useState(false);
+  const [signupsEventsCountError, setSignupsEventsCountError] = useState('');
+  const [signupsEventsCount, setSignupsEventsCount] = useState<number | null>(null);
   const [paymarginCsvFile, setPaymarginCsvFile] = useState<File | null>(null);
   const [paymarginImportYear, setPaymarginImportYear] = useState(currentYear);
   const [paymarginGoLiveMonth, setPaymarginGoLiveMonth] = useState(1);
@@ -1257,6 +1335,83 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadSignupsImportHistory = useCallback(async () => {
+    setSignupsImportHistoryLoading(true);
+    setSignupsImportHistoryError('');
+    try {
+      const response = await fetch('/api/signups/sync/history?limit=50', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setSignupsImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as SignupsImportRun[];
+      setSignupsImportRuns(runs);
+      if (!selectedSignupsImportRunId && runs.length > 0) {
+        setSelectedSignupsImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setSignupsImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setSignupsImportHistoryLoading(false);
+    }
+  }, [selectedSignupsImportRunId]);
+
+  const loadSignupsImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/signups/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setSignupsImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedSignupsImportRunItems((data.items || []) as SignupsImportRunItem[]);
+    } catch (err: any) {
+      setSignupsImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
+  const loadSignupsEventsStats = useCallback(async () => {
+    setSignupsEventsCountLoading(true);
+    setSignupsEventsCountError('');
+    try {
+      const response = await fetch('/api/signups/sync/stats', { method: 'GET' });
+      const data = (await response.json()) as SignupsStatsResponse;
+      if (!response.ok || !data.success) {
+        setSignupsEventsCountError(data.error || 'Sign-ups Datenbank-Status konnte nicht geladen werden.');
+        return;
+      }
+      setSignupsEventsCount(typeof data.count === 'number' ? data.count : 0);
+    } catch (err: any) {
+      setSignupsEventsCountError(err?.message || 'Sign-ups Datenbank-Status konnte nicht geladen werden.');
+    } finally {
+      setSignupsEventsCountLoading(false);
+    }
+  }, []);
+
+  const handleRunSignupsManualCommit = async () => {
+    setSignupsManualCommitLoading(true);
+    setSignupsManualCommitError('');
+    setSignupsManualCommitResult(null);
+    try {
+      const response = await fetch('/api/signups/sync', { method: 'POST' });
+      const data = (await response.json()) as SignupsCommitResponse;
+      if (!response.ok || !data.success) {
+        setSignupsManualCommitError(data.error || 'Sign-ups Commit-Import fehlgeschlagen.');
+        return;
+      }
+      setSignupsManualCommitResult(data);
+      await loadSignupsImportHistory();
+      await loadSignupsEventsStats();
+    } catch (err: any) {
+      setSignupsManualCommitError(err?.message || 'Sign-ups Commit-Import fehlgeschlagen.');
+    } finally {
+      setSignupsManualCommitLoading(false);
+    }
+  };
+
   const handlePaymarginFactorChange = (idx: number, value: number) => {
     setPaymarginSeasonalFactors((prev) => {
       const next = [...prev];
@@ -1397,6 +1552,24 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadSignupsAutoImportState = useCallback(async () => {
+    setSignupsAutoImportLoading(true);
+    setSignupsAutoImportMessage('');
+    try {
+      const response = await fetch('/api/signups/sync/auto-import', { method: 'GET' });
+      const data = (await response.json()) as SignupsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setSignupsAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setSignupsAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      setSignupsAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+    } finally {
+      setSignupsAutoImportLoading(false);
+    }
+  }, []);
+
   const loadManualGoLiveWriteLockState = useCallback(async () => {
     setManualGoLiveWriteLockLoading(true);
     setManualGoLiveWriteLockMessage('');
@@ -1425,6 +1598,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadUpDownsellsImportHistory();
       loadSalespipeAutoImportState();
       loadSalespipeImportHistory();
+      loadSignupsImportHistory();
+      loadSignupsAutoImportState();
+      loadSignupsEventsStats();
     }
   }, [
     activeTab,
@@ -1436,6 +1612,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     loadUpDownsellsImportHistory,
     loadSalespipeAutoImportState,
     loadSalespipeImportHistory,
+    loadSignupsImportHistory,
+    loadSignupsAutoImportState,
+    loadSignupsEventsStats,
   ]);
 
   useEffect(() => {
@@ -1457,6 +1636,11 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     if (activeTab !== 'imports' || !selectedSalespipeImportRunId) return;
     loadSalespipeImportRunItems(selectedSalespipeImportRunId);
   }, [activeTab, selectedSalespipeImportRunId, loadSalespipeImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedSignupsImportRunId) return;
+    loadSignupsImportRunItems(selectedSignupsImportRunId);
+  }, [activeTab, selectedSignupsImportRunId, loadSignupsImportRunItems]);
 
   useEffect(() => {
     if (activeTab !== 'imports' || activeImportSubTab !== 'paymarginImport') return;
@@ -1572,6 +1756,32 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setSalespipeAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
     } finally {
       setSalespipeAutoImportSaving(false);
+    }
+  };
+
+  const handleSignupsAutoImportToggle = async (enabled: boolean) => {
+    setSignupsAutoImportEnabled(enabled);
+    setSignupsAutoImportSaving(true);
+    setSignupsAutoImportMessage('');
+    try {
+      const response = await fetch('/api/signups/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as SignupsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setSignupsAutoImportEnabled(!enabled);
+        setSignupsAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setSignupsAutoImportEnabled(Boolean(data.enabled));
+      setSignupsAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
+    } catch (err: any) {
+      setSignupsAutoImportEnabled(!enabled);
+      setSignupsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setSignupsAutoImportSaving(false);
     }
   };
 
@@ -3307,6 +3517,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 Salespipe Import
               </button>
               <button
+                onClick={() => setActiveImportSubTab('signupsImport')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'signupsImport'
+                    ? 'bg-cyan-50 border-cyan-300 text-cyan-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                DACH Sign-ups Import
+              </button>
+              <button
                 onClick={() => setActiveImportSubTab('paymarginImport')}
                 className={`px-3 py-2 rounded-lg text-sm font-medium border ${
                   activeImportSubTab === 'paymarginImport'
@@ -4619,6 +4839,193 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   </div>
                 ) : null}
               </div>
+            </div>
+          )}
+
+          {activeImportSubTab === 'signupsImport' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-lg font-semibold text-gray-800 mb-1">DACH Sign-ups Import-Übersicht</h4>
+                  <p className="text-sm text-gray-500">
+                    Übersicht der importierten Datensätze aus der DACH Sign-ups Import Source CSV.
+                  </p>
+                </div>
+                <button
+                  onClick={loadSignupsImportHistory}
+                  disabled={signupsImportHistoryLoading}
+                  className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {signupsImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                </button>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
+                <label className="flex items-center justify-between gap-3">
+                  <span className="text-sm text-gray-700">Sign-ups Auto-Import aktivieren</span>
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={signupsAutoImportEnabled}
+                    disabled={signupsAutoImportLoading || signupsAutoImportSaving}
+                    onChange={(e) => handleSignupsAutoImportToggle(e.target.checked)}
+                  />
+                </label>
+                <div className="text-xs text-gray-500 space-y-1">
+                  <div>
+                    Status: {signupsAutoImportEnabled ? 'Aktiviert' : 'Deaktiviert'}
+                  </div>
+                  {signupsAutoImportLoading ? <div>Status wird geladen...</div> : null}
+                  {signupsAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                  {signupsAutoImportMessage ? <div>{signupsAutoImportMessage}</div> : null}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunSignupsManualCommit}
+                  disabled={signupsManualCommitLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {signupsManualCommitLoading ? 'Importiere...' : 'Sign-ups Commit-Run auslösen'}
+                </button>
+                <button
+                  onClick={loadSignupsEventsStats}
+                  disabled={signupsEventsCountLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {signupsEventsCountLoading ? 'Prüfe DB...' : 'signups_events > 0 prüfen'}
+                </button>
+              </div>
+
+              {signupsManualCommitError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {signupsManualCommitError}
+                </div>
+              ) : null}
+
+              {signupsManualCommitResult?.stats ? (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Commit-Run</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{signupsManualCommitResult.stats.imported}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{signupsManualCommitResult.stats.failed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Duplikate</div>
+                      <div className="font-semibold text-amber-700">{signupsManualCommitResult.stats.duplicates}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{signupsManualCommitResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">To Import</div>
+                      <div className="font-semibold">{signupsManualCommitResult.stats.toImport}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              <div
+                className={`rounded-lg border p-3 text-sm ${
+                  signupsEventsCountError
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : signupsEventsCount !== null && signupsEventsCount > 0
+                      ? 'border-green-200 bg-green-50 text-green-800'
+                      : 'border-amber-200 bg-amber-50 text-amber-800'
+                }`}
+              >
+                {signupsEventsCountError
+                  ? signupsEventsCountError
+                  : signupsEventsCount === null
+                    ? 'Noch kein Datenbank-Check ausgeführt.'
+                    : signupsEventsCount > 0
+                      ? `OK: signups_events enthält ${signupsEventsCount} Datensätze.`
+                      : 'Aktuell sind noch keine Datensätze in signups_events vorhanden (0).'}
+              </div>
+
+              {signupsImportHistoryError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                  {signupsImportHistoryError}
+                </div>
+              ) : null}
+
+              {signupsImportRuns.length === 0 ? (
+                <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                  Noch keine Sign-ups Import-Läufe protokolliert.
+                </div>
+              ) : (
+                <div className="rounded-lg border border-gray-200 overflow-hidden">
+                  <div className="max-h-60 overflow-auto">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr>
+                          <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                          <th className="text-left px-2 py-2 text-gray-600">Hinweis</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {signupsImportRuns.map((run) => (
+                          <tr
+                            key={run.id}
+                            onClick={() => setSelectedSignupsImportRunId(run.id)}
+                            className={`border-t border-gray-100 cursor-pointer ${
+                              selectedSignupsImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                            }`}
+                          >
+                            <td className="px-2 py-1.5 text-gray-700">{new Date(run.started_at).toLocaleString('de-DE')}</td>
+                            <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                            <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                            <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                            <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                            <td className="px-2 py-1.5 text-gray-700">{run.reason || (run.skipped ? 'Skipped' : '-')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {selectedSignupsImportRunId && selectedSignupsImportRunItems.length > 0 ? (
+                <div>
+                  <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-40 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                            <th className="text-left px-2 py-2 text-gray-600">OAK</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedSignupsImportRunItems.slice(0, 150).map((item) => (
+                            <tr key={item.id} className="border-t border-gray-100">
+                              <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{item.oak_id ?? '-'}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
 

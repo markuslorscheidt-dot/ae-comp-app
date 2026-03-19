@@ -1,8 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
+import { google } from 'googleapis';
+import Papa from 'papaparse';
 
 const SIGNUPS_AUTO_IMPORT_KEY = 'signups_auto_import_enabled';
-const SIGNUPS_SOURCE_TAB = 'sign_ups';
+const SIGNUPS_SOURCE_TAB = 'drive_signups_csv';
 const SIGNUPS_LOG_TAB = 'sign_ups_import_log';
+const DRIVE_SCOPE = ['https://www.googleapis.com/auth/drive.readonly'];
 
 type ImportTrigger = 'manual' | 'cron';
 type ImportStatus = 'success' | 'partial' | 'failed' | 'skipped';
@@ -123,6 +126,71 @@ function getServerSupabase() {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceRoleKey) return null;
   return createClient(supabaseUrl, serviceRoleKey);
+}
+
+type DriveCsvFileMeta = {
+  id: string;
+  name: string;
+  modifiedTime: string;
+  mimeType?: string;
+};
+
+function getDriveFolderId(): string | null {
+  return process.env.GOOGLE_DRIVE_SIGNUPS_FOLDER_ID?.trim() || null;
+}
+
+function getDriveAuth() {
+  const clientEmail = process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_EMAIL;
+  const privateKeyRaw = process.env.GOOGLE_DRIVE_PRIVATE_KEY;
+  if (!clientEmail || !privateKeyRaw) return null;
+  const privateKey = privateKeyRaw.replace(/\\n/g, '\n');
+  return new google.auth.JWT(clientEmail, undefined, privateKey, DRIVE_SCOPE);
+}
+
+async function listSignupsCsvFiles(): Promise<
+  { success: true; files: DriveCsvFileMeta[] } | { success: false; status: number; error: string }
+> {
+  const folderId = getDriveFolderId();
+  if (!folderId) {
+    return { success: false, status: 500, error: 'GOOGLE_DRIVE_SIGNUPS_FOLDER_ID fehlt.' };
+  }
+
+  const auth = getDriveAuth();
+  if (!auth) {
+    return {
+      success: false,
+      status: 500,
+      error: 'GOOGLE_DRIVE_SERVICE_ACCOUNT_EMAIL oder GOOGLE_DRIVE_PRIVATE_KEY fehlt.',
+    };
+  }
+
+  const drive = google.drive({ version: 'v3', auth });
+  const response = await drive.files.list({
+    q: `'${folderId}' in parents and trashed = false`,
+    fields: 'files(id,name,modifiedTime,mimeType)',
+    orderBy: 'modifiedTime desc',
+    pageSize: 100,
+  });
+
+  const files = (response.data.files || [])
+    .filter((f) => f.id && f.name && f.modifiedTime)
+    .map((f) => ({
+      id: String(f.id),
+      name: String(f.name),
+      modifiedTime: String(f.modifiedTime),
+      mimeType: f.mimeType ? String(f.mimeType) : undefined,
+    }))
+    .filter((f) => f.name.toLowerCase().endsWith('.csv'));
+
+  return { success: true, files };
+}
+
+async function downloadDriveFile(fileId: string): Promise<string> {
+  const auth = getDriveAuth();
+  if (!auth) throw new Error('Drive Auth fehlt');
+  const drive = google.drive({ version: 'v3', auth });
+  const response = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'text' as any });
+  return String(response.data || '');
 }
 
 async function appendGoogleSheetImportLog(params: {
@@ -325,50 +393,47 @@ export async function getSignupsAutoImportState() {
 }
 
 export async function extractSheetRows(): Promise<ExtractResult> {
-  const apiKey = process.env.GOOGLE_SHEETS_API_KEY;
-  const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
-  const configuredRange = (process.env.GOOGLE_SHEETS_RANGE_SIGNUPS || '').trim();
-  const range = configuredRange && configuredRange !== 'Signups!A:Z'
-    ? configuredRange
-    : `${SIGNUPS_SOURCE_TAB}!A:Z`;
+  try {
+    const listResult = await listSignupsCsvFiles();
+    if (!listResult.success) {
+      return {
+        success: false,
+        status: listResult.status,
+        error: listResult.error,
+      };
+    }
 
-  if (!apiKey || !spreadsheetId) {
-    return {
-      success: false,
-      status: 500,
-      error: 'Fehlende ENV Variablen: GOOGLE_SHEETS_API_KEY oder GOOGLE_SHEETS_SPREADSHEET_ID',
-    };
-  }
+    if (listResult.files.length === 0) {
+      return {
+        success: false,
+        status: 404,
+        error: 'Keine Sign-ups CSV im Drive-Ordner gefunden.',
+      };
+    }
 
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(
-    range
-  )}?key=${apiKey}`;
+    const latest = listResult.files[0];
+    const csvText = await downloadDriveFile(latest.id);
+    const parsedCsv = Papa.parse<string[]>(csvText, { skipEmptyLines: true });
+    if (parsedCsv.errors?.length) {
+      return {
+        success: false,
+        status: 422,
+        error: `CSV Parsing-Fehler: ${parsedCsv.errors[0].message}`,
+        details: parsedCsv.errors.slice(0, 20),
+      };
+    }
 
-  const response = await fetch(url, { cache: 'no-store' });
-  const data = await response.json();
-  if (!response.ok) {
-    const apiErrorMessage = String(data?.error?.message || 'Google Sheets API Fehler');
-    return {
-      success: false,
-      status: response.status,
-      error: apiErrorMessage.includes('Unable to parse range')
-        ? `Google Sheets Range ungueltig: ${range}. Bitte GOOGLE_SHEETS_RANGE_SIGNUPS in .env.local / Vercel auf den exakten Tab-Namen setzen (z. B. ${SIGNUPS_SOURCE_TAB}!A:Z).`
-        : apiErrorMessage,
-      details: data,
-    };
-  }
-
-  const values: string[][] = Array.isArray(data.values) ? data.values : [];
-  const headerIndex = values.findIndex((row) => row.includes('OAKID') && row.includes('Account-ID'));
-  if (headerIndex === -1) {
-    return {
-      success: false,
-      status: 422,
-      error: 'Header-Zeile nicht gefunden (erwartet: OAKID + Account-ID)',
-      range: data.range,
-      rawRowCount: values.length,
-    };
-  }
+    const values: string[][] = Array.isArray(parsedCsv.data) ? (parsedCsv.data as string[][]) : [];
+    const headerIndex = values.findIndex((row) => row.includes('OAKID') && row.includes('Account-ID'));
+    if (headerIndex === -1) {
+      return {
+        success: false,
+        status: 422,
+        error: 'Header-Zeile nicht gefunden (erwartet: OAKID + Account-ID)',
+        range: `drive:${latest.name}`,
+        rawRowCount: values.length,
+      };
+    }
 
   const header = values[headerIndex];
   const headerMap = buildHeaderIndexMap(header);
@@ -414,16 +479,23 @@ export async function extractSheetRows(): Promise<ExtractResult> {
     else validRows.push(row);
   }
 
-  return {
-    success: true,
-    range: data.range,
-    headerIndex,
-    header,
-    rawRows,
-    parsedRows,
-    validRows,
-    invalidRows,
-  };
+    return {
+      success: true,
+      range: `drive:${latest.name}`,
+      headerIndex,
+      header,
+      rawRows,
+      parsedRows,
+      validRows,
+      invalidRows,
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      status: 500,
+      error: error?.message || 'Sign-ups CSV aus Drive konnte nicht gelesen werden.',
+    };
+  }
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }) {
@@ -471,7 +543,7 @@ export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; a
       warnings.push({
         rowNumber: row.rowNumber,
         oakId: row.oakId,
-        warning: 'Doppelte Account-ID im Sheet: letzte Zeile wird verwendet',
+        warning: 'Doppelte Account-ID in der CSV-Quelle: letzte Zeile wird verwendet',
       });
     }
     rowByAccountId.set(key, row);
