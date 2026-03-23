@@ -24,6 +24,22 @@ interface YtdMonthlyRow {
   pay_target: number;
 }
 
+interface ChurnEventRow {
+  churn_month: string | null;
+  scheduled: boolean | null;
+  total_arr_lost: number | null;
+}
+
+interface MonthlyChurnRow {
+  month: number;
+  scheduledCount: number;
+  nonScheduledCount: number;
+  scheduledArrLost: number;
+  nonScheduledArrLost: number;
+  totalCount: number;
+  totalArrLost: number;
+}
+
 interface DLTStrategicReportsProps {
   user: User;
 }
@@ -62,6 +78,8 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const [reportType, setReportType] = useState<'trend' | 'forecast' | 'ytd'>('trend');
   const [selectedYtdMonths, setSelectedYtdMonths] = useState<number[]>(defaultYtdMonths);
   const [selectedMonthDetail, setSelectedMonthDetail] = useState<number | null>(null);
+  const [churnEvents, setChurnEvents] = useState<ChurnEventRow[]>([]);
+  const [churnLoading, setChurnLoading] = useState(true);
   const [payIstInputsByGoLiveId, setPayIstInputsByGoLiveId] = useState<Record<string, string>>({});
   const [savingPayIstByGoLiveId, setSavingPayIstByGoLiveId] = useState<Record<string, boolean>>({});
   const [payIstErrorByGoLiveId, setPayIstErrorByGoLiveId] = useState<Record<string, string>>({});
@@ -70,6 +88,37 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   useEffect(() => {
     setSelectedYtdMonths(defaultYtdMonths);
   }, [defaultYtdMonths]);
+
+  useEffect(() => {
+    let active = true;
+
+    const fetchChurnEvents = async () => {
+      setChurnLoading(true);
+      const from = `${selectedYear}-01-01`;
+      const to = `${selectedYear + 1}-01-01`;
+
+      const { data, error } = await supabase
+        .from('churn_events')
+        .select('churn_month, scheduled, total_arr_lost')
+        .gte('churn_month', from)
+        .lt('churn_month', to);
+
+      if (!active) return;
+
+      if (error) {
+        console.error('Churn load error:', error);
+        setChurnEvents([]);
+      } else {
+        setChurnEvents((data as ChurnEventRow[]) || []);
+      }
+      setChurnLoading(false);
+    };
+
+    fetchChurnEvents();
+    return () => {
+      active = false;
+    };
+  }, [selectedYear]);
   
   // Load all users
   const { users, loading: usersLoading } = useAllUsers();
@@ -384,6 +433,71 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     totalPayARR: ytdSelectedMonthlyResult.reduce((s, r) => s + r.pay_actual, 0),
   }), [ytdSelectedMonthlyResult]);
 
+  const monthlyChurnData = useMemo<MonthlyChurnRow[]>(
+    () =>
+      Array.from({ length: 12 }, (_, idx) => {
+        const month = idx + 1;
+        const monthEvents = churnEvents.filter((event) => {
+          if (!event.churn_month) return false;
+          const d = new Date(event.churn_month);
+          if (Number.isNaN(d.getTime())) return false;
+          return d.getMonth() + 1 === month;
+        });
+
+        const scheduledEvents = monthEvents.filter((event) => event.scheduled === true);
+        const nonScheduledEvents = monthEvents.filter((event) => event.scheduled !== true);
+        const scheduledArrLost = scheduledEvents.reduce((sum, event) => sum + (Number(event.total_arr_lost) || 0), 0);
+        const nonScheduledArrLost = nonScheduledEvents.reduce((sum, event) => sum + (Number(event.total_arr_lost) || 0), 0);
+
+        return {
+          month,
+          scheduledCount: scheduledEvents.length,
+          nonScheduledCount: nonScheduledEvents.length,
+          scheduledArrLost,
+          nonScheduledArrLost,
+          totalCount: monthEvents.length,
+          totalArrLost: scheduledArrLost + nonScheduledArrLost,
+        };
+      }),
+    [churnEvents]
+  );
+
+  const selectedMonthlyChurnData = useMemo(
+    () => monthlyChurnData.filter((row) => selectedYtdMonths.includes(row.month)),
+    [monthlyChurnData, selectedYtdMonths]
+  );
+
+  const selectedChurnTotals = useMemo(
+    () =>
+      selectedMonthlyChurnData.reduce(
+        (acc, row) => ({
+          scheduledCount: acc.scheduledCount + row.scheduledCount,
+          nonScheduledCount: acc.nonScheduledCount + row.nonScheduledCount,
+          scheduledArrLost: acc.scheduledArrLost + row.scheduledArrLost,
+          nonScheduledArrLost: acc.nonScheduledArrLost + row.nonScheduledArrLost,
+          totalCount: acc.totalCount + row.totalCount,
+          totalArrLost: acc.totalArrLost + row.totalArrLost,
+        }),
+        {
+          scheduledCount: 0,
+          nonScheduledCount: 0,
+          scheduledArrLost: 0,
+          nonScheduledArrLost: 0,
+          totalCount: 0,
+          totalArrLost: 0,
+        }
+      ),
+    [selectedMonthlyChurnData]
+  );
+
+  const ytdAllInAfterChurn = useMemo(() => {
+    const allInArr = ytdSummary.totalAllInARR;
+    const churnArr = selectedChurnTotals.totalArrLost;
+    const netArr = allInArr - churnArr;
+    const retentionPct = allInArr > 0 ? netArr / allInArr : 0;
+    return { allInArr, churnArr, netArr, retentionPct };
+  }, [ytdSummary.totalAllInARR, selectedChurnTotals.totalArrLost]);
+
   const selectedTerminalsTarget = useMemo(() => {
     if (!planzahlen) return null;
     const terminalTargets = Array.from({ length: 12 }, (_, idx) => planzahlen.business_terminal_sales?.[idx] ?? 0);
@@ -435,7 +549,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     };
   }, [ytdMonthlyResult, selectedYtdMonths]);
 
-  const loading = usersLoading || dataLoading || planzahlenLoading;
+  const loading = usersLoading || dataLoading || planzahlenLoading || churnLoading;
 
   if (loading) {
     return (
@@ -852,6 +966,26 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </p>
               </div>
             </div>
+
+            {/* Reihe 4: All-in ARR YTD nach Churn */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 md:gap-4">
+              <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-purple-500 sm:col-span-3">
+                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD minus Churn</span>
+                <p className="text-base md:text-xl font-bold text-purple-600">
+                  {formatCurrency(ytdAllInAfterChurn.netArr)} <span className="text-gray-400 font-normal">/</span>{' '}
+                  <span className="text-purple-400">{formatCurrency(ytdAllInAfterChurn.allInArr)}</span>
+                </p>
+                <div className="mt-1.5 md:mt-2 h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-purple-500 rounded-full transition-all"
+                    style={{ width: `${Math.min(Math.max(ytdAllInAfterChurn.retentionPct * 100, 0), 100)}%` }}
+                  />
+                </div>
+                <p className="text-[10px] md:text-xs text-gray-500 mt-1">
+                  Churn berücksichtigt: {formatCurrency(ytdAllInAfterChurn.churnArr)} ({(ytdAllInAfterChurn.retentionPct * 100).toFixed(1)}% verbleibend)
+                </p>
+              </div>
+            </div>
                 </>
               );
             })()}
@@ -939,6 +1073,54 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                       <td className={`px-4 py-3 text-right ${getAchievementColor((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) > 0 ? (ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) / (ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) : 0)}`}>
                         {formatPercent((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) > 0 ? (ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) / (ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) : 0)}
                       </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h3 className="text-lg font-semibold text-gray-800">Churn pro Monat</h3>
+                <p className="text-sm text-gray-500 mt-1">
+                  Scheduled und Non-Scheduled Churn im gleichen Monatsraster wie die Go-Live-Übersicht.
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('dlt.reports.month')}</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled #</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">Churns</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">ARR Lost</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled ARR Lost</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Total Churn #</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-red-700 uppercase">Total ARR Lost</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {selectedMonthlyChurnData.map((row) => (
+                      <tr key={`churn-${row.month}`}>
+                        <td className="px-4 py-3 font-medium">{MONTH_NAMES[row.month - 1]}</td>
+                        <td className="px-4 py-3 text-right text-amber-700">{row.scheduledCount}</td>
+                        <td className="px-4 py-3 text-right text-rose-700">{row.nonScheduledCount}</td>
+                        <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(row.nonScheduledArrLost)}</td>
+                        <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(row.scheduledArrLost)}</td>
+                        <td className="px-4 py-3 text-right">{row.totalCount}</td>
+                        <td className="px-4 py-3 text-right font-semibold text-red-700">{formatCurrency(row.totalArrLost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-gray-50 font-semibold">
+                    <tr>
+                      <td className="px-4 py-3">{t('dlt.reports.total')}</td>
+                      <td className="px-4 py-3 text-right text-amber-700">{selectedChurnTotals.scheduledCount}</td>
+                      <td className="px-4 py-3 text-right text-rose-700">{selectedChurnTotals.nonScheduledCount}</td>
+                      <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(selectedChurnTotals.nonScheduledArrLost)}</td>
+                      <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(selectedChurnTotals.scheduledArrLost)}</td>
+                      <td className="px-4 py-3 text-right">{selectedChurnTotals.totalCount}</td>
+                      <td className="px-4 py-3 text-right text-red-700">{formatCurrency(selectedChurnTotals.totalArrLost)}</td>
                     </tr>
                   </tfoot>
                 </table>

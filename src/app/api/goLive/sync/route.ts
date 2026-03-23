@@ -613,8 +613,8 @@ export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; a
 
   const rowsToProcess = Array.from(rowByOakId.values());
   const oakIds = rowsToProcess.map((r) => r.oakId).filter((v): v is number => Number.isInteger(v));
-  const { data: existingOakIds, error: existingError } = oakIds.length
-    ? await supabase.from('go_lives').select('oak_id').in('oak_id', oakIds)
+  const { data: existingGoLivesRows, error: existingError } = oakIds.length
+    ? await supabase.from('go_lives').select('oak_id, pay_arr').in('oak_id', oakIds)
     : { data: [], error: null };
 
   if (existingError) {
@@ -641,10 +641,22 @@ export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; a
   }
 
   const existingSet = new Set(
-    (existingOakIds || [])
+    (existingGoLivesRows || [])
       .map((e: any) => (e.oak_id !== null && e.oak_id !== undefined ? Number(e.oak_id) : null))
       .filter((n: number | null): n is number => n !== null)
   );
+
+  /** Wenn das Sheet „Pay Value after 3 month“ leer lässt, sonst würde jeder Sync pay_arr auf NULL setzen und z.B. Paymargin-Imports überschreiben. */
+  const existingPayArrByOakId = new Map<number, number | null>();
+  (existingGoLivesRows || []).forEach((e: any) => {
+    const oid = Number(e.oak_id);
+    if (!Number.isInteger(oid)) return;
+    const p = e.pay_arr;
+    existingPayArrByOakId.set(
+      oid,
+      p !== null && p !== undefined && p !== '' ? Number(p) : null
+    );
+  });
 
   const rowsForUpsert: any[] = [];
   const errors: Array<{ rowNumber: number; oakId: number | null; error: string }> = [];
@@ -702,6 +714,25 @@ export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; a
       }
     }
 
+    const existingPayArr =
+      row.oakId !== null
+        ? existingPayArrByOakId.get(row.oakId)
+        : undefined;
+    const sheetPayArr = row.payValueAfter3Month;
+
+    /**
+     * Schutz vor unbeabsichtigtem Reset:
+     * Wenn für die OAK-ID bereits ein pay_arr existiert (z.B. via Paymargin-Import),
+     * darf der Go-Live-Sync diesen Wert niemals überschreiben.
+     * Nur wenn noch kein pay_arr vorhanden ist, darf ein Sheet-Wert gesetzt werden.
+     */
+    const payArrForUpsert =
+      existingPayArr !== null && existingPayArr !== undefined
+        ? existingPayArr
+        : sheetPayArr != null
+          ? sheetPayArr
+          : null;
+
     rowsForUpsert.push({
       user_id: matchedUser.id,
       customer_name: row.customerName,
@@ -711,7 +742,7 @@ export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; a
       subs_monthly: row.monthlySubs,
       subs_arr: row.monthlySubs * 12,
       has_terminal: row.hasTerminal ?? false,
-      pay_arr: row.payValueAfter3Month,
+      pay_arr: payArrForUpsert,
       commission_relevant: row.commissionRelevant ?? true,
       partner_id: partnerId,
       is_enterprise: row.enterprise ?? false,
