@@ -25,9 +25,18 @@ interface YtdMonthlyRow {
 }
 
 interface ChurnEventRow {
+  id?: string;
   churn_month: string | null;
+  gl_month?: string | null;
   scheduled: boolean | null;
   total_arr_lost: number | null;
+  subs_revenue_lost?: number | null;
+  pay_revenue_lost?: number | null;
+  oak_id?: number | string | null;
+  customer_name?: string | null;
+  coo?: string | null;
+  churn_reason?: string | null;
+  package_name?: string | null;
 }
 
 interface MonthlyChurnRow {
@@ -39,6 +48,41 @@ interface MonthlyChurnRow {
   totalCount: number;
   totalArrLost: number;
 }
+
+interface SalespipeEventRow {
+  id: string;
+  opportunity_id: string;
+  oak_id: number | null;
+  opportunity_name: string;
+  stage: string | null;
+  estimated_arr: number | null;
+  probability: number | null;
+  close_date: string | null;
+  created_date: string | null;
+  opportunity_owner: string | null;
+  lead_source: string | null;
+}
+
+interface SignupsEventRow {
+  id: string;
+  account_id: string;
+  oak_id: number | null;
+  account_name: string;
+  account_owner: string | null;
+  signup_package: string | null;
+  signup_date: string | null;
+  go_live_date: string | null;
+}
+
+type SalespipeStageKey =
+  | 'sql'
+  | 'demo_booked'
+  | 'demo_completed'
+  | 'sent_quote'
+  | 'close_won'
+  | 'close_lost'
+  | 'nurture'
+  | 'other';
 
 interface DLTStrategicReportsProps {
   user: User;
@@ -55,9 +99,58 @@ interface DLTPlanzahlen {
   avg_subs_bill: number;
   avg_pay_bill_terminal: number;
   avg_pay_bill_tipping: number;
+  churn_arr_data?: unknown;
 }
 
 const MONTH_NAMES_SHORT = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+
+function normalizeMonthlyPlanValues(value: unknown): number[] {
+  if (!Array.isArray(value)) return Array.from({ length: 12 }, () => 0);
+  const values = value.slice(0, 12).map((entry) => {
+    const n = Number(entry);
+    return Number.isFinite(n) ? n : 0;
+  });
+  if (values.length < 12) {
+    return [...values, ...Array.from({ length: 12 - values.length }, () => 0)];
+  }
+  return values;
+}
+
+const SALESPIPE_STAGE_CONFIG: Array<{ key: SalespipeStageKey; label: string; color: string; bg: string }> = [
+  { key: 'sql', label: 'SQL', color: 'text-blue-700', bg: 'bg-blue-50' },
+  { key: 'demo_booked', label: 'Demo Booked', color: 'text-indigo-700', bg: 'bg-indigo-50' },
+  { key: 'demo_completed', label: 'Demo Completed', color: 'text-purple-700', bg: 'bg-purple-50' },
+  { key: 'sent_quote', label: 'Sent Quote', color: 'text-amber-700', bg: 'bg-amber-50' },
+  { key: 'close_won', label: 'Close Won', color: 'text-emerald-700', bg: 'bg-emerald-50' },
+  { key: 'close_lost', label: 'Close Lost', color: 'text-rose-700', bg: 'bg-rose-50' },
+  { key: 'nurture', label: 'Nurture', color: 'text-slate-700', bg: 'bg-slate-100' },
+  { key: 'other', label: 'Other', color: 'text-gray-700', bg: 'bg-gray-100' },
+];
+
+const ACTIVE_SALESPIPE_STAGES: SalespipeStageKey[] = ['sql', 'demo_booked', 'demo_completed', 'sent_quote', 'nurture'];
+
+function normalizeSalespipeStage(stage: string | null): SalespipeStageKey {
+  const normalized = String(stage || '').toLowerCase().trim().replace(/[-\s]+/g, '_');
+  if (normalized === 'sql') return 'sql';
+  if (normalized === 'demo_booked') return 'demo_booked';
+  if (normalized === 'demo_completed') return 'demo_completed';
+  if (normalized === 'sent_quote') return 'sent_quote';
+  if (normalized === 'close_won' || normalized === 'closed_won') return 'close_won';
+  if (normalized === 'close_lost' || normalized === 'closed_lost') return 'close_lost';
+  if (normalized === 'nurture') return 'nurture';
+  return 'other';
+}
+
+function getSalespipeDefaultProbability(stage: SalespipeStageKey): number {
+  if (stage === 'sql') return 0.2;
+  if (stage === 'demo_booked') return 0.35;
+  if (stage === 'demo_completed') return 0.5;
+  if (stage === 'sent_quote') return 0.7;
+  if (stage === 'close_won') return 1;
+  if (stage === 'close_lost') return 0;
+  if (stage === 'nurture') return 0.1;
+  return 0.2;
+}
 
 export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) {
   const { t } = useLanguage();
@@ -75,9 +168,22 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     () => Array.from({ length: 12 }, (_, idx) => idx + 1),
     []
   );
-  const [reportType, setReportType] = useState<'trend' | 'forecast' | 'ytd'>('trend');
+  const [reportType, setReportType] = useState<'trend' | 'forecast' | 'ytd' | 'salespipe'>('trend');
   const [selectedYtdMonths, setSelectedYtdMonths] = useState<number[]>(defaultYtdMonths);
   const [selectedMonthDetail, setSelectedMonthDetail] = useState<number | null>(null);
+  const [selectedChurnMonthDetail, setSelectedChurnMonthDetail] = useState<number | null>(null);
+  const [chartsExpanded, setChartsExpanded] = useState(true);
+  const [goLiveDetailSearch, setGoLiveDetailSearch] = useState('');
+  const [churnDetailSearch, setChurnDetailSearch] = useState('');
+  const [salespipeEvents, setSalespipeEvents] = useState<SalespipeEventRow[]>([]);
+  const [signupsEvents, setSignupsEvents] = useState<SignupsEventRow[]>([]);
+  const [salespipeLoading, setSalespipeLoading] = useState(true);
+  const [salespipeSearch, setSalespipeSearch] = useState('');
+  const [salespipeStageFilter, setSalespipeStageFilter] = useState<SalespipeStageKey | 'all'>('all');
+  const [salespipeDateFromInput, setSalespipeDateFromInput] = useState('');
+  const [salespipeDateToInput, setSalespipeDateToInput] = useState('');
+  const [salespipeDateFrom, setSalespipeDateFrom] = useState('');
+  const [salespipeDateTo, setSalespipeDateTo] = useState('');
   const [churnEvents, setChurnEvents] = useState<ChurnEventRow[]>([]);
   const [churnLoading, setChurnLoading] = useState(true);
   const [payIstInputsByGoLiveId, setPayIstInputsByGoLiveId] = useState<Record<string, string>>({});
@@ -99,7 +205,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
 
       const { data, error } = await supabase
         .from('churn_events')
-        .select('churn_month, scheduled, total_arr_lost')
+        .select('id, churn_month, gl_month, scheduled, total_arr_lost, subs_revenue_lost, pay_revenue_lost, oak_id, customer_name, coo, churn_reason, package_name')
         .gte('churn_month', from)
         .lt('churn_month', to);
 
@@ -115,6 +221,46 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     };
 
     fetchChurnEvents();
+    return () => {
+      active = false;
+    };
+  }, [selectedYear]);
+
+  useEffect(() => {
+    let active = true;
+
+    const fetchSalespipeAndSignups = async () => {
+      setSalespipeLoading(true);
+
+      const [salespipeRes, signupsRes] = await Promise.all([
+        supabase
+          .from('salespipe_events')
+          .select('id, opportunity_id, oak_id, opportunity_name, stage, estimated_arr, probability, close_date, created_date, opportunity_owner, lead_source'),
+        supabase
+          .from('signups_events')
+          .select('id, account_id, oak_id, account_name, account_owner, signup_package, signup_date, go_live_date'),
+      ]);
+
+      if (!active) return;
+
+      if (salespipeRes.error) {
+        console.error('Salespipe load error:', salespipeRes.error);
+        setSalespipeEvents([]);
+      } else {
+        setSalespipeEvents((salespipeRes.data as SalespipeEventRow[]) || []);
+      }
+
+      if (signupsRes.error) {
+        console.error('Signups load error:', signupsRes.error);
+        setSignupsEvents([]);
+      } else {
+        setSignupsEvents((signupsRes.data as SignupsEventRow[]) || []);
+      }
+
+      setSalespipeLoading(false);
+    };
+
+    fetchSalespipeAndSignups();
     return () => {
       active = false;
     };
@@ -321,6 +467,21 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
 
   const userNameById = useMemo(() => new Map(users.map((u) => [u.id, u.name])), [users]);
 
+  const filteredMonthDetailGoLives = useMemo(() => {
+    const query = goLiveDetailSearch.trim().toLowerCase();
+    if (!query) return monthDetailGoLives;
+    return monthDetailGoLives.filter((gl) => {
+      const assignedTo = (userNameById.get(gl.user_id) || '').toLowerCase();
+      const values = [
+        String(gl.oak_id ?? ''),
+        gl.customer_name || '',
+        new Date(gl.go_live_date).toLocaleDateString('de-DE'),
+        assignedTo,
+      ];
+      return values.some((value) => value.toLowerCase().includes(query));
+    });
+  }, [monthDetailGoLives, goLiveDetailSearch, userNameById]);
+
   // Gleiche PAY-Logik wie in calculations.ts (Reporting):
   // 1) pay_arr (Ist), 2) pay_arr_target (Forecast), 3) Terminal-Default aus Settings (avg_pay_bill * 12)
   const getEffectiveGoLivePayArr = (gl: GoLive): number => {
@@ -344,6 +505,10 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     setSavingPayIstByGoLiveId({});
     setPayIstErrorByGoLiveId({});
   }, [selectedMonthDetail, monthDetailGoLives]);
+
+  useEffect(() => {
+    setGoLiveDetailSearch('');
+  }, [selectedMonthDetail]);
 
   const getDraftPayIstMonthly = (gl: GoLive): number | null => {
     const raw = (payIstInputsByGoLiveId[gl.id] ?? '').trim();
@@ -462,6 +627,53 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     [churnEvents]
   );
 
+  const monthDetailChurnEvents = useMemo(
+    () =>
+      selectedChurnMonthDetail
+        ? churnEvents
+            .filter((event) => {
+              if (!event.churn_month) return false;
+              const d = new Date(event.churn_month);
+              if (Number.isNaN(d.getTime())) return false;
+              return d.getMonth() + 1 === selectedChurnMonthDetail;
+            })
+            .sort((a, b) => (Number(b.total_arr_lost) || 0) - (Number(a.total_arr_lost) || 0))
+        : [],
+    [churnEvents, selectedChurnMonthDetail]
+  );
+
+  const filteredMonthDetailChurnEvents = useMemo(() => {
+    const query = churnDetailSearch.trim().toLowerCase();
+    if (!query) return monthDetailChurnEvents;
+    return monthDetailChurnEvents.filter((event) => {
+      const values = [
+        String(event.oak_id ?? ''),
+        event.customer_name || '',
+        event.coo || '',
+        event.package_name || '',
+        event.churn_reason || '',
+        event.scheduled ? 'ja' : 'nein',
+      ];
+      return values.some((value) => value.toLowerCase().includes(query));
+    });
+  }, [monthDetailChurnEvents, churnDetailSearch]);
+
+  const churnDetailSummary = useMemo(
+    () => ({
+      totalCount: filteredMonthDetailChurnEvents.length,
+      scheduledCount: filteredMonthDetailChurnEvents.filter((event) => event.scheduled === true).length,
+      nonScheduledCount: filteredMonthDetailChurnEvents.filter((event) => event.scheduled !== true).length,
+      totalArrLost: filteredMonthDetailChurnEvents.reduce((sum, event) => sum + (Number(event.total_arr_lost) || 0), 0),
+      subsArrLost: filteredMonthDetailChurnEvents.reduce((sum, event) => sum + (Number(event.subs_revenue_lost) || 0), 0),
+      payArrLost: filteredMonthDetailChurnEvents.reduce((sum, event) => sum + (Number(event.pay_revenue_lost) || 0), 0),
+    }),
+    [filteredMonthDetailChurnEvents]
+  );
+
+  useEffect(() => {
+    setChurnDetailSearch('');
+  }, [selectedChurnMonthDetail]);
+
   const selectedMonthlyChurnData = useMemo(
     () => monthlyChurnData.filter((row) => selectedYtdMonths.includes(row.month)),
     [monthlyChurnData, selectedYtdMonths]
@@ -498,6 +710,30 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     return { allInArr, churnArr, netArr, retentionPct };
   }, [ytdSummary.totalAllInARR, selectedChurnTotals.totalArrLost]);
 
+  const invoicedChurnTargetArrByMonth = useMemo(() => {
+    const churnData =
+      planzahlen?.churn_arr_data && typeof planzahlen.churn_arr_data === 'object'
+        ? (planzahlen.churn_arr_data as Record<string, unknown>)
+        : {};
+    const invoicedChurn =
+      churnData.invoiced_churn && typeof churnData.invoiced_churn === 'object'
+        ? (churnData.invoiced_churn as Record<string, unknown>)
+        : {};
+    // In den Planzahlen wird Churn ARR als negativ gespeichert (toNegativeOrZero).
+    // Für das NET-Ziel benötigen wir die absolute Verlusthöhe als positive Abzugsgröße.
+    return normalizeMonthlyPlanValues(invoicedChurn.target_arr).map((value) => Math.abs(value));
+  }, [planzahlen]);
+
+  const selectedInvoicedChurnTargetArr = useMemo(
+    () => selectedYtdMonths.reduce((sum, month) => sum + (invoicedChurnTargetArrByMonth[month - 1] || 0), 0),
+    [selectedYtdMonths, invoicedChurnTargetArrByMonth]
+  );
+
+  const yearlyInvoicedChurnTargetArr = useMemo(
+    () => invoicedChurnTargetArrByMonth.reduce((sum, value) => sum + value, 0),
+    [invoicedChurnTargetArrByMonth]
+  );
+
   const selectedTerminalsTarget = useMemo(() => {
     if (!planzahlen) return null;
     const terminalTargets = Array.from({ length: 12 }, (_, idx) => planzahlen.business_terminal_sales?.[idx] ?? 0);
@@ -522,6 +758,26 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     totalPayTarget: ytdMonthlyResult.reduce((s, r) => s + r.pay_target, 0),
     totalPayARR: ytdMonthlyResult.reduce((s, r) => s + r.pay_actual, 0),
   }), [ytdMonthlyResult]);
+
+  const netArrGoals = useMemo(() => {
+    const netGoalYtd = ytdSummary.totalAllInTarget - selectedInvoicedChurnTargetArr;
+    const netGoalYearly = (fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) - yearlyInvoicedChurnTargetArr;
+    const ytdNetActual = ytdAllInAfterChurn.netArr;
+    return {
+      netGoalYtd,
+      netGoalYearly,
+      ytdNetActual,
+      ytdPct: netGoalYtd > 0 ? ytdNetActual / netGoalYtd : 0,
+      yearlyPct: netGoalYearly > 0 ? ytdNetActual / netGoalYearly : 0,
+    };
+  }, [
+    ytdSummary.totalAllInTarget,
+    selectedInvoicedChurnTargetArr,
+    fullYearTotals.totalSubsTarget,
+    fullYearTotals.totalPayTarget,
+    yearlyInvoicedChurnTargetArr,
+    ytdAllInAfterChurn.netArr,
+  ]);
 
   // Bill-KPIs basieren auf den aktuell ausgewählten Monaten (YTD-Filter).
   const selectedBillMetrics = useMemo(() => {
@@ -548,6 +804,142 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       allInBillTarget: subsBillTarget + payBillTarget,
     };
   }, [ytdMonthlyResult, selectedYtdMonths]);
+
+  const yearFilteredSalespipeEvents = useMemo(() => {
+    return salespipeEvents.filter((row) => {
+      const createdYear = row.created_date ? new Date(row.created_date).getFullYear() : null;
+      const closeYear = row.close_date ? new Date(row.close_date).getFullYear() : null;
+      return createdYear === selectedYear || closeYear === selectedYear;
+    });
+  }, [salespipeEvents, selectedYear]);
+
+  const yearFilteredSignupsEvents = useMemo(() => {
+    return signupsEvents.filter((row) => {
+      const signupYear = row.signup_date ? new Date(row.signup_date).getFullYear() : null;
+      const goLiveYear = row.go_live_date ? new Date(row.go_live_date).getFullYear() : null;
+      return signupYear === selectedYear || goLiveYear === selectedYear;
+    });
+  }, [signupsEvents, selectedYear]);
+
+  const newestSignupByOak = useMemo(() => {
+    const byOak = new Map<number, SignupsEventRow>();
+    yearFilteredSignupsEvents.forEach((signup) => {
+      if (!signup.oak_id) return;
+      const current = byOak.get(signup.oak_id);
+      if (!current) {
+        byOak.set(signup.oak_id, signup);
+        return;
+      }
+      const currentTs = new Date(current.signup_date || current.go_live_date || '1970-01-01').getTime();
+      const nextTs = new Date(signup.signup_date || signup.go_live_date || '1970-01-01').getTime();
+      if (nextTs >= currentTs) byOak.set(signup.oak_id, signup);
+    });
+    return byOak;
+  }, [yearFilteredSignupsEvents]);
+
+  const mergedSalespipeRows = useMemo(() => {
+    return yearFilteredSalespipeEvents.map((sales) => {
+      const stageKey = normalizeSalespipeStage(sales.stage);
+      const estimatedArr = Number(sales.estimated_arr) || 0;
+      const probabilityRaw = Number(sales.probability);
+      const probability = Number.isFinite(probabilityRaw)
+        ? (probabilityRaw > 1 ? probabilityRaw / 100 : probabilityRaw)
+        : getSalespipeDefaultProbability(stageKey);
+      const weightedArr = estimatedArr * probability;
+      const matchedSignup = sales.oak_id ? newestSignupByOak.get(sales.oak_id) : undefined;
+      return {
+        ...sales,
+        stageKey,
+        estimatedArr,
+        probability,
+        weightedArr,
+        matchedSignup,
+      };
+    });
+  }, [yearFilteredSalespipeEvents, newestSignupByOak]);
+
+  const salespipeRowsInDateRange = useMemo(() => {
+    const fromDate = salespipeDateFrom ? new Date(salespipeDateFrom) : null;
+    const toDate = salespipeDateTo ? new Date(`${salespipeDateTo}T23:59:59`) : null;
+    if (!fromDate && !toDate) return mergedSalespipeRows;
+    return mergedSalespipeRows.filter((row) => {
+      // Gleiches Verhalten wie im Pipeline-Bereich:
+      // Closed Won/Lost nach Close-Date, aktive Stages nach Created-Date.
+      const isClosedStage = row.stageKey === 'close_won' || row.stageKey === 'close_lost';
+      const relevantDate = isClosedStage
+        ? row.close_date
+          ? new Date(row.close_date)
+          : row.created_date
+            ? new Date(row.created_date)
+            : null
+        : row.created_date
+          ? new Date(row.created_date)
+          : row.close_date
+            ? new Date(row.close_date)
+            : null;
+      if (!relevantDate || Number.isNaN(relevantDate.getTime())) return false;
+      if (fromDate && relevantDate < fromDate) return false;
+      if (toDate && relevantDate > toDate) return false;
+      return true;
+    });
+  }, [mergedSalespipeRows, salespipeDateFrom, salespipeDateTo]);
+
+  const filteredSalespipeRows = useMemo(() => {
+    const query = salespipeSearch.trim().toLowerCase();
+    return salespipeRowsInDateRange.filter((row) => {
+      if (salespipeStageFilter !== 'all' && row.stageKey !== salespipeStageFilter) return false;
+      if (!query) return true;
+      const searchValues = [
+        row.opportunity_name || '',
+        row.opportunity_owner || '',
+        row.lead_source || '',
+        String(row.oak_id ?? ''),
+        row.matchedSignup?.account_name || '',
+        row.matchedSignup?.account_owner || '',
+      ];
+      return searchValues.some((value) => value.toLowerCase().includes(query));
+    });
+  }, [salespipeRowsInDateRange, salespipeSearch, salespipeStageFilter]);
+
+  const salespipeStageSummary = useMemo(() => {
+    const initial = SALESPIPE_STAGE_CONFIG.reduce(
+      (acc, stage) => ({ ...acc, [stage.key]: { count: 0, arr: 0 } }),
+      {} as Record<SalespipeStageKey, { count: number; arr: number }>
+    );
+    filteredSalespipeRows.forEach((row) => {
+      initial[row.stageKey].count += 1;
+      initial[row.stageKey].arr += row.estimatedArr;
+    });
+    return initial;
+  }, [filteredSalespipeRows]);
+
+  const salespipeKpis = useMemo(() => {
+    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_SALESPIPE_STAGES.includes(row.stageKey));
+    const totalPipelineArr = openRows.reduce((sum, row) => sum + row.estimatedArr, 0);
+    const weightedArr = openRows.reduce((sum, row) => sum + row.weightedArr, 0);
+    const matchedSignups = filteredSalespipeRows.filter((row) => !!row.matchedSignup).length;
+    const wonCount = filteredSalespipeRows.filter((row) => row.stageKey === 'close_won').length;
+    return {
+      totalRows: filteredSalespipeRows.length,
+      openRows: openRows.length,
+      totalPipelineArr,
+      weightedArr,
+      matchedSignups,
+      wonCount,
+    };
+  }, [filteredSalespipeRows]);
+
+  const applySalespipeDateFilter = () => {
+    setSalespipeDateFrom(salespipeDateFromInput);
+    setSalespipeDateTo(salespipeDateToInput);
+  };
+
+  const resetSalespipeDateFilter = () => {
+    setSalespipeDateFromInput('');
+    setSalespipeDateToInput('');
+    setSalespipeDateFrom('');
+    setSalespipeDateTo('');
+  };
 
   const loading = usersLoading || dataLoading || planzahlenLoading || churnLoading;
 
@@ -605,7 +997,8 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         {[
           { id: 'trend', label: t('dlt.reports.trendAnalysis'), icon: '📊' },
           { id: 'forecast', label: t('dlt.reports.forecast'), icon: '🔮' },
-          { id: 'ytd', label: t('dlt.reports.ytdSummary'), icon: '📋' }
+          { id: 'ytd', label: t('dlt.reports.ytdSummary'), icon: '📋' },
+          { id: 'salespipe', label: 'New Sales Pipe', icon: '🧭' }
         ].map((tab) => (
           <button
             key={tab.id}
@@ -798,6 +1191,191 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           </div>
         )}
 
+        {/* New Sales Pipe */}
+        {reportType === 'salespipe' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <h3 className="text-lg font-semibold text-gray-800">New Sales Pipe</h3>
+              <p className="text-sm text-gray-500 mt-1">
+                Kombinierte Pipeline aus Salespipe-Import und DACH Sign-ups (Match über OAK ID).
+              </p>
+            </div>
+
+            {salespipeLoading ? (
+              <div className="bg-white rounded-xl shadow-sm p-8 text-center text-gray-500">
+                Lade Sales Pipe Daten...
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 md:gap-4">
+                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                    <span className="text-xs text-gray-500">Opportunities</span>
+                    <p className="text-lg md:text-2xl font-bold text-gray-800">{salespipeKpis.totalRows}</p>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                    <span className="text-xs text-gray-500">Open Pipeline #</span>
+                    <p className="text-lg md:text-2xl font-bold text-indigo-700">{salespipeKpis.openRows}</p>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                    <span className="text-xs text-gray-500">Open Pipeline ARR</span>
+                    <p className="text-lg md:text-2xl font-bold text-blue-700">{formatCurrency(salespipeKpis.totalPipelineArr)}</p>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                    <span className="text-xs text-gray-500">Weighted ARR</span>
+                    <p className="text-lg md:text-2xl font-bold text-emerald-700">{formatCurrency(salespipeKpis.weightedArr)}</p>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                    <span className="text-xs text-gray-500">Matched Sign-ups</span>
+                    <p className="text-lg md:text-2xl font-bold text-violet-700">{salespipeKpis.matchedSignups}</p>
+                  </div>
+                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                    <span className="text-xs text-gray-500">Close Won</span>
+                    <p className="text-lg md:text-2xl font-bold text-emerald-700">{salespipeKpis.wonCount}</p>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
+                  <div className="space-y-3">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <input
+                        type="text"
+                        value={salespipeSearch}
+                        onChange={(e) => setSalespipeSearch(e.target.value)}
+                        placeholder="Suche nach Opportunity, Owner, OAK oder Signup..."
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none md:max-w-md"
+                      />
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-500">Stage</span>
+                        <select
+                          value={salespipeStageFilter}
+                          onChange={(e) => setSalespipeStageFilter(e.target.value as SalespipeStageKey | 'all')}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                        >
+                          <option value="all">Alle</option>
+                          {SALESPIPE_STAGE_CONFIG.map((stage) => (
+                            <option key={stage.key} value={stage.key}>{stage.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                      <span className="text-xs text-gray-500 md:w-28">Zeitraum</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="date"
+                          value={salespipeDateFromInput}
+                          onChange={(e) => setSalespipeDateFromInput(e.target.value)}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                        />
+                        <span className="text-xs text-gray-500">bis</span>
+                        <input
+                          type="date"
+                          value={salespipeDateToInput}
+                          onChange={(e) => setSalespipeDateToInput(e.target.value)}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={applySalespipeDateFilter}
+                          className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                        >
+                          Anwenden
+                        </button>
+                        <button
+                          type="button"
+                          onClick={resetSalespipeDateFilter}
+                          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        >
+                          Zurücksetzen
+                        </button>
+                      </div>
+                    </div>
+
+                    <p className="text-xs text-gray-500">
+                      Zeitraum: {salespipeDateFrom || salespipeDateTo ? `${salespipeDateFrom || '...'} bis ${salespipeDateTo || '...'}` : `gesamtes Jahr ${selectedYear}`}{' '}
+                      (Filterdatum = Close Date, fallback Created Date)
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
+                  {SALESPIPE_STAGE_CONFIG.map((stage) => (
+                    <div key={stage.key} className={`rounded-lg border p-3 ${stage.bg}`}>
+                      <div className={`text-xs font-medium ${stage.color}`}>{stage.label}</div>
+                      <div className="text-lg font-bold text-gray-800">{salespipeStageSummary[stage.key].count}</div>
+                      <div className="text-xs text-gray-500">{formatCurrency(salespipeStageSummary[stage.key].arr)}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="bg-white rounded-xl shadow-sm overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Opportunity</th>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Stage</th>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Owner</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-600">Estimated ARR</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-600">Probability</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-600">Weighted ARR</th>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Matched Signup</th>
+                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Close Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredSalespipeRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-3 py-8 text-center text-gray-500">
+                            Keine Pipeline-Daten für die aktuelle Auswahl.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredSalespipeRows
+                          .slice()
+                          .sort((a, b) => b.estimatedArr - a.estimatedArr)
+                          .map((row) => {
+                            const stageCfg = SALESPIPE_STAGE_CONFIG.find((cfg) => cfg.key === row.stageKey) || SALESPIPE_STAGE_CONFIG[7];
+                            return (
+                              <tr key={row.id} className="border-b last:border-b-0">
+                                <td className="px-3 py-2">
+                                  <div className="font-medium text-gray-800">{row.opportunity_name}</div>
+                                  <div className="text-xs text-gray-500">OAK: {row.oak_id ?? '-'}</div>
+                                </td>
+                                <td className="px-3 py-2">
+                                  <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCfg.bg} ${stageCfg.color}`}>
+                                    {stageCfg.label}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 text-gray-700">{row.opportunity_owner || '-'}</td>
+                                <td className="px-3 py-2 text-right text-blue-700">{formatCurrency(row.estimatedArr)}</td>
+                                <td className="px-3 py-2 text-right text-gray-700">{(row.probability * 100).toFixed(0)}%</td>
+                                <td className="px-3 py-2 text-right text-emerald-700">{formatCurrency(row.weightedArr)}</td>
+                                <td className="px-3 py-2 text-gray-700">
+                                  {row.matchedSignup ? (
+                                    <div>
+                                      <div className="font-medium">{row.matchedSignup.account_name}</div>
+                                      <div className="text-xs text-gray-500">{row.matchedSignup.signup_package || '-'}</div>
+                                    </div>
+                                  ) : (
+                                    '-'
+                                  )}
+                                </td>
+                                <td className="px-3 py-2 text-gray-700">
+                                  {row.close_date ? new Date(row.close_date).toLocaleDateString('de-DE') : '-'}
+                                </td>
+                              </tr>
+                            );
+                          })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* YTD Summary – wie Jahresübersicht, basierend auf zentralen DLT-Settings (ohne Provision) */}
         {reportType === 'ytd' && (
           <div className="space-y-6">
@@ -910,16 +1488,16 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </p>
               </div>
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-blue-500">
-                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD vs Goal YTD</span>
+                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD minus Churn vs NET ARR Goal YTD</span>
                 <p className="text-base md:text-xl font-bold text-blue-600">
-                  {formatCurrency(ytdSummary.totalAllInARR)} <span className="text-gray-400 font-normal">/</span>{' '}
-                  <span className="text-blue-400">{formatCurrency(ytdSummary.totalAllInTarget)}</span>
+                  {formatCurrency(netArrGoals.ytdNetActual)} <span className="text-gray-400 font-normal">/</span>{' '}
+                  <span className="text-blue-400">{formatCurrency(netArrGoals.netGoalYtd)}</span>
                 </p>
                 <div className="mt-1.5 md:mt-2 h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${Math.min(ytdSummary.totalAllInTarget > 0 ? (ytdSummary.totalAllInARR / ytdSummary.totalAllInTarget) * 100 : 0, 100)}%` }} />
+                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${Math.min(Math.max(netArrGoals.ytdPct * 100, 0), 100)}%` }} />
                 </div>
                 <p className="text-[10px] md:text-xs text-gray-500 mt-1">
-                  {ytdSummary.totalAllInTarget > 0 ? ((ytdSummary.totalAllInARR / ytdSummary.totalAllInTarget) * 100).toFixed(1) : 0}% {t('yearOverview.achieved')}
+                  {netArrGoals.netGoalYtd > 0 ? (netArrGoals.ytdPct * 100).toFixed(1) : 0}% {t('yearOverview.achieved')} · Plan-Churn (Invoiced): {formatCurrency(selectedInvoicedChurnTargetArr)}
                 </p>
               </div>
             </div>
@@ -953,36 +1531,16 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </p>
               </div>
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-blue-500">
-                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD vs Yearly ARR Goal</span>
+                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD minus Churn vs Yearly NET ARR Goal</span>
                 <p className="text-base md:text-xl font-bold text-blue-600">
-                  {formatCurrency(ytdSummary.totalAllInARR)} <span className="text-gray-400 font-normal">/</span>{' '}
-                  <span className="text-blue-400">{formatCurrency(fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget)}</span>
+                  {formatCurrency(netArrGoals.ytdNetActual)} <span className="text-gray-400 font-normal">/</span>{' '}
+                  <span className="text-blue-400">{formatCurrency(netArrGoals.netGoalYearly)}</span>
                 </p>
                 <div className="mt-1.5 md:mt-2 h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${Math.min((fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) > 0 ? (ytdSummary.totalAllInARR / (fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget)) * 100 : 0, 100)}%` }} />
+                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${Math.min(Math.max(netArrGoals.yearlyPct * 100, 0), 100)}%` }} />
                 </div>
                 <p className="text-[10px] md:text-xs text-gray-500 mt-1">
-                  {(fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget) > 0 ? ((ytdSummary.totalAllInARR / (fullYearTotals.totalSubsTarget + fullYearTotals.totalPayTarget)) * 100).toFixed(1) : 0}% {t('yearOverview.achieved')}
-                </p>
-              </div>
-            </div>
-
-            {/* Reihe 4: All-in ARR YTD nach Churn */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 md:gap-4">
-              <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border-l-4 border-purple-500 sm:col-span-3">
-                <span className="text-xs md:text-sm text-gray-500">All-in ARR YTD minus Churn</span>
-                <p className="text-base md:text-xl font-bold text-purple-600">
-                  {formatCurrency(ytdAllInAfterChurn.netArr)} <span className="text-gray-400 font-normal">/</span>{' '}
-                  <span className="text-purple-400">{formatCurrency(ytdAllInAfterChurn.allInArr)}</span>
-                </p>
-                <div className="mt-1.5 md:mt-2 h-1.5 md:h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-purple-500 rounded-full transition-all"
-                    style={{ width: `${Math.min(Math.max(ytdAllInAfterChurn.retentionPct * 100, 0), 100)}%` }}
-                  />
-                </div>
-                <p className="text-[10px] md:text-xs text-gray-500 mt-1">
-                  Churn berücksichtigt: {formatCurrency(ytdAllInAfterChurn.churnArr)} ({(ytdAllInAfterChurn.retentionPct * 100).toFixed(1)}% verbleibend)
+                  {netArrGoals.netGoalYearly > 0 ? (netArrGoals.yearlyPct * 100).toFixed(1) : 0}% {t('yearOverview.achieved')} · Jahres-Plan-Churn (Invoiced): {formatCurrency(yearlyInvoicedChurnTargetArr)}
                 </p>
               </div>
             </div>
@@ -990,14 +1548,29 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               );
             })()}
 
-            {/* Performance über Zeit (Subs + Pay IST/Ziel) */}
-            <PerformanceChart monthlyResults={ytdSelectedMonthlyResult} showTargets={true} />
+            <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setChartsExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition"
+              >
+                <span className="text-sm font-semibold text-gray-700">Grafikbereich</span>
+                <span className="text-sm text-gray-500">{chartsExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
+              </button>
 
-            {/* Pay-Entwicklung (nur Pay) */}
-            <PayPerformanceChart monthlyResults={ytdSelectedMonthlyResult} />
+              {chartsExpanded && (
+                <div className="p-4 pt-2">
+                  {/* Performance über Zeit (Subs + Pay IST/Ziel) */}
+                  <PerformanceChart monthlyResults={ytdSelectedMonthlyResult} showTargets={true} />
 
-            {/* Go-Lives pro Monat */}
-            <GoLivesBarChart monthlyResults={ytdSelectedMonthlyResult} />
+                  {/* Pay-Entwicklung (nur Pay) */}
+                  <PayPerformanceChart monthlyResults={ytdSelectedMonthlyResult} />
+
+                  {/* Go-Lives pro Monat */}
+                  <GoLivesBarChart monthlyResults={ytdSelectedMonthlyResult} />
+                </div>
+              )}
+            </div>
 
             {/* Monatliche Übersicht (ohne Provision) */}
             <div className="bg-white rounded-xl shadow-sm overflow-hidden">
@@ -1085,40 +1658,48 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 <p className="text-sm text-gray-500 mt-1">
                   Scheduled und Non-Scheduled Churn im gleichen Monatsraster wie die Go-Live-Übersicht.
                 </p>
+                <p className="text-sm text-gray-500 mt-1">💡 Zeile anklicken für Churn-Details</p>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('dlt.reports.month')}</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled #</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled Churns</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled Churn ARR</th>
                       <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">Churns</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">ARR Lost</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled ARR Lost</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Total Churn #</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">Churn ARR Lost</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Total Churn</th>
                       <th className="px-4 py-3 text-right text-xs font-medium text-red-700 uppercase">Total ARR Lost</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {selectedMonthlyChurnData.map((row) => (
-                      <tr key={`churn-${row.month}`}>
-                        <td className="px-4 py-3 font-medium">{MONTH_NAMES[row.month - 1]}</td>
-                        <td className="px-4 py-3 text-right text-amber-700">{row.scheduledCount}</td>
-                        <td className="px-4 py-3 text-right text-rose-700">{row.nonScheduledCount}</td>
-                        <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(row.nonScheduledArrLost)}</td>
-                        <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(row.scheduledArrLost)}</td>
-                        <td className="px-4 py-3 text-right">{row.totalCount}</td>
-                        <td className="px-4 py-3 text-right font-semibold text-red-700">{formatCurrency(row.totalArrLost)}</td>
-                      </tr>
-                    ))}
+                    {selectedMonthlyChurnData.map((row) => {
+                      const hasData = row.totalCount > 0;
+                      return (
+                        <tr
+                          key={`churn-${row.month}`}
+                          className={`transition cursor-pointer ${hasData ? 'hover:bg-rose-50' : 'text-gray-400 hover:bg-gray-50'}`}
+                          onClick={() => setSelectedChurnMonthDetail(row.month)}
+                        >
+                          <td className="px-4 py-3 font-medium">{MONTH_NAMES[row.month - 1]}</td>
+                          <td className="px-4 py-3 text-right text-amber-700">{row.scheduledCount}</td>
+                          <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(row.scheduledArrLost)}</td>
+                          <td className="px-4 py-3 text-right text-rose-700">{row.nonScheduledCount}</td>
+                          <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(row.nonScheduledArrLost)}</td>
+                          <td className="px-4 py-3 text-right">{row.totalCount}</td>
+                          <td className="px-4 py-3 text-right font-semibold text-red-700">{formatCurrency(row.totalArrLost)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                   <tfoot className="bg-gray-50 font-semibold">
                     <tr>
                       <td className="px-4 py-3">{t('dlt.reports.total')}</td>
                       <td className="px-4 py-3 text-right text-amber-700">{selectedChurnTotals.scheduledCount}</td>
+                      <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(selectedChurnTotals.scheduledArrLost)}</td>
                       <td className="px-4 py-3 text-right text-rose-700">{selectedChurnTotals.nonScheduledCount}</td>
                       <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(selectedChurnTotals.nonScheduledArrLost)}</td>
-                      <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(selectedChurnTotals.scheduledArrLost)}</td>
                       <td className="px-4 py-3 text-right">{selectedChurnTotals.totalCount}</td>
                       <td className="px-4 py-3 text-right text-red-700">{formatCurrency(selectedChurnTotals.totalArrLost)}</td>
                     </tr>
@@ -1158,97 +1739,223 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </div>
               ) : (
                 <>
+                  <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <input
+                      type="text"
+                      value={goLiveDetailSearch}
+                      onChange={(e) => setGoLiveDetailSearch(e.target.value)}
+                      placeholder="Suche nach Kunde, OAK, Datum oder AE..."
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none md:max-w-md"
+                    />
+                    <span className="text-xs text-gray-500">
+                      {filteredMonthDetailGoLives.length} von {monthDetailGoLives.length} Go-Lives
+                    </span>
+                  </div>
                   <div className="mb-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
                     <div className="rounded-lg bg-gray-50 p-3">
                       <div className="text-gray-500">Go-Lives</div>
-                      <div className="text-lg font-bold text-gray-800">{monthDetailGoLives.length}</div>
+                      <div className="text-lg font-bold text-gray-800">{filteredMonthDetailGoLives.length}</div>
                     </div>
                     <div className="rounded-lg bg-gray-50 p-3">
                       <div className="text-gray-500">Terminals</div>
                       <div className="text-lg font-bold text-blue-700">
-                        {monthDetailGoLives.filter((g) => g.has_terminal).length}
+                        {filteredMonthDetailGoLives.filter((g) => g.has_terminal).length}
                       </div>
                     </div>
                     <div className="rounded-lg bg-gray-50 p-3">
                       <div className="text-gray-500">Subs ARR</div>
                       <div className="text-lg font-bold text-green-700">
-                        {formatCurrency(monthDetailGoLives.reduce((sum, g) => sum + g.subs_arr, 0))}
+                        {formatCurrency(filteredMonthDetailGoLives.reduce((sum, g) => sum + g.subs_arr, 0))}
                       </div>
                     </div>
                     <div className="rounded-lg bg-gray-50 p-3">
                       <div className="text-gray-500">Pay ARR</div>
                       <div className="text-lg font-bold text-orange-700">
-                        {formatCurrency(monthDetailGoLives.reduce((sum, g) => sum + getEffectiveGoLivePayArrForDisplay(g), 0))}
+                        {formatCurrency(filteredMonthDetailGoLives.reduce((sum, g) => sum + getEffectiveGoLivePayArrForDisplay(g), 0))}
                       </div>
                     </div>
                     <div className="rounded-lg bg-gray-50 p-3">
                       <div className="text-gray-500">Gesamt ARR</div>
                       <div className="text-lg font-bold text-blue-700">
                         {formatCurrency(
-                          monthDetailGoLives.reduce((sum, g) => sum + (g.subs_arr || 0) + getEffectiveGoLivePayArrForDisplay(g), 0)
+                          filteredMonthDetailGoLives.reduce((sum, g) => sum + (g.subs_arr || 0) + getEffectiveGoLivePayArrForDisplay(g), 0)
                         )}
                       </div>
                     </div>
                   </div>
 
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b bg-gray-50">
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.oakId')}</th>
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('monthDetail.customer')}</th>
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.goLiveDate')}</th>
-                          <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.assignedTo')}</th>
-                          <th className="px-3 py-2 text-right font-semibold text-green-700">{t('goLive.subsArr')}</th>
-                          <th className="px-3 py-2 text-right font-semibold text-emerald-700">Pay Ist / Monat (€)</th>
-                          <th className="px-3 py-2 text-right font-semibold text-orange-700">{t('goLive.payArr')}</th>
-                          <th className="px-3 py-2 text-right font-semibold text-blue-700">Gesamt ARR</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {monthDetailGoLives.map((gl) => (
-                          <tr key={gl.id} className="border-b last:border-b-0">
-                            <td className="px-3 py-2 text-gray-500">{gl.oak_id || '-'}</td>
-                            <td className="px-3 py-2 font-medium text-gray-800">{gl.customer_name}</td>
-                            <td className="px-3 py-2 text-gray-700">{new Date(gl.go_live_date).toLocaleDateString('de-DE')}</td>
-                            <td className="px-3 py-2 text-gray-700">{userNameById.get(gl.user_id) || '-'}</td>
-                            <td className="px-3 py-2 text-right text-green-700">{formatCurrency(gl.subs_arr)}</td>
-                            <td className="px-3 py-2">
-                              <div className="flex items-center justify-end gap-2">
-                                <input
-                                  type="number"
-                                  value={payIstInputsByGoLiveId[gl.id] ?? ''}
-                                  onChange={(e) =>
-                                    setPayIstInputsByGoLiveId((prev) => ({ ...prev, [gl.id]: e.target.value }))
-                                  }
-                                  disabled={!gl.has_terminal || savingPayIstByGoLiveId[gl.id]}
-                                  placeholder={gl.has_terminal ? 'z.B. 145' : '-'}
-                                  className={`w-24 rounded border px-2 py-1 text-right text-sm ${
-                                    !gl.has_terminal ? 'bg-gray-100 text-gray-400 border-gray-200' : 'border-emerald-300'
-                                  }`}
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => handleSavePayIstForGoLive(gl)}
-                                  disabled={!gl.has_terminal || savingPayIstByGoLiveId[gl.id]}
-                                  className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                  {savingPayIstByGoLiveId[gl.id] ? '...' : 'Speichern'}
-                                </button>
-                              </div>
-                              {payIstErrorByGoLiveId[gl.id] ? (
-                                <div className="mt-1 text-right text-xs text-red-600">{payIstErrorByGoLiveId[gl.id]}</div>
-                              ) : null}
-                            </td>
-                            <td className="px-3 py-2 text-right text-orange-700">{formatCurrency(getEffectiveGoLivePayArrForDisplay(gl))}</td>
-                            <td className="px-3 py-2 text-right font-medium text-blue-700">
-                              {formatCurrency((gl.subs_arr || 0) + getEffectiveGoLivePayArrForDisplay(gl))}
-                            </td>
+                  {filteredMonthDetailGoLives.length === 0 ? (
+                    <div className="py-6 text-center text-gray-500">Keine Treffer für die Suche.</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b bg-gray-50">
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.oakId')}</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('monthDetail.customer')}</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.goLiveDate')}</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">{t('goLive.assignedTo')}</th>
+                            <th className="px-3 py-2 text-right font-semibold text-green-700">{t('goLive.subsArr')}</th>
+                            <th className="px-3 py-2 text-right font-semibold text-emerald-700">Pay Ist / Monat (€)</th>
+                            <th className="px-3 py-2 text-right font-semibold text-orange-700">{t('goLive.payArr')}</th>
+                            <th className="px-3 py-2 text-right font-semibold text-blue-700">Gesamt ARR</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {filteredMonthDetailGoLives.map((gl) => (
+                            <tr key={gl.id} className="border-b last:border-b-0">
+                              <td className="px-3 py-2 text-gray-500">{gl.oak_id || '-'}</td>
+                              <td className="px-3 py-2 font-medium text-gray-800">{gl.customer_name}</td>
+                              <td className="px-3 py-2 text-gray-700">{new Date(gl.go_live_date).toLocaleDateString('de-DE')}</td>
+                              <td className="px-3 py-2 text-gray-700">{userNameById.get(gl.user_id) || '-'}</td>
+                              <td className="px-3 py-2 text-right text-green-700">{formatCurrency(gl.subs_arr)}</td>
+                              <td className="px-3 py-2">
+                                <div className="flex items-center justify-end gap-2">
+                                  <input
+                                    type="number"
+                                    value={payIstInputsByGoLiveId[gl.id] ?? ''}
+                                    onChange={(e) =>
+                                      setPayIstInputsByGoLiveId((prev) => ({ ...prev, [gl.id]: e.target.value }))
+                                    }
+                                    disabled={!gl.has_terminal || savingPayIstByGoLiveId[gl.id]}
+                                    placeholder={gl.has_terminal ? 'z.B. 145' : '-'}
+                                    className={`w-24 rounded border px-2 py-1 text-right text-sm ${
+                                      !gl.has_terminal ? 'bg-gray-100 text-gray-400 border-gray-200' : 'border-emerald-300'
+                                    }`}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSavePayIstForGoLive(gl)}
+                                    disabled={!gl.has_terminal || savingPayIstByGoLiveId[gl.id]}
+                                    className="rounded bg-emerald-600 px-2 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    {savingPayIstByGoLiveId[gl.id] ? '...' : 'Speichern'}
+                                  </button>
+                                </div>
+                                {payIstErrorByGoLiveId[gl.id] ? (
+                                  <div className="mt-1 text-right text-xs text-red-600">{payIstErrorByGoLiveId[gl.id]}</div>
+                                ) : null}
+                              </td>
+                              <td className="px-3 py-2 text-right text-orange-700">{formatCurrency(getEffectiveGoLivePayArrForDisplay(gl))}</td>
+                              <td className="px-3 py-2 text-right font-medium text-blue-700">
+                                {formatCurrency((gl.subs_arr || 0) + getEffectiveGoLivePayArrForDisplay(gl))}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedChurnMonthDetail && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setSelectedChurnMonthDetail(null)}
+        >
+          <div
+            className="max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-xl bg-white shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sticky top-0 flex items-center justify-between border-b bg-white px-6 py-4">
+              <h3 className="text-lg font-semibold text-gray-800">
+                📉 {MONTH_NAMES[selectedChurnMonthDetail - 1]} {selectedYear} - Churn-Details
+              </h3>
+              <button
+                onClick={() => setSelectedChurnMonthDetail(null)}
+                className="rounded-lg p-2 text-gray-500 transition hover:bg-gray-100"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6">
+              {monthDetailChurnEvents.length === 0 ? (
+                <div className="py-8 text-center text-gray-500">Keine Churn-Events in diesem Monat.</div>
+              ) : (
+                <>
+                  <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <input
+                      type="text"
+                      value={churnDetailSearch}
+                      onChange={(e) => setChurnDetailSearch(e.target.value)}
+                      placeholder="Suche nach Kunde, OAK, COO, Package, Reason..."
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-rose-500 focus:outline-none md:max-w-md"
+                    />
+                    <span className="text-xs text-gray-500">
+                      {filteredMonthDetailChurnEvents.length} von {monthDetailChurnEvents.length} Churn-Events
+                    </span>
                   </div>
+                  <div className="mb-4 grid grid-cols-2 gap-3 text-sm md:grid-cols-6">
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Total Churn</div>
+                      <div className="text-lg font-bold text-gray-800">{churnDetailSummary.totalCount}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Scheduled</div>
+                      <div className="text-lg font-bold text-amber-700">{churnDetailSummary.scheduledCount}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Non-Scheduled</div>
+                      <div className="text-lg font-bold text-rose-700">{churnDetailSummary.nonScheduledCount}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Total ARR Lost</div>
+                      <div className="text-lg font-bold text-red-700">{formatCurrency(churnDetailSummary.totalArrLost)}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Subs Lost</div>
+                      <div className="text-lg font-bold text-violet-700">{formatCurrency(churnDetailSummary.subsArrLost)}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3">
+                      <div className="text-gray-500">Pay Lost</div>
+                      <div className="text-lg font-bold text-orange-700">{formatCurrency(churnDetailSummary.payArrLost)}</div>
+                    </div>
+                  </div>
+
+                  {filteredMonthDetailChurnEvents.length === 0 ? (
+                    <div className="py-6 text-center text-gray-500">Keine Treffer für die Suche.</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b bg-gray-50">
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Oak ID</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Kunde</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">COO</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Package</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Reason</th>
+                            <th className="px-3 py-2 text-left font-semibold text-gray-600">Scheduled</th>
+                            <th className="px-3 py-2 text-right font-semibold text-violet-700">Subs Lost</th>
+                            <th className="px-3 py-2 text-right font-semibold text-orange-700">Pay Lost</th>
+                            <th className="px-3 py-2 text-right font-semibold text-red-700">Total ARR Lost</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredMonthDetailChurnEvents.map((event, idx) => (
+                            <tr key={event.id || `${event.oak_id || 'n/a'}-${event.customer_name || 'unknown'}-${idx}`} className="border-b last:border-b-0">
+                              <td className="px-3 py-2 text-gray-500">{event.oak_id ?? '-'}</td>
+                              <td className="px-3 py-2 font-medium text-gray-800">{event.customer_name || '-'}</td>
+                              <td className="px-3 py-2 text-gray-700">{event.coo || '-'}</td>
+                              <td className="px-3 py-2 text-gray-700">{event.package_name || '-'}</td>
+                              <td className="px-3 py-2 text-gray-700">{event.churn_reason || '-'}</td>
+                              <td className={`px-3 py-2 ${event.scheduled ? 'text-amber-700' : 'text-rose-700'}`}>
+                                {event.scheduled ? 'Ja' : 'Nein'}
+                              </td>
+                              <td className="px-3 py-2 text-right text-violet-700">{formatCurrency(Number(event.subs_revenue_lost) || 0)}</td>
+                              <td className="px-3 py-2 text-right text-orange-700">{formatCurrency(Number(event.pay_revenue_lost) || 0)}</td>
+                              <td className="px-3 py-2 text-right font-medium text-red-700">{formatCurrency(Number(event.total_arr_lost) || 0)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </>
               )}
             </div>

@@ -30,12 +30,21 @@ const COMMISSION_RELEVANT_ROLES: UserRole[] = ['ae_subscription_sales', 'ae_paym
 
 // Helper: Promise mit Timeout
 function withTimeout<T>(promise: Promise<T>, ms: number, errorMsg: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => 
-      setTimeout(() => reject(new Error(errorMsg)), ms)
-    )
-  ]);
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(errorMsg));
+    }, ms);
+
+    Promise.resolve(promise)
+      .then((value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
 }
 
 // Helper: Korrupte Session bereinigen
@@ -143,7 +152,15 @@ export function useAuth() {
           );
 
           if (profileError) {
-            console.error('Profile error:', profileError);
+            const profileErrorMessage = String((profileError as any)?.message || '');
+            const isTimeoutProfileError =
+              profileErrorMessage.toLowerCase().includes('timeout') ||
+              profileErrorMessage.toLowerCase().includes('aborted');
+            if (isTimeoutProfileError) {
+              console.warn('Profile timeout beim Session-Load');
+            } else {
+              console.error('Profile error:', profileError);
+            }
             if (mounted) setLoading(false);
             return;
           }
@@ -164,12 +181,14 @@ export function useAuth() {
           }
         }
       } catch (error: any) {
-        console.error('Auth error:', error?.message || error);
-        
-        // Bei Timeout oder Fehler: Session bereinigen
-        if (error?.message?.includes('timeout') || error?.message?.includes('aborted')) {
+        const message = String(error?.message || '');
+        const isTimeout = message.toLowerCase().includes('timeout') || message.toLowerCase().includes('aborted');
+
+        if (isTimeout) {
           console.warn('Auth timeout, bereinige Session...');
           await clearCorruptSession();
+        } else {
+          console.error('Auth error:', error?.message || error);
         }
       } finally {
         if (mounted) setLoading(false);
@@ -196,15 +215,40 @@ export function useAuth() {
 
       if (session?.user && mounted) {
         try {
-          const { data: profile } = await withTimeout(
-            supabase
-              .from('users')
-              .select('*')
-              .eq('id', session.user.id)
-              .single(),
-            AUTH_TIMEOUT,
-            'Profil-Timeout bei Auth-Change'
-          );
+          // Bei Auth-Change Timeout nicht als Exception werfen, damit kein Overlay-Error entsteht.
+          const profilePromise = (async () => {
+            try {
+              const result = await supabase
+                .from('users')
+                .select('*')
+                .eq('id', session.user.id)
+                .single();
+              return result;
+            } catch (error) {
+              return { __error: error } as const;
+            }
+          })();
+
+          const profileResult = await Promise.race([
+            profilePromise,
+            new Promise<{ __timeout: true }>((resolve) =>
+              setTimeout(() => resolve({ __timeout: true }), AUTH_TIMEOUT)
+            ),
+          ]);
+
+          if ('__timeout' in profileResult) {
+            console.warn('Profile fetch timeout bei Auth-Change');
+            if (mounted) setLoading(false);
+            return;
+          }
+
+          if ('__error' in profileResult) {
+            console.error('Profile fetch error:', profileResult.__error);
+            if (mounted) setLoading(false);
+            return;
+          }
+
+          const { data: profile } = profileResult;
 
           if (profile && mounted) {
             setUser({
@@ -221,7 +265,13 @@ export function useAuth() {
             });
           }
         } catch (error) {
-          console.error('Profile fetch error:', error);
+          const message = String((error as any)?.message || '');
+          const isTimeout = message.toLowerCase().includes('timeout') || message.toLowerCase().includes('aborted');
+          if (isTimeout) {
+            console.warn('Profile fetch timeout bei Auth-Change');
+          } else {
+            console.error('Profile fetch error:', error);
+          }
         }
       }
       if (mounted) setLoading(false);
