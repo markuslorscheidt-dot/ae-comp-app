@@ -282,7 +282,70 @@ interface SalespipeAutoImportResponse {
   error?: string;
 }
 
+interface LeadsDryRunResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+  };
+  preview?: {
+    valid: Array<{
+      rowNumber: number;
+      leadId: string;
+      companyAccount: string;
+      leadSource: string;
+      leadStatus: string;
+      opportunityId: string;
+      conversionDate: string | null;
+      leadOwner: string;
+    }>;
+    invalid: Array<{
+      rowNumber: number;
+      reasons: string[];
+      raw: { leadId: string; companyAccount: string };
+    }>;
+  };
+  warnings?: Array<{ rowNumber: number; leadId: string | null; warning: string }>;
+  error?: string;
+}
+
+interface LeadsCommitResponse {
+  success: boolean;
+  mode?: string;
+  stats?: {
+    totalRowsFromSheet: number;
+    parsedRows: number;
+    validRows: number;
+    invalidRows: number;
+    toImport: number;
+    imported: number;
+    failed: number;
+    duplicates: number;
+    updated?: number;
+  };
+  errors?: Array<{ rowNumber: number; leadId: string | null; error: string }>;
+  warnings?: Array<{ rowNumber: number; leadId: string | null; warning: string }>;
+  error?: string;
+}
+
+interface LeadsAutoImportResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
 interface SignupsStatsResponse {
+  success: boolean;
+  count?: number;
+  hasData?: boolean;
+  error?: string;
+}
+
+interface LeadsStatsResponse {
   success: boolean;
   count?: number;
   hasData?: boolean;
@@ -447,6 +510,32 @@ interface SalespipeImportRunItem {
   created_at: string;
 }
 
+interface LeadsImportRun {
+  id: string;
+  triggered_by: 'manual' | 'cron';
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  updated?: number;
+  to_import: number;
+  auto_import_enabled: boolean;
+  skipped: boolean;
+  reason: string | null;
+}
+
+interface LeadsImportRunItem {
+  id: string;
+  run_id: string;
+  row_number: number | null;
+  lead_id: string | null;
+  level: 'error' | 'warning' | 'duplicate';
+  message: string;
+  created_at: string;
+}
+
 interface SignupsImportRun {
   id: string;
   triggered_by: 'manual' | 'cron';
@@ -553,6 +642,29 @@ const SALESPIPE_BATCH_FIELD_MAPPING: Array<{
   { source: 'Decision Criteria', target: 'salespipe_events.decision_criteria', transform: 'String (optional)' },
   { source: 'Erstelldatum', target: 'salespipe_events.created_date', transform: 'dd.mm.yyyy -> ISO Datum' },
   { source: 'Opportunity-Inhaber', target: 'salespipe_events.opportunity_owner', transform: 'String (optional)' },
+];
+
+const LEADS_BATCH_FIELD_MAPPING: Array<{
+  source: string;
+  target: string;
+  transform: string;
+  required?: boolean;
+}> = [
+  { source: 'Lead-ID', target: 'leads_events.lead_id', transform: 'String (Business Key)', required: true },
+  { source: 'Firma/Account', target: 'leads_events.company_account', transform: 'Trim / String', required: true },
+  { source: 'Vorname', target: 'leads_events.first_name', transform: 'String (optional)' },
+  { source: 'Nachname', target: 'leads_events.last_name', transform: 'String (optional)' },
+  { source: 'Lead-Quelle', target: 'leads_events.lead_source', transform: 'String (optional)' },
+  { source: 'Demo or Quote', target: 'leads_events.demo_or_quote', transform: 'String (optional)' },
+  { source: 'Lead-Status', target: 'leads_events.lead_status', transform: 'String (optional)' },
+  { source: 'Lead Sub Status', target: 'leads_events.lead_sub_status', transform: 'String (optional)' },
+  { source: 'Lead-Inhaber', target: 'leads_events.lead_owner', transform: 'String (optional)' },
+  { source: 'Erstelldatum', target: 'leads_events.created_date', transform: 'dd.mm.yyyy -> ISO Datum' },
+  { source: 'Letzte Aktivität', target: 'leads_events.last_activity_date', transform: 'dd.mm.yyyy -> ISO Datum' },
+  { source: 'Zuletzt geändert am', target: 'leads_events.updated_on_date', transform: 'dd.mm.yyyy -> ISO Datum' },
+  { source: 'Konvertierungsdatum', target: 'leads_events.conversion_date', transform: 'dd.mm.yyyy -> ISO Datum' },
+  { source: 'Opportunity-ID', target: 'leads_events.opportunity_id', transform: 'String (optional)' },
+  { source: 'Opportunity-Name', target: 'leads_events.opportunity_name', transform: 'String (optional)' },
 ];
 
 // Role display names
@@ -703,6 +815,7 @@ type ImportSubTab =
   | 'churnImports'
   | 'upDownsellsImport'
   | 'salespipeImport'
+  | 'leadsImport'
   | 'signupsImport'
   | 'paymarginImport';
 
@@ -798,11 +911,32 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [selectedSalespipeImportRunItems, setSelectedSalespipeImportRunItems] = useState<SalespipeImportRunItem[]>(
     []
   );
+  const [leadsImportMode, setLeadsImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [leadsAutoImportEnabled, setLeadsAutoImportEnabled] = useState(false);
+  const [leadsAutoImportLoading, setLeadsAutoImportLoading] = useState(false);
+  const [leadsAutoImportSaving, setLeadsAutoImportSaving] = useState(false);
+  const [leadsAutoImportMessage, setLeadsAutoImportMessage] = useState('');
+  const [leadsBatchLoading, setLeadsBatchLoading] = useState(false);
+  const [leadsBatchError, setLeadsBatchError] = useState('');
+  const [leadsBatchResult, setLeadsBatchResult] = useState<LeadsDryRunResponse | null>(null);
+  const [lastLeadsBatchCheckAt, setLastLeadsBatchCheckAt] = useState<string | null>(null);
+  const [leadsBatchImportLoading, setLeadsBatchImportLoading] = useState(false);
+  const [leadsBatchImportError, setLeadsBatchImportError] = useState('');
+  const [leadsBatchImportResult, setLeadsBatchImportResult] = useState<LeadsCommitResponse | null>(null);
+  const [lastLeadsBatchImportAt, setLastLeadsBatchImportAt] = useState<string | null>(null);
+  const [leadsImportHistoryLoading, setLeadsImportHistoryLoading] = useState(false);
+  const [leadsImportHistoryError, setLeadsImportHistoryError] = useState('');
+  const [leadsImportRuns, setLeadsImportRuns] = useState<LeadsImportRun[]>([]);
+  const [selectedLeadsImportRunId, setSelectedLeadsImportRunId] = useState<string | null>(null);
+  const [selectedLeadsImportRunItems, setSelectedLeadsImportRunItems] = useState<LeadsImportRunItem[]>([]);
   const [signupsImportHistoryLoading, setSignupsImportHistoryLoading] = useState(false);
   const [signupsImportHistoryError, setSignupsImportHistoryError] = useState('');
   const [signupsImportRuns, setSignupsImportRuns] = useState<SignupsImportRun[]>([]);
   const [selectedSignupsImportRunId, setSelectedSignupsImportRunId] = useState<string | null>(null);
   const [selectedSignupsImportRunItems, setSelectedSignupsImportRunItems] = useState<SignupsImportRunItem[]>([]);
+  const [leadsEventsCountLoading, setLeadsEventsCountLoading] = useState(false);
+  const [leadsEventsCountError, setLeadsEventsCountError] = useState('');
+  const [leadsEventsCount, setLeadsEventsCount] = useState<number | null>(null);
   const [signupsEventsCountLoading, setSignupsEventsCountLoading] = useState(false);
   const [signupsEventsCountError, setSignupsEventsCountError] = useState('');
   const [signupsEventsCount, setSignupsEventsCount] = useState<number | null>(null);
@@ -1304,6 +1438,87 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const handleRunLeadsBatchCheck = async () => {
+    setLeadsBatchLoading(true);
+    setLeadsBatchError('');
+    try {
+      const response = await fetch('/api/leads/sync', { method: 'GET' });
+      const data = (await response.json()) as LeadsDryRunResponse;
+      if (!response.ok || !data.success) {
+        setLeadsBatchResult(null);
+        setLeadsBatchError(data.error || 'Batch-Pruefung fehlgeschlagen');
+        return;
+      }
+      setLeadsBatchResult(data);
+      setLastLeadsBatchCheckAt(new Date().toISOString());
+    } catch (err: any) {
+      setLeadsBatchResult(null);
+      setLeadsBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
+    } finally {
+      setLeadsBatchLoading(false);
+    }
+  };
+
+  const handleRunLeadsBatchImport = async () => {
+    setLeadsBatchImportLoading(true);
+    setLeadsBatchImportError('');
+    try {
+      const response = await fetch('/api/leads/sync', { method: 'POST' });
+      const data = (await response.json()) as LeadsCommitResponse;
+      if (!response.ok || !data.success) {
+        setLeadsBatchImportResult(null);
+        setLeadsBatchImportError(data.error || 'Manueller Import fehlgeschlagen');
+        return;
+      }
+      setLeadsBatchImportResult(data);
+      setLastLeadsBatchImportAt(new Date().toISOString());
+      await loadLeadsImportHistory();
+    } catch (err: any) {
+      setLeadsBatchImportResult(null);
+      setLeadsBatchImportError(err?.message || 'Manueller Import fehlgeschlagen');
+    } finally {
+      setLeadsBatchImportLoading(false);
+    }
+  };
+
+  const loadLeadsImportHistory = useCallback(async () => {
+    setLeadsImportHistoryLoading(true);
+    setLeadsImportHistoryError('');
+    try {
+      const response = await fetch('/api/leads/sync/history?limit=20', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setLeadsImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as LeadsImportRun[];
+      setLeadsImportRuns(runs);
+      if (!selectedLeadsImportRunId && runs.length > 0) {
+        setSelectedLeadsImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setLeadsImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setLeadsImportHistoryLoading(false);
+    }
+  }, [selectedLeadsImportRunId]);
+
+  const loadLeadsImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/leads/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setLeadsImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedLeadsImportRunItems((data.items || []) as LeadsImportRunItem[]);
+    } catch (err: any) {
+      setLeadsImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
   const loadSignupsImportHistory = useCallback(async () => {
     setSignupsImportHistoryLoading(true);
     setSignupsImportHistoryError('');
@@ -1339,6 +1554,24 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setSelectedSignupsImportRunItems((data.items || []) as SignupsImportRunItem[]);
     } catch (err: any) {
       setSignupsImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
+  const loadLeadsEventsStats = useCallback(async () => {
+    setLeadsEventsCountLoading(true);
+    setLeadsEventsCountError('');
+    try {
+      const response = await fetch('/api/leads/sync/stats', { method: 'GET' });
+      const data = (await response.json()) as LeadsStatsResponse;
+      if (!response.ok || !data.success) {
+        setLeadsEventsCountError(data.error || 'Leads Datenbank-Status konnte nicht geladen werden.');
+        return;
+      }
+      setLeadsEventsCount(typeof data.count === 'number' ? data.count : 0);
+    } catch (err: any) {
+      setLeadsEventsCountError(err?.message || 'Leads Datenbank-Status konnte nicht geladen werden.');
+    } finally {
+      setLeadsEventsCountLoading(false);
     }
   }, []);
 
@@ -1500,6 +1733,24 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadLeadsAutoImportState = useCallback(async () => {
+    setLeadsAutoImportLoading(true);
+    setLeadsAutoImportMessage('');
+    try {
+      const response = await fetch('/api/leads/sync/auto-import', { method: 'GET' });
+      const data = (await response.json()) as LeadsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setLeadsAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setLeadsAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      setLeadsAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+    } finally {
+      setLeadsAutoImportLoading(false);
+    }
+  }, []);
+
   const loadManualGoLiveWriteLockState = useCallback(async () => {
     setManualGoLiveWriteLockLoading(true);
     setManualGoLiveWriteLockMessage('');
@@ -1528,6 +1779,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadUpDownsellsImportHistory();
       loadSalespipeAutoImportState();
       loadSalespipeImportHistory();
+      loadLeadsAutoImportState();
+      loadLeadsImportHistory();
+      loadLeadsEventsStats();
       loadSignupsImportHistory();
       loadSignupsEventsStats();
     }
@@ -1541,6 +1795,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     loadUpDownsellsImportHistory,
     loadSalespipeAutoImportState,
     loadSalespipeImportHistory,
+    loadLeadsAutoImportState,
+    loadLeadsImportHistory,
+    loadLeadsEventsStats,
     loadSignupsImportHistory,
     loadSignupsEventsStats,
   ]);
@@ -1564,6 +1821,11 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     if (activeTab !== 'imports' || !selectedSalespipeImportRunId) return;
     loadSalespipeImportRunItems(selectedSalespipeImportRunId);
   }, [activeTab, selectedSalespipeImportRunId, loadSalespipeImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedLeadsImportRunId) return;
+    loadLeadsImportRunItems(selectedLeadsImportRunId);
+  }, [activeTab, selectedLeadsImportRunId, loadLeadsImportRunItems]);
 
   useEffect(() => {
     if (activeTab !== 'imports' || !selectedSignupsImportRunId) return;
@@ -1687,6 +1949,32 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   };
 
+  const handleLeadsAutoImportToggle = async (enabled: boolean) => {
+    setLeadsAutoImportEnabled(enabled);
+    setLeadsAutoImportSaving(true);
+    setLeadsAutoImportMessage('');
+    try {
+      const response = await fetch('/api/leads/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as LeadsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setLeadsAutoImportEnabled(!enabled);
+        setLeadsAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setLeadsAutoImportEnabled(Boolean(data.enabled));
+      setLeadsAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
+    } catch (err: any) {
+      setLeadsAutoImportEnabled(!enabled);
+      setLeadsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setLeadsAutoImportSaving(false);
+    }
+  };
+
   const handleManualGoLiveWriteLockToggle = async (enabled: boolean) => {
     if (!canToggleManualGoLiveWriteLock) return;
 
@@ -1773,6 +2061,11 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const latestSalespipeAutoRun = useMemo(
     () => salespipeImportRuns.find((run) => run.triggered_by === 'cron') || null,
     [salespipeImportRuns]
+  );
+
+  const latestLeadsAutoRun = useMemo(
+    () => leadsImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [leadsImportRuns]
   );
   
   // ========== PLANZAHLEN: LADEN ==========
@@ -3419,6 +3712,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 Salespipe Import
               </button>
               <button
+                onClick={() => setActiveImportSubTab('leadsImport')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'leadsImport'
+                    ? 'bg-fuchsia-50 border-fuchsia-300 text-fuchsia-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Leads Import
+              </button>
+              <button
                 onClick={() => setActiveImportSubTab('signupsImport')}
                 className={`px-3 py-2 rounded-lg text-sm font-medium border ${
                   activeImportSubTab === 'signupsImport'
@@ -4744,6 +5047,139 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
             </div>
           )}
 
+          {activeImportSubTab === 'leadsImport' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-lg font-semibold text-gray-800 mb-1">Leads Import-Übersicht</h4>
+                  <p className="text-sm text-gray-500">
+                    Übersicht der importierten Datensätze aus der Leads INBOUND CSV.
+                  </p>
+                </div>
+                <button
+                  onClick={loadLeadsImportHistory}
+                  disabled={leadsImportHistoryLoading}
+                  className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {leadsImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                </button>
+              </div>
+
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+                Der Leads Import läuft im Apps-Script-Workflow über
+                <code className="mx-1">/api/leads/sync/ingest</code>.
+                Diese Ansicht zeigt nur Datenbank-Status und Import-Historie.
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={loadLeadsEventsStats}
+                  disabled={leadsEventsCountLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {leadsEventsCountLoading ? 'Prüfe DB...' : 'leads_events > 0 prüfen'}
+                </button>
+              </div>
+
+              <div
+                className={`rounded-lg border p-3 text-sm ${
+                  leadsEventsCountError
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : leadsEventsCount !== null && leadsEventsCount > 0
+                      ? 'border-green-200 bg-green-50 text-green-800'
+                      : 'border-amber-200 bg-amber-50 text-amber-800'
+                }`}
+              >
+                {leadsEventsCountError
+                  ? leadsEventsCountError
+                  : leadsEventsCount === null
+                    ? 'Noch kein Datenbank-Check ausgeführt.'
+                    : leadsEventsCount > 0
+                      ? `OK: leads_events enthält ${leadsEventsCount} Datensätze.`
+                      : 'Aktuell sind noch keine Datensätze in leads_events vorhanden (0).'}
+              </div>
+
+              <div className="space-y-3 pt-1">
+                {leadsImportHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {leadsImportHistoryError}
+                  </div>
+                ) : null}
+
+                {leadsImportRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Hinweis</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {leadsImportRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedLeadsImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedLeadsImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">{new Date(run.started_at).toLocaleString('de-DE')}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                              <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.reason || (run.skipped ? 'Skipped' : '-')}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedLeadsImportRunId && selectedLeadsImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Lead-ID</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedLeadsImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.lead_id ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
           {activeImportSubTab === 'signupsImport' && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
               <div className="flex items-start justify-between gap-3">
@@ -5383,13 +5819,49 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                       
                       {/* Terminal Sales & Tipping */}
                       {[
-                        { label: 'Terminal Sales', color: 'teal', data: businessTerminalSales, handler: handleBusinessTerminalChange, total: businessTotalTerminalSales },
-                        { label: 'Tipping', color: 'pink', data: businessTipping, handler: handleBusinessTippingChange, total: businessTotalTipping },
+                        {
+                          label: 'Terminal Sales',
+                          color: 'teal',
+                          data: businessTerminalSales,
+                          handler: handleBusinessTerminalChange,
+                          total: businessTotalTerminalSales,
+                          expectedArrPerUnit: avgPayBillTerminal * 12,
+                          streamInfo: `${terminalSalesPercent}% Anteil von Go-Lives`,
+                        },
+                        {
+                          label: 'Tipping',
+                          color: 'pink',
+                          data: businessTipping,
+                          handler: handleBusinessTippingChange,
+                          total: businessTotalTipping,
+                          expectedArrPerUnit: avgPayBillTipping * 12,
+                          streamInfo: `${tippingPercent}% Anteil von Terminal Sales`,
+                        },
                       ].map(cat => (
                         <div key={cat.label} className="mb-2">
                           <div className="flex items-center justify-between mb-1">
-                            <h5 className={`font-medium text-${cat.color}-700`}>{cat.label}</h5>
-                            <span className="text-sm text-gray-500">Summe: <strong>{cat.total}</strong></span>
+                            <h5 className={`font-medium text-${cat.color}-700`}>
+                              {cat.label}
+                              <div className="text-xs font-normal text-gray-500">
+                                Erwarteter ARR je {cat.label === 'Terminal Sales' ? 'Terminal Sale' : 'Tipping'}:{' '}
+                                <span className={`font-semibold text-${cat.color}-700`}>
+                                  {formatCurrency(cat.expectedArrPerUnit)}
+                                </span>{' '}
+                                <span className="text-gray-400">
+                                  (12 x {formatCurrency(cat.label === 'Terminal Sales' ? avgPayBillTerminal : avgPayBillTipping)})
+                                </span>
+                                <span className="text-gray-400"> | {cat.streamInfo}</span>
+                              </div>
+                            </h5>
+                            <div className="text-right text-sm text-gray-500">
+                              <div>Summe: <strong>{cat.total}</strong></div>
+                              <div className={`text-${cat.color}-700`}>
+                                ARR-Summe:{' '}
+                                <strong>
+                                  {formatCurrency(cat.data.reduce((sum, value) => sum + ((value || 0) * cat.expectedArrPerUnit), 0))}
+                                </strong>
+                              </div>
+                            </div>
                           </div>
                           <div className="grid grid-cols-12 gap-1">
                             {MONTHS.map((m, i) => (
@@ -5398,6 +5870,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                                 <input type="number" value={cat.data[i] || 0}
                                   onChange={(e) => cat.handler(i, parseInt(e.target.value) || 0)}
                                   className={`w-full px-1 py-1 text-center border border-${cat.color}-200 rounded text-sm bg-${cat.color}-50`} />
+                                <div className="text-[10px] text-gray-400 mt-0.5">
+                                  {formatCurrency((cat.data[i] || 0) * cat.expectedArrPerUnit)}
+                                </div>
                               </div>
                             ))}
                           </div>
