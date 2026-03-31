@@ -118,11 +118,16 @@ interface GoLiveAutoImportResponse {
 interface ChurnDryRunResponse {
   success: boolean;
   mode?: string;
+  sourceFile?: { id?: string; name?: string; modifiedTime?: string };
   stats?: {
-    totalRowsFromSheet: number;
-    parsedRows: number;
-    validRows: number;
-    invalidRows: number;
+    totalRowsFromSheet?: number;
+    parsedRows?: number;
+    validRows?: number;
+    invalidRows?: number;
+    zipEntries?: number;
+    clientListRows?: number;
+    scheduledDetailRows?: number;
+    summaryRows?: number;
   };
   preview?: {
     valid: Array<{
@@ -150,16 +155,23 @@ interface ChurnDryRunResponse {
 interface ChurnCommitResponse {
   success: boolean;
   mode?: string;
+  skipped?: boolean;
+  reason?: string;
+  sourceFile?: { id?: string; name?: string; modifiedTime?: string };
   stats?: {
-    totalRowsFromSheet: number;
-    parsedRows: number;
-    validRows: number;
-    invalidRows: number;
-    toImport: number;
-    imported: number;
-    failed: number;
-    duplicates: number;
+    totalRowsFromSheet?: number;
+    parsedRows?: number;
+    validRows?: number;
+    invalidRows?: number;
+    toImport?: number;
+    imported?: number;
+    failed?: number;
+    duplicates?: number;
     updated?: number;
+    zipEntries?: number;
+    clientListRows?: number;
+    scheduledDetailRows?: number;
+    summaryRows?: number;
   };
   errors?: Array<{ rowNumber: number; oakId: number | null; error: string }>;
   warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
@@ -338,6 +350,13 @@ interface LeadsAutoImportResponse {
   error?: string;
 }
 
+interface Salespipe2AutoImportResponse {
+  success: boolean;
+  enabled?: boolean;
+  updatedAt?: string | null;
+  error?: string;
+}
+
 interface SignupsStatsResponse {
   success: boolean;
   count?: number;
@@ -346,6 +365,13 @@ interface SignupsStatsResponse {
 }
 
 interface LeadsStatsResponse {
+  success: boolean;
+  count?: number;
+  hasData?: boolean;
+  error?: string;
+}
+
+interface Salespipe2StatsResponse {
   success: boolean;
   count?: number;
   hasData?: boolean;
@@ -557,6 +583,32 @@ interface SignupsImportRunItem {
   run_id: string;
   row_number: number | null;
   oak_id: number | null;
+  level: 'error' | 'warning' | 'duplicate';
+  message: string;
+  created_at: string;
+}
+
+interface Salespipe2ImportRun {
+  id: string;
+  triggered_by: 'manual' | 'cron';
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  started_at: string;
+  finished_at: string | null;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  updated?: number;
+  to_import: number;
+  auto_import_enabled: boolean;
+  skipped: boolean;
+  reason: string | null;
+}
+
+interface Salespipe2ImportRunItem {
+  id: string;
+  run_id: string;
+  row_number: number | null;
+  opportunity_id: string | null;
   level: 'error' | 'warning' | 'duplicate';
   message: string;
   created_at: string;
@@ -815,6 +867,7 @@ type ImportSubTab =
   | 'churnImports'
   | 'upDownsellsImport'
   | 'salespipeImport'
+  | 'salespipe2Import'
   | 'leadsImport'
   | 'signupsImport'
   | 'paymarginImport';
@@ -929,6 +982,20 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [leadsImportRuns, setLeadsImportRuns] = useState<LeadsImportRun[]>([]);
   const [selectedLeadsImportRunId, setSelectedLeadsImportRunId] = useState<string | null>(null);
   const [selectedLeadsImportRunItems, setSelectedLeadsImportRunItems] = useState<LeadsImportRunItem[]>([]);
+  const [salespipe2AutoImportEnabled, setSalespipe2AutoImportEnabled] = useState(false);
+  const [salespipe2AutoImportLoading, setSalespipe2AutoImportLoading] = useState(false);
+  const [salespipe2AutoImportSaving, setSalespipe2AutoImportSaving] = useState(false);
+  const [salespipe2AutoImportMessage, setSalespipe2AutoImportMessage] = useState('');
+  const [salespipe2ImportHistoryLoading, setSalespipe2ImportHistoryLoading] = useState(false);
+  const [salespipe2ImportHistoryError, setSalespipe2ImportHistoryError] = useState('');
+  const [salespipe2ImportRuns, setSalespipe2ImportRuns] = useState<Salespipe2ImportRun[]>([]);
+  const [selectedSalespipe2ImportRunId, setSelectedSalespipe2ImportRunId] = useState<string | null>(null);
+  const [selectedSalespipe2ImportRunItems, setSelectedSalespipe2ImportRunItems] = useState<
+    Salespipe2ImportRunItem[]
+  >([]);
+  const [salespipe2EventsCountLoading, setSalespipe2EventsCountLoading] = useState(false);
+  const [salespipe2EventsCountError, setSalespipe2EventsCountError] = useState('');
+  const [salespipe2EventsCount, setSalespipe2EventsCount] = useState<number | null>(null);
   const [signupsImportHistoryLoading, setSignupsImportHistoryLoading] = useState(false);
   const [signupsImportHistoryError, setSignupsImportHistoryError] = useState('');
   const [signupsImportRuns, setSignupsImportRuns] = useState<SignupsImportRun[]>([]);
@@ -1199,7 +1266,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     setChurnBatchLoading(true);
     setChurnBatchError('');
     try {
-      const response = await fetch('/api/churn/sync', { method: 'GET' });
+      const response = await fetch('/api/churnDrive/sync', { method: 'GET' });
       const data = (await response.json()) as ChurnDryRunResponse;
       if (!response.ok || !data.success) {
         setChurnBatchResult(null);
@@ -1220,7 +1287,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     setChurnBatchImportLoading(true);
     setChurnBatchImportError('');
     try {
-      const response = await fetch('/api/churn/sync', { method: 'POST' });
+      const response = await fetch('/api/churnDrive/sync', { method: 'POST' });
       const data = (await response.json()) as ChurnCommitResponse;
       if (!response.ok || !data.success) {
         setChurnBatchImportResult(null);
@@ -1519,6 +1586,44 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadSalespipe2ImportHistory = useCallback(async () => {
+    setSalespipe2ImportHistoryLoading(true);
+    setSalespipe2ImportHistoryError('');
+    try {
+      const response = await fetch('/api/salespipe2/sync/history?limit=50', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setSalespipe2ImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as Salespipe2ImportRun[];
+      setSalespipe2ImportRuns(runs);
+      if (!selectedSalespipe2ImportRunId && runs.length > 0) {
+        setSelectedSalespipe2ImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setSalespipe2ImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setSalespipe2ImportHistoryLoading(false);
+    }
+  }, [selectedSalespipe2ImportRunId]);
+
+  const loadSalespipe2ImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/salespipe2/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setSalespipe2ImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedSalespipe2ImportRunItems((data.items || []) as Salespipe2ImportRunItem[]);
+    } catch (err: any) {
+      setSalespipe2ImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
   const loadSignupsImportHistory = useCallback(async () => {
     setSignupsImportHistoryLoading(true);
     setSignupsImportHistoryError('');
@@ -1590,6 +1695,24 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       setSignupsEventsCountError(err?.message || 'Sign-ups Datenbank-Status konnte nicht geladen werden.');
     } finally {
       setSignupsEventsCountLoading(false);
+    }
+  }, []);
+
+  const loadSalespipe2EventsStats = useCallback(async () => {
+    setSalespipe2EventsCountLoading(true);
+    setSalespipe2EventsCountError('');
+    try {
+      const response = await fetch('/api/salespipe2/sync/stats', { method: 'GET' });
+      const data = (await response.json()) as Salespipe2StatsResponse;
+      if (!response.ok || !data.success) {
+        setSalespipe2EventsCountError(data.error || 'Salespipe 2 Datenbank-Status konnte nicht geladen werden.');
+        return;
+      }
+      setSalespipe2EventsCount(typeof data.count === 'number' ? data.count : 0);
+    } catch (err: any) {
+      setSalespipe2EventsCountError(err?.message || 'Salespipe 2 Datenbank-Status konnte nicht geladen werden.');
+    } finally {
+      setSalespipe2EventsCountLoading(false);
     }
   }, []);
 
@@ -1683,7 +1806,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     setChurnAutoImportLoading(true);
     setChurnAutoImportMessage('');
     try {
-      const response = await fetch('/api/churn/sync/auto-import', { method: 'GET' });
+      const response = await fetch('/api/churnDrive/sync/auto-import', { method: 'GET' });
       const data = (await response.json()) as ChurnAutoImportResponse;
       if (!response.ok || !data.success) {
         setChurnAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
@@ -1751,6 +1874,24 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadSalespipe2AutoImportState = useCallback(async () => {
+    setSalespipe2AutoImportLoading(true);
+    setSalespipe2AutoImportMessage('');
+    try {
+      const response = await fetch('/api/salespipe2/sync/auto-import', { method: 'GET' });
+      const data = (await response.json()) as Salespipe2AutoImportResponse;
+      if (!response.ok || !data.success) {
+        setSalespipe2AutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setSalespipe2AutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      setSalespipe2AutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+    } finally {
+      setSalespipe2AutoImportLoading(false);
+    }
+  }, []);
+
   const loadManualGoLiveWriteLockState = useCallback(async () => {
     setManualGoLiveWriteLockLoading(true);
     setManualGoLiveWriteLockMessage('');
@@ -1774,6 +1915,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadManualGoLiveWriteLockState();
       loadAutoImportState();
       loadImportHistory();
+      loadChurnAutoImportState();
       loadChurnImportHistory();
       loadUpDownsellsAutoImportState();
       loadUpDownsellsImportHistory();
@@ -1782,6 +1924,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadLeadsAutoImportState();
       loadLeadsImportHistory();
       loadLeadsEventsStats();
+      loadSalespipe2AutoImportState();
+      loadSalespipe2ImportHistory();
+      loadSalespipe2EventsStats();
       loadSignupsImportHistory();
       loadSignupsEventsStats();
     }
@@ -1789,6 +1934,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     activeTab,
     loadManualGoLiveWriteLockState,
     loadAutoImportState,
+    loadChurnAutoImportState,
     loadImportHistory,
     loadChurnImportHistory,
     loadUpDownsellsAutoImportState,
@@ -1798,6 +1944,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     loadLeadsAutoImportState,
     loadLeadsImportHistory,
     loadLeadsEventsStats,
+    loadSalespipe2AutoImportState,
+    loadSalespipe2ImportHistory,
+    loadSalespipe2EventsStats,
     loadSignupsImportHistory,
     loadSignupsEventsStats,
   ]);
@@ -1826,6 +1975,11 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     if (activeTab !== 'imports' || !selectedLeadsImportRunId) return;
     loadLeadsImportRunItems(selectedLeadsImportRunId);
   }, [activeTab, selectedLeadsImportRunId, loadLeadsImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedSalespipe2ImportRunId) return;
+    loadSalespipe2ImportRunItems(selectedSalespipe2ImportRunId);
+  }, [activeTab, selectedSalespipe2ImportRunId, loadSalespipe2ImportRunItems]);
 
   useEffect(() => {
     if (activeTab !== 'imports' || !selectedSignupsImportRunId) return;
@@ -1874,7 +2028,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     setChurnAutoImportSaving(true);
     setChurnAutoImportMessage('');
     try {
-      const response = await fetch('/api/churn/sync/auto-import', {
+      const response = await fetch('/api/churnDrive/sync/auto-import', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
@@ -1975,6 +2129,32 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   };
 
+  const handleSalespipe2AutoImportToggle = async (enabled: boolean) => {
+    setSalespipe2AutoImportSaving(true);
+    setSalespipe2AutoImportMessage('');
+    try {
+      const response = await fetch('/api/salespipe2/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as Salespipe2AutoImportResponse;
+      if (!response.ok || !data.success) {
+        setSalespipe2AutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setSalespipe2AutoImportEnabled(Boolean(data.enabled));
+      setSalespipe2AutoImportMessage(
+        `Auto-Import ${data.enabled ? 'aktiviert' : 'deaktiviert'}${data.updatedAt ? ` (Stand: ${new Date(data.updatedAt).toLocaleString('de-DE')})` : ''}`
+      );
+      await loadSalespipe2ImportHistory();
+    } catch (err: any) {
+      setSalespipe2AutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setSalespipe2AutoImportSaving(false);
+    }
+  };
+
   const handleManualGoLiveWriteLockToggle = async (enabled: boolean) => {
     if (!canToggleManualGoLiveWriteLock) return;
 
@@ -2051,6 +2231,11 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const latestAutoRun = useMemo(
     () => importRuns.find((run) => run.triggered_by === 'cron') || null,
     [importRuns]
+  );
+
+  const latestChurnAutoRun = useMemo(
+    () => churnImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [churnImportRuns]
   );
 
   const latestUpDownsellsAutoRun = useMemo(
@@ -3712,6 +3897,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 Salespipe Import
               </button>
               <button
+                onClick={() => setActiveImportSubTab('salespipe2Import')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'salespipe2Import'
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Salespipe Import 2
+              </button>
+              <button
                 onClick={() => setActiveImportSubTab('leadsImport')}
                 className={`px-3 py-2 rounded-lg text-sm font-medium border ${
                   activeImportSubTab === 'leadsImport'
@@ -4221,11 +4416,175 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 </button>
               </div>
 
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setChurnImportMode('manual')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    churnImportMode === 'manual'
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Manuell pruefen
+                </button>
+                <button
+                  onClick={() => setChurnImportMode('automatic')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    churnImportMode === 'automatic'
+                      ? 'bg-green-50 border-green-300 text-green-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Automatisch einlaufen
+                </button>
+              </div>
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={churnAutoImportEnabled}
+                  disabled={churnAutoImportLoading || churnAutoImportSaving}
+                  onChange={(e) => handleChurnAutoImportToggle(e.target.checked)}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+                <div>Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.</div>
+                {churnAutoImportLoading ? <div>Status wird geladen...</div> : null}
+                {churnAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                {churnAutoImportMessage ? <div>{churnAutoImportMessage}</div> : null}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunChurnBatchCheck}
+                  disabled={churnBatchLoading || churnBatchImportLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {churnBatchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
+                </button>
+                <button
+                  onClick={handleRunChurnBatchImport}
+                  disabled={churnBatchImportLoading || churnBatchLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {churnBatchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
+                {lastChurnBatchCheckAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Check: {new Date(lastChurnBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+                {lastChurnBatchImportAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Import: {new Date(lastChurnBatchImportAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+              </div>
+
+              {churnBatchError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{churnBatchError}</div>
+              )}
+
+              {churnBatchImportError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {churnBatchImportError}
+                </div>
+              )}
+
+              {churnBatchImportResult?.stats && (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{churnBatchImportResult.stats.imported ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{churnBatchImportResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{churnBatchImportResult.stats.failed ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Client List</div>
+                      <div className="font-semibold">{churnBatchImportResult.stats.clientListRows ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Scheduled Detail</div>
+                      <div className="font-semibold">{churnBatchImportResult.stats.scheduledDetailRows ?? 0}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {churnBatchResult?.stats && (
+                <div className="rounded-lg border border-gray-200 p-3">
+                  <h5 className="text-sm font-semibold text-gray-700 mb-2">Dry-Run Ergebnis</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                    <div className="rounded bg-gray-50 border p-2">
+                      <div className="text-gray-500">ZIP Entries</div>
+                      <div className="font-semibold">{churnBatchResult.stats.zipEntries ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-gray-50 border p-2">
+                      <div className="text-gray-500">Client List Rows</div>
+                      <div className="font-semibold">{churnBatchResult.stats.clientListRows ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-gray-50 border p-2">
+                      <div className="text-gray-500">Scheduled Detail Rows</div>
+                      <div className="font-semibold">{churnBatchResult.stats.scheduledDetailRows ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-gray-50 border p-2">
+                      <div className="text-gray-500">Summary Rows</div>
+                      <div className="font-semibold">{churnBatchResult.stats.summaryRows ?? 0}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {churnImportHistoryError ? (
                 <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
                   {churnImportHistoryError}
                 </div>
               ) : null}
+
+              <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
+                <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
+                {latestChurnAutoRun ? (
+                  <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
+                    <div>
+                      <div className="text-indigo-700">Zeitpunkt</div>
+                      <div>{new Date(latestChurnAutoRun.started_at).toLocaleString('de-DE')}</div>
+                    </div>
+                    <div>
+                      <div className="text-indigo-700">Status</div>
+                      <div>{getImportRunStatusLabel(latestChurnAutoRun.status)}</div>
+                    </div>
+                    <div>
+                      <div className="text-indigo-700">Importiert</div>
+                      <div>{latestChurnAutoRun.imported}</div>
+                    </div>
+                    <div>
+                      <div className="text-indigo-700">Fehler</div>
+                      <div>{latestChurnAutoRun.failed}</div>
+                    </div>
+                    <div>
+                      <div className="text-indigo-700">Duplikate</div>
+                      <div>{latestChurnAutoRun.duplicates ?? 0}</div>
+                    </div>
+                    <div>
+                      <div className="text-indigo-700">Hinweis</div>
+                      <div>{latestChurnAutoRun.hint || latestChurnAutoRun.reason || '-'}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
+                )}
+              </div>
 
               {churnImportRuns.length === 0 ? (
                 <div className="text-sm text-gray-500 border border-dashed border-gray-300 rounded-lg p-4">
@@ -5034,6 +5393,160 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                                 <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
                                 <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
                                 <td className="px-2 py-1.5 text-gray-700">{item.oak_id ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {activeImportSubTab === 'salespipe2Import' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-lg font-semibold text-gray-800 mb-1">Salespipe Import 2 - Übersicht</h4>
+                  <p className="text-sm text-gray-500">
+                    Workflow wie Drive-Ingest: Salesforce Mail-Anhang nach Google Drive, dann API-Ingest und danach Supabase.
+                  </p>
+                </div>
+                <button
+                  onClick={loadSalespipe2ImportHistory}
+                  disabled={salespipe2ImportHistoryLoading}
+                  className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {salespipe2ImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                </button>
+              </div>
+
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+                Ingest-Endpunkt:
+                <code className="mx-1">/api/salespipe2/sync/ingest</code>
+                mit Secret
+                <code className="mx-1">SALESPIPE2_DRIVE_INGEST_SECRET</code>.
+              </div>
+
+              <div className="space-y-2">
+                <label className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+                  <span className="font-medium text-gray-700">Auto-Import aktivieren (Cron)</span>
+                  <input
+                    type="checkbox"
+                    checked={salespipe2AutoImportEnabled}
+                    onChange={(e) => handleSalespipe2AutoImportToggle(e.target.checked)}
+                    disabled={salespipe2AutoImportLoading || salespipe2AutoImportSaving}
+                    className="h-4 w-4"
+                  />
+                </label>
+                {salespipe2AutoImportMessage ? (
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700">
+                    {salespipe2AutoImportMessage}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={loadSalespipe2EventsStats}
+                  disabled={salespipe2EventsCountLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {salespipe2EventsCountLoading ? 'Prüfe DB...' : 'salespipe2_events > 0 prüfen'}
+                </button>
+              </div>
+
+              <div
+                className={`rounded-lg border p-3 text-sm ${
+                  salespipe2EventsCountError
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : salespipe2EventsCount !== null && salespipe2EventsCount > 0
+                      ? 'border-green-200 bg-green-50 text-green-800'
+                      : 'border-amber-200 bg-amber-50 text-amber-800'
+                }`}
+              >
+                {salespipe2EventsCountError
+                  ? salespipe2EventsCountError
+                  : salespipe2EventsCount === null
+                    ? 'Noch kein Datenbank-Check ausgeführt.'
+                    : salespipe2EventsCount > 0
+                      ? `OK: salespipe_events (source_tab=drive_salespipe2_csv) enthält ${salespipe2EventsCount} Datensätze.`
+                      : 'Aktuell sind noch keine Datensätze aus Salespipe Import 2 vorhanden (0).'}
+              </div>
+
+              <div className="space-y-3 pt-1">
+                {salespipe2ImportHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {salespipe2ImportHistoryError}
+                  </div>
+                ) : null}
+
+                {salespipe2ImportRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Duplikate</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Hinweis</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {salespipe2ImportRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedSalespipe2ImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedSalespipe2ImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">{new Date(run.started_at).toLocaleString('de-DE')}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                              <td className="px-2 py-1.5 text-amber-700">{run.duplicates}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.reason || (run.skipped ? 'Skipped' : '-')}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedSalespipe2ImportRunId && selectedSalespipe2ImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Opportunity-ID</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedSalespipe2ImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.opportunity_id ?? '-'}</td>
                                 <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
                               </tr>
                             ))}
