@@ -798,6 +798,14 @@ interface ChurnArrData {
   };
 }
 
+interface SalesCyclePlanRules {
+  lead_to_demo_booked_days: number;
+  demo_booked_to_sent_quote_20_days: number;
+  sent_quote_20_to_sent_quote_50_days: number;
+  sent_quote_50_to_sent_quote_70_days: number;
+  sent_quote_70_to_sent_quote_90_days: number;
+}
+
 function normalizeMonthlyArray(value: unknown): number[] {
   if (!Array.isArray(value)) return [...EMPTY_MONTH_VALUES];
   const sanitized = value.map((v) => {
@@ -858,6 +866,45 @@ function parseExpandingArrData(raw: unknown): ExpandingArrData {
       total_downgrades: downgrades,
       net_upgrade_downgrade_arr: netArr,
     },
+  };
+}
+
+const SALES_CYCLE_DEFAULTS: SalesCyclePlanRules = {
+  lead_to_demo_booked_days: 10,
+  demo_booked_to_sent_quote_20_days: 21,
+  sent_quote_20_to_sent_quote_50_days: 14,
+  sent_quote_50_to_sent_quote_70_days: 10,
+  sent_quote_70_to_sent_quote_90_days: 7,
+};
+
+function parseSalesCyclePlanRules(raw: unknown): SalesCyclePlanRules {
+  const data = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const readInt = (key: keyof SalesCyclePlanRules, fallback: number) => {
+    const value = Number(data[key]);
+    return Number.isFinite(value) ? Math.max(0, Math.round(value)) : fallback;
+  };
+
+  return {
+    lead_to_demo_booked_days: readInt(
+      'lead_to_demo_booked_days',
+      SALES_CYCLE_DEFAULTS.lead_to_demo_booked_days
+    ),
+    demo_booked_to_sent_quote_20_days: readInt(
+      'demo_booked_to_sent_quote_20_days',
+      SALES_CYCLE_DEFAULTS.demo_booked_to_sent_quote_20_days
+    ),
+    sent_quote_20_to_sent_quote_50_days: readInt(
+      'sent_quote_20_to_sent_quote_50_days',
+      SALES_CYCLE_DEFAULTS.sent_quote_20_to_sent_quote_50_days
+    ),
+    sent_quote_50_to_sent_quote_70_days: readInt(
+      'sent_quote_50_to_sent_quote_70_days',
+      SALES_CYCLE_DEFAULTS.sent_quote_50_to_sent_quote_70_days
+    ),
+    sent_quote_70_to_sent_quote_90_days: readInt(
+      'sent_quote_70_to_sent_quote_90_days',
+      SALES_CYCLE_DEFAULTS.sent_quote_70_to_sent_quote_90_days
+    ),
   };
 }
 
@@ -1075,6 +1122,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [invoicedChurnActualArr, setInvoicedChurnActualArr] = useState<number[]>([...EMPTY_MONTH_VALUES]);
   const [inMonthChurnTargetCount, setInMonthChurnTargetCount] = useState<number[]>([...EMPTY_MONTH_VALUES]);
   const [inMonthChurnTargetArr, setInMonthChurnTargetArr] = useState<number[]>([...EMPTY_MONTH_VALUES]);
+  const [salesCyclePlanRules, setSalesCyclePlanRules] = useState<SalesCyclePlanRules>({
+    ...SALES_CYCLE_DEFAULTS,
+  });
   const [churnAutoSaving, setChurnAutoSaving] = useState(false);
   const [lastChurnAutoSaveAt, setLastChurnAutoSaveAt] = useState<string | null>(null);
   const [churnAutoSaveError, setChurnAutoSaveError] = useState<string | null>(null);
@@ -1089,6 +1139,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     newClients: true,
     churnedClients: true,
     endingClients: true,
+    salesCycle: true,
   });
   const [saving, setSaving] = useState(false);
   const [loadingPlanzahlen, setLoadingPlanzahlen] = useState(true);
@@ -2309,6 +2360,14 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         setInvoicedChurnActualArr(churn.invoiced_churn.actual_arr);
         setInMonthChurnTargetCount(churn.in_month_churn.target_count);
         setInMonthChurnTargetArr(churn.in_month_churn.target_arr);
+
+        const salesCycleRaw =
+          data.new_clients_data &&
+          typeof data.new_clients_data === 'object' &&
+          'sales_cycle_plan_rules' in data.new_clients_data
+            ? (data.new_clients_data as Record<string, unknown>).sales_cycle_plan_rules
+            : null;
+        setSalesCyclePlanRules(parseSalesCyclePlanRules(salesCycleRaw));
       } else {
         setPlanzahlenId(null);
         setExpandingTotalUpgrades([...EXPANDING_ARR_DEFAULTS.totalUpgrades]);
@@ -2321,6 +2380,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         setInvoicedChurnActualArr([...EMPTY_MONTH_VALUES]);
         setInMonthChurnTargetCount([...EMPTY_MONTH_VALUES]);
         setInMonthChurnTargetArr([...EMPTY_MONTH_VALUES]);
+        setSalesCyclePlanRules({ ...SALES_CYCLE_DEFAULTS });
       }
     } catch (err) {
       console.error('Fehler beim Laden:', err);
@@ -2404,7 +2464,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         // Platzhalter für weitere Bereiche
         expanding_arr_data: buildExpandingArrPayload(),
         churn_arr_data: buildChurnArrPayload(),
-        new_clients_data: {},
+        new_clients_data: {
+          sales_cycle_plan_rules: salesCyclePlanRules,
+          source_note: 'Manual app entry',
+        },
         churned_clients_data: {},
         ending_clients_data: {},
         updated_at: new Date().toISOString(),
@@ -2939,6 +3002,24 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
 
   const sumMonthlyValues = (values: number[]) => values.reduce((sum, current) => sum + (current || 0), 0);
 
+  const updateSalesCycleRule = (key: keyof SalesCyclePlanRules, value: number) => {
+    setSalesCyclePlanRules((prev) => ({
+      ...prev,
+      [key]: Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0,
+    }));
+  };
+
+  const salesCycleMaxToSentQuote20 =
+    salesCyclePlanRules.lead_to_demo_booked_days + salesCyclePlanRules.demo_booked_to_sent_quote_20_days;
+  const salesCycleMaxToSentQuote50 =
+    salesCycleMaxToSentQuote20 + salesCyclePlanRules.sent_quote_20_to_sent_quote_50_days;
+  const salesCycleMaxToSentQuote70 =
+    salesCycleMaxToSentQuote50 + salesCyclePlanRules.sent_quote_50_to_sent_quote_70_days;
+  const salesCycleMaxToSentQuote90 =
+    salesCycleMaxToSentQuote70 + salesCyclePlanRules.sent_quote_70_to_sent_quote_90_days;
+  const salesCycleMinDays =
+    salesCyclePlanRules.lead_to_demo_booked_days + salesCyclePlanRules.sent_quote_70_to_sent_quote_90_days;
+
   const applyInMonthTargetsFromInvoiced = () => {
     setInMonthChurnTargetCount((prev) => {
       const next = [...prev];
@@ -2955,7 +3036,14 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   };
 
   const togglePlanningSection = (
-    section: 'newArr' | 'expandingArr' | 'churnArr' | 'newClients' | 'churnedClients' | 'endingClients'
+    section:
+      | 'newArr'
+      | 'expandingArr'
+      | 'churnArr'
+      | 'newClients'
+      | 'churnedClients'
+      | 'endingClients'
+      | 'salesCycle'
   ) => {
     setPlanningSectionsExpanded((prev) => ({ ...prev, [section]: !prev[section] }));
   };
@@ -7460,6 +7548,154 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
             <div className="p-6">
               <p className="text-gray-400 text-center py-8">Platzhalter für Ending clients Daten</p>
             </div>
+            )}
+          </div>
+
+          {/* 7. Sales Cycle Planregeln */}
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-indigo-500">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-indigo-50 cursor-pointer"
+              onClick={() => togglePlanningSection('salesCycle')}
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">⏱️</span>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">7. Sales Cycle Planregeln</h3>
+                  <p className="text-sm text-gray-500">
+                    Editierbare Max-Tage je Stage sowie abgeleitete Min/Max-Sales-Cycle-Dauer
+                  </p>
+                </div>
+                <span className="ml-auto text-gray-500">{planningSectionsExpanded.salesCycle ? '▼' : '▶'}</span>
+              </div>
+            </div>
+            {planningSectionsExpanded.salesCycle && (
+              <div className="p-6 space-y-6">
+                <div className="rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-xs text-indigo-700">
+                  Standard-Logik: Lead → Demo Booked → Sent Quote (20/50/70/90%) → Close Won/Close Lost.
+                  Alle Felder sind flexibel editierbar und werden mit den Planzahlen gespeichert.
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="rounded-lg border border-gray-200 bg-white p-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Lead zu Demo Booked (max. Tage)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={salesCyclePlanRules.lead_to_demo_booked_days}
+                      onChange={(e) =>
+                        updateSalesCycleRule('lead_to_demo_booked_days', parseInt(e.target.value, 10) || 0)
+                      }
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 bg-white p-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Demo Booked zu Sent Quote 20% (max. Tage)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={salesCyclePlanRules.demo_booked_to_sent_quote_20_days}
+                      onChange={(e) =>
+                        updateSalesCycleRule(
+                          'demo_booked_to_sent_quote_20_days',
+                          parseInt(e.target.value, 10) || 0
+                        )
+                      }
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 bg-white p-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Sent Quote 20% zu 50% (max. Tage)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={salesCyclePlanRules.sent_quote_20_to_sent_quote_50_days}
+                      onChange={(e) =>
+                        updateSalesCycleRule(
+                          'sent_quote_20_to_sent_quote_50_days',
+                          parseInt(e.target.value, 10) || 0
+                        )
+                      }
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 bg-white p-4">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Sent Quote 50% zu 70% (max. Tage)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={salesCyclePlanRules.sent_quote_50_to_sent_quote_70_days}
+                      onChange={(e) =>
+                        updateSalesCycleRule(
+                          'sent_quote_50_to_sent_quote_70_days',
+                          parseInt(e.target.value, 10) || 0
+                        )
+                      }
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+
+                  <div className="rounded-lg border border-gray-200 bg-white p-4 lg:col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Sent Quote 70% zu 90% (max. Tage)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={salesCyclePlanRules.sent_quote_70_to_sent_quote_90_days}
+                      onChange={(e) =>
+                        updateSalesCycleRule(
+                          'sent_quote_70_to_sent_quote_90_days',
+                          parseInt(e.target.value, 10) || 0
+                        )
+                      }
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+                    <div className="text-xs text-blue-700">Max bis Sent Quote 20%</div>
+                    <div className="text-xl font-bold text-blue-800">{salesCycleMaxToSentQuote20} Tage</div>
+                  </div>
+                  <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-3">
+                    <div className="text-xs text-cyan-700">Max bis Sent Quote 50%</div>
+                    <div className="text-xl font-bold text-cyan-800">{salesCycleMaxToSentQuote50} Tage</div>
+                  </div>
+                  <div className="rounded-lg border border-teal-200 bg-teal-50 p-3">
+                    <div className="text-xs text-teal-700">Max bis Sent Quote 70%</div>
+                    <div className="text-xl font-bold text-teal-800">{salesCycleMaxToSentQuote70} Tage</div>
+                  </div>
+                  <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+                    <div className="text-xs text-indigo-700">Max bis Sent Quote 90%</div>
+                    <div className="text-xl font-bold text-indigo-800">{salesCycleMaxToSentQuote90} Tage</div>
+                  </div>
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                    <div className="text-xs text-emerald-700">Schnellster Sales Cycle</div>
+                    <div className="text-xl font-bold text-emerald-800">{salesCycleMinDays} Tage</div>
+                  </div>
+                  <div className="rounded-lg border border-purple-200 bg-purple-50 p-3">
+                    <div className="text-xs text-purple-700">Längster Sales Cycle</div>
+                    <div className="text-xl font-bold text-purple-800">{salesCycleMaxToSentQuote90} Tage</div>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
+                  Nach Erreichen des jeweiligen Stage-Limits muss die Opportunity in den nächsten Stage wechseln
+                  oder geschlossen werden (Close Won/Close Lost).
+                </div>
+              </div>
             )}
           </div>
         </div>

@@ -28,6 +28,17 @@ import {
 const AUTH_TIMEOUT = 8000; // 8 Sekunden Timeout
 const COMMISSION_RELEVANT_ROLES: UserRole[] = ['ae_subscription_sales', 'ae_payments'];
 
+function isAbortLikeError(error: unknown): boolean {
+  const message = String((error as any)?.message || '').toLowerCase();
+  const name = String((error as any)?.name || '').toLowerCase();
+  return (
+    name.includes('abort') ||
+    message.includes('aborted') ||
+    message.includes('aborterror') ||
+    message.includes('signal is aborted')
+  );
+}
+
 // Helper: Promise mit Timeout
 function withTimeout<T>(promise: Promise<T>, ms: number, errorMsg: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -124,7 +135,11 @@ export function useAuth() {
         );
         
         if (sessionError) {
-          console.error('Session error:', sessionError);
+          if (isAbortLikeError(sessionError)) {
+            console.warn('Session request aborted');
+          } else {
+            console.error('Session error:', sessionError);
+          }
           await clearCorruptSession();
           if (mounted) setLoading(false);
           return;
@@ -155,7 +170,8 @@ export function useAuth() {
             const profileErrorMessage = String((profileError as any)?.message || '');
             const isTimeoutProfileError =
               profileErrorMessage.toLowerCase().includes('timeout') ||
-              profileErrorMessage.toLowerCase().includes('aborted');
+              profileErrorMessage.toLowerCase().includes('aborted') ||
+              isAbortLikeError(profileError);
             if (isTimeoutProfileError) {
               console.warn('Profile timeout beim Session-Load');
             } else {
@@ -182,7 +198,10 @@ export function useAuth() {
         }
       } catch (error: any) {
         const message = String(error?.message || '');
-        const isTimeout = message.toLowerCase().includes('timeout') || message.toLowerCase().includes('aborted');
+        const isTimeout =
+          message.toLowerCase().includes('timeout') ||
+          message.toLowerCase().includes('aborted') ||
+          isAbortLikeError(error);
 
         if (isTimeout) {
           console.warn('Auth timeout, bereinige Session...');
@@ -243,7 +262,11 @@ export function useAuth() {
           }
 
           if ('__error' in profileResult) {
-            console.error('Profile fetch error:', profileResult.__error);
+            if (isAbortLikeError(profileResult.__error)) {
+              console.warn('Profile request aborted bei Auth-Change');
+            } else {
+              console.error('Profile fetch error:', profileResult.__error);
+            }
             if (mounted) setLoading(false);
             return;
           }
@@ -266,7 +289,10 @@ export function useAuth() {
           }
         } catch (error) {
           const message = String((error as any)?.message || '');
-          const isTimeout = message.toLowerCase().includes('timeout') || message.toLowerCase().includes('aborted');
+          const isTimeout =
+            message.toLowerCase().includes('timeout') ||
+            message.toLowerCase().includes('aborted') ||
+            isAbortLikeError(error);
           if (isTimeout) {
             console.warn('Profile fetch timeout bei Auth-Change');
           } else {

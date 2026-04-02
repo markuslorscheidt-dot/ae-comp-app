@@ -2,6 +2,31 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { getSignupsAutoImportState, runCommitImport } from '../shared';
 
+function getServerSupabase() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceRoleKey) return null;
+  return createClient(supabaseUrl, serviceRoleKey);
+}
+
+async function persistSkippedCronRun(reason: string) {
+  const supabase = getServerSupabase();
+  if (!supabase) return;
+  try {
+    await supabase.from('signups_import_runs').insert({
+      triggered_by: 'cron',
+      status: 'skipped',
+      started_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      auto_import_enabled: true,
+      skipped: true,
+      reason,
+    });
+  } catch (e) {
+    console.error('Skipped-Run Logging fehlgeschlagen:', e);
+  }
+}
+
 async function handleCronImport(request: Request) {
   const cronSecret = process.env.CRON_SECRET;
 
@@ -29,11 +54,9 @@ async function handleCronImport(request: Request) {
   }
 
   if (!autoImportState.enabled) {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (supabaseUrl && serviceRoleKey) {
+    const supabase = getServerSupabase();
+    if (supabase) {
       try {
-        const supabase = createClient(supabaseUrl, serviceRoleKey);
         await supabase.from('signups_import_runs').insert({
           triggered_by: 'cron',
           status: 'skipped',
@@ -56,6 +79,27 @@ async function handleCronImport(request: Request) {
       triggeredBy: 'cron',
       triggeredAt: new Date().toISOString(),
       autoImportEnabled: false,
+      autoImportUpdatedAt: autoImportState.updatedAt,
+    });
+  }
+
+  const ingestSecretConfigured = Boolean(process.env.SIGNUPS_DRIVE_INGEST_SECRET?.trim());
+  const forceDriveCron = process.env.SIGNUPS_CRON_USE_DRIVE_SYNC === 'true';
+
+  // Signups laufen inzwischen über Apps Script -> /api/signups/sync/ingest.
+  // Ohne explizites Opt-in soll Cron den Legacy-Drive-Flow nicht mehr ausführen.
+  if (ingestSecretConfigured && !forceDriveCron) {
+    const reason =
+      'Cron-Drive-Sync uebersprungen: Apps-Script Ingest ist konfiguriert (SIGNUPS_CRON_USE_DRIVE_SYNC!=true).';
+    await persistSkippedCronRun(reason);
+    return NextResponse.json({
+      success: true,
+      mode: 'commit',
+      skipped: true,
+      reason,
+      triggeredBy: 'cron',
+      triggeredAt: new Date().toISOString(),
+      autoImportEnabled: true,
       autoImportUpdatedAt: autoImportState.updatedAt,
     });
   }

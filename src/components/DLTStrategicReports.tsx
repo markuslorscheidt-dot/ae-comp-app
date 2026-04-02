@@ -54,6 +54,8 @@ interface SalespipeEventRow {
   opportunity_id: string;
   oak_id: number | null;
   opportunity_name: string;
+  rating: string | null;
+  next_step: string | null;
   stage: string | null;
   estimated_arr: number | null;
   probability: number | null;
@@ -61,6 +63,7 @@ interface SalespipeEventRow {
   created_date: string | null;
   opportunity_owner: string | null;
   lead_source: string | null;
+  source_tab: string | null;
 }
 
 interface SignupsEventRow {
@@ -74,15 +77,52 @@ interface SignupsEventRow {
   go_live_date: string | null;
 }
 
-type SalespipeStageKey =
+interface LeadsEventRow {
+  id: string;
+  lead_id: string;
+  opportunity_id: string | null;
+  company_account: string;
+  lead_source: string | null;
+  lead_owner: string | null;
+  lead_status: string | null;
+  lead_sub_status: string | null;
+  demo_or_quote: string | null;
+  created_date: string | null;
+  conversion_date: string | null;
+  opportunity_amount: number | null;
+}
+
+type PipelineStageKey =
   | 'sql'
   | 'demo_booked'
   | 'demo_completed'
   | 'sent_quote'
   | 'close_won'
   | 'close_lost'
-  | 'nurture'
-  | 'other';
+  | 'signups'
+  | 'go_live';
+
+interface PipelineRow {
+  id: string;
+  source: 'salespipe' | 'leads' | 'signups';
+  sourceTab: string | null;
+  stageKey: PipelineStageKey;
+  leadId: string | null;
+  opportunityId: string | null;
+  name: string;
+  owner: string | null;
+  leadSource: string | null;
+  oakId: number | null;
+  arr: number;
+  probability: number | null;
+  weightedArr: number;
+  filterDate: string | null;
+  closeDate: string | null;
+  leadCreatedDate: string | null;
+  matchedSignupName: string | null;
+}
+
+type PipelineSourceFilter = 'all' | 'salespipe2_only';
 
 interface DLTStrategicReportsProps {
   user: User;
@@ -100,9 +140,26 @@ interface DLTPlanzahlen {
   avg_pay_bill_terminal: number;
   avg_pay_bill_tipping: number;
   churn_arr_data?: unknown;
+  new_clients_data?: unknown;
+}
+
+interface SalesCyclePlanRules {
+  lead_to_demo_booked_days: number;
+  demo_booked_to_sent_quote_20_days: number;
+  sent_quote_20_to_sent_quote_50_days: number;
+  sent_quote_50_to_sent_quote_70_days: number;
+  sent_quote_70_to_sent_quote_90_days: number;
 }
 
 const MONTH_NAMES_SHORT = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+
+const SALES_CYCLE_DEFAULTS: SalesCyclePlanRules = {
+  lead_to_demo_booked_days: 10,
+  demo_booked_to_sent_quote_20_days: 21,
+  sent_quote_20_to_sent_quote_50_days: 14,
+  sent_quote_50_to_sent_quote_70_days: 10,
+  sent_quote_70_to_sent_quote_90_days: 7,
+};
 
 function normalizeMonthlyPlanValues(value: unknown): number[] {
   if (!Array.isArray(value)) return Array.from({ length: 12 }, () => 0);
@@ -116,20 +173,55 @@ function normalizeMonthlyPlanValues(value: unknown): number[] {
   return values;
 }
 
-const SALESPIPE_STAGE_CONFIG: Array<{ key: SalespipeStageKey; label: string; color: string; bg: string }> = [
+function parseSalesCyclePlanRules(raw: unknown): SalesCyclePlanRules {
+  const data = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const readInt = (key: keyof SalesCyclePlanRules, fallback: number) => {
+    const value = Number(data[key]);
+    return Number.isFinite(value) ? Math.max(0, Math.round(value)) : fallback;
+  };
+  return {
+    lead_to_demo_booked_days: readInt(
+      'lead_to_demo_booked_days',
+      SALES_CYCLE_DEFAULTS.lead_to_demo_booked_days
+    ),
+    demo_booked_to_sent_quote_20_days: readInt(
+      'demo_booked_to_sent_quote_20_days',
+      SALES_CYCLE_DEFAULTS.demo_booked_to_sent_quote_20_days
+    ),
+    sent_quote_20_to_sent_quote_50_days: readInt(
+      'sent_quote_20_to_sent_quote_50_days',
+      SALES_CYCLE_DEFAULTS.sent_quote_20_to_sent_quote_50_days
+    ),
+    sent_quote_50_to_sent_quote_70_days: readInt(
+      'sent_quote_50_to_sent_quote_70_days',
+      SALES_CYCLE_DEFAULTS.sent_quote_50_to_sent_quote_70_days
+    ),
+    sent_quote_70_to_sent_quote_90_days: readInt(
+      'sent_quote_70_to_sent_quote_90_days',
+      SALES_CYCLE_DEFAULTS.sent_quote_70_to_sent_quote_90_days
+    ),
+  };
+}
+
+const PIPELINE_STAGE_CONFIG: Array<{ key: PipelineStageKey; label: string; color: string; bg: string }> = [
   { key: 'sql', label: 'SQL', color: 'text-blue-700', bg: 'bg-blue-50' },
   { key: 'demo_booked', label: 'Demo Booked', color: 'text-indigo-700', bg: 'bg-indigo-50' },
   { key: 'demo_completed', label: 'Demo Completed', color: 'text-purple-700', bg: 'bg-purple-50' },
   { key: 'sent_quote', label: 'Sent Quote', color: 'text-amber-700', bg: 'bg-amber-50' },
   { key: 'close_won', label: 'Close Won', color: 'text-emerald-700', bg: 'bg-emerald-50' },
   { key: 'close_lost', label: 'Close Lost', color: 'text-rose-700', bg: 'bg-rose-50' },
-  { key: 'nurture', label: 'Nurture', color: 'text-slate-700', bg: 'bg-slate-100' },
-  { key: 'other', label: 'Other', color: 'text-gray-700', bg: 'bg-gray-100' },
+  { key: 'signups', label: 'Sign-ups', color: 'text-cyan-700', bg: 'bg-cyan-50' },
+  { key: 'go_live', label: 'Go-Live', color: 'text-teal-700', bg: 'bg-teal-50' },
 ];
 
-const ACTIVE_SALESPIPE_STAGES: SalespipeStageKey[] = ['sql', 'demo_booked', 'demo_completed', 'sent_quote', 'nurture'];
+const PIPELINE_STAGE_CONFIG_VISIBLE = PIPELINE_STAGE_CONFIG.filter((stage) => stage.key !== 'close_won');
 
-function normalizeSalespipeStage(stage: string | null): SalespipeStageKey {
+const ACTIVE_PIPELINE_STAGES: PipelineStageKey[] = ['sql', 'demo_booked', 'demo_completed', 'sent_quote'];
+
+const SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT = [280, 110, 120, 130, 90, 90, 110, 140, 120, 120, 130];
+const SALESPIPE_MAIN_COLUMN_MIN_WIDTH = [180, 90, 100, 100, 70, 70, 90, 110, 100, 100, 110];
+
+function normalizeSalespipeStage(stage: string | null): PipelineStageKey | null {
   const normalized = String(stage || '').toLowerCase().trim().replace(/[-\s]+/g, '_');
   if (normalized === 'sql') return 'sql';
   if (normalized === 'demo_booked') return 'demo_booked';
@@ -137,19 +229,72 @@ function normalizeSalespipeStage(stage: string | null): SalespipeStageKey {
   if (normalized === 'sent_quote') return 'sent_quote';
   if (normalized === 'close_won' || normalized === 'closed_won') return 'close_won';
   if (normalized === 'close_lost' || normalized === 'closed_lost') return 'close_lost';
-  if (normalized === 'nurture') return 'nurture';
-  return 'other';
+  return null;
 }
 
-function getSalespipeDefaultProbability(stage: SalespipeStageKey): number {
+function normalizeLeadsStage(
+  leadStatus: string | null,
+  leadSubStatus: string | null,
+  demoOrQuote: string | null
+): PipelineStageKey | null {
+  const status = `${leadStatus || ''} ${leadSubStatus || ''} ${demoOrQuote || ''}`
+    .toLowerCase()
+    .replace(/[-\s]+/g, ' ')
+    .trim();
+  if (!status) return null;
+  if (status.includes('close won') || status.includes('closed won') || status.includes('gewonnen')) return 'close_won';
+  if (status.includes('close lost') || status.includes('closed lost') || status.includes('verloren')) return 'close_lost';
+  if (status.includes('sent quote') || status.includes('quote sent') || status.includes('angebot')) return 'sent_quote';
+  if (status.includes('demo completed') || status.includes('demo done') || status.includes('demo durchgef')) return 'demo_completed';
+  if (status.includes('demo booked') || status.includes('demo vereinbart') || status.includes('demo gebucht')) return 'demo_booked';
+  if (status.includes('sql') || status.includes('sales qualified')) return 'sql';
+  // Leads ohne klares Stage-Signal zählen als SQL-Basis.
+  return 'sql';
+}
+
+function getDefaultProbability(stage: PipelineStageKey): number {
   if (stage === 'sql') return 0.2;
   if (stage === 'demo_booked') return 0.35;
   if (stage === 'demo_completed') return 0.5;
   if (stage === 'sent_quote') return 0.7;
   if (stage === 'close_won') return 1;
   if (stage === 'close_lost') return 0;
-  if (stage === 'nurture') return 0.1;
-  return 0.2;
+  if (stage === 'signups') return 1;
+  if (stage === 'go_live') return 1;
+  return 0;
+}
+
+function normalizeId(value: string | null | undefined): string | null {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized || null;
+}
+
+function buildSalesforceOpportunityUrl(opportunityId: string | null | undefined): string | null {
+  const id = String(opportunityId || '').trim();
+  if (!id) return null;
+  const configuredBase = (process.env.NEXT_PUBLIC_SALESFORCE_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (configuredBase) {
+    if (configuredBase.includes('lightning.force.com')) {
+      return `${configuredBase}/lightning/r/Opportunity/${encodeURIComponent(id)}/view`;
+    }
+    return `${configuredBase}/${encodeURIComponent(id)}`;
+  }
+  return `https://login.salesforce.com/${encodeURIComponent(id)}`;
+}
+
+function calculateDaysBetween(startDate: string | null, endDate: string | null): number | null {
+  if (!startDate || !endDate) return null;
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  return Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function formatDateForInput(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) {
@@ -168,32 +313,67 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     () => Array.from({ length: 12 }, (_, idx) => idx + 1),
     []
   );
-  const [reportType, setReportType] = useState<'trend' | 'forecast' | 'ytd' | 'salespipe'>('trend');
+  const [reportType, setReportType] = useState<'forecast' | 'ytd' | 'salespipe'>('forecast');
   const [selectedYtdMonths, setSelectedYtdMonths] = useState<number[]>(defaultYtdMonths);
   const [selectedMonthDetail, setSelectedMonthDetail] = useState<number | null>(null);
   const [selectedChurnMonthDetail, setSelectedChurnMonthDetail] = useState<number | null>(null);
   const [chartsExpanded, setChartsExpanded] = useState(true);
+  const [ytdKpiSectionExpanded, setYtdKpiSectionExpanded] = useState(true);
+  const [ytdMonthlyOverviewExpanded, setYtdMonthlyOverviewExpanded] = useState(true);
+  const [ytdChurnOverviewExpanded, setYtdChurnOverviewExpanded] = useState(true);
   const [goLiveDetailSearch, setGoLiveDetailSearch] = useState('');
   const [churnDetailSearch, setChurnDetailSearch] = useState('');
   const [salespipeEvents, setSalespipeEvents] = useState<SalespipeEventRow[]>([]);
   const [signupsEvents, setSignupsEvents] = useState<SignupsEventRow[]>([]);
+  const [leadsEvents, setLeadsEvents] = useState<LeadsEventRow[]>([]);
   const [salespipeLoading, setSalespipeLoading] = useState(true);
   const [salespipeSearch, setSalespipeSearch] = useState('');
-  const [salespipeStageFilter, setSalespipeStageFilter] = useState<SalespipeStageKey | 'all'>('all');
+  const [salespipeStageFilter, setSalespipeStageFilter] = useState<PipelineStageKey | 'all'>('all');
+  const [salespipeSourceFilter, setSalespipeSourceFilter] = useState<PipelineSourceFilter>('all');
   const [salespipeDateFromInput, setSalespipeDateFromInput] = useState('');
   const [salespipeDateToInput, setSalespipeDateToInput] = useState('');
   const [salespipeDateFrom, setSalespipeDateFrom] = useState('');
   const [salespipeDateTo, setSalespipeDateTo] = useState('');
+  const [salespipeRelativeDaysInput, setSalespipeRelativeDaysInput] = useState<string>('none');
+  const [salespipeRelativeDays, setSalespipeRelativeDays] = useState<number | null>(null);
   const [churnEvents, setChurnEvents] = useState<ChurnEventRow[]>([]);
   const [churnLoading, setChurnLoading] = useState(true);
   const [payIstInputsByGoLiveId, setPayIstInputsByGoLiveId] = useState<Record<string, string>>({});
   const [savingPayIstByGoLiveId, setSavingPayIstByGoLiveId] = useState<Record<string, boolean>>({});
   const [payIstErrorByGoLiveId, setPayIstErrorByGoLiveId] = useState<Record<string, string>>({});
   const exportRef = useRef<HTMLDivElement>(null);
+  const [salespipeMainColWidths, setSalespipeMainColWidths] = useState<number[]>([
+    ...SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT,
+  ]);
+  const resizingSalespipeColRef = useRef<{ index: number; startX: number; startWidth: number } | null>(null);
 
   useEffect(() => {
     setSelectedYtdMonths(defaultYtdMonths);
   }, [defaultYtdMonths]);
+
+  useEffect(() => {
+    const onMouseMove = (event: MouseEvent) => {
+      if (!resizingSalespipeColRef.current) return;
+      const { index, startX, startWidth } = resizingSalespipeColRef.current;
+      const delta = event.clientX - startX;
+      const minWidth = SALESPIPE_MAIN_COLUMN_MIN_WIDTH[index] ?? 70;
+      const nextWidth = Math.max(minWidth, startWidth + delta);
+      setSalespipeMainColWidths((prev) => prev.map((width, i) => (i === index ? nextWidth : width)));
+    };
+
+    const onMouseUp = () => {
+      resizingSalespipeColRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -232,13 +412,16 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const fetchSalespipeAndSignups = async () => {
       setSalespipeLoading(true);
 
-      const [salespipeRes, signupsRes] = await Promise.all([
+      const [salespipeRes, signupsRes, leadsRes] = await Promise.all([
         supabase
           .from('salespipe_events')
-          .select('id, opportunity_id, oak_id, opportunity_name, stage, estimated_arr, probability, close_date, created_date, opportunity_owner, lead_source'),
+          .select('id, opportunity_id, oak_id, opportunity_name, rating, next_step, stage, estimated_arr, probability, close_date, created_date, opportunity_owner, lead_source, source_tab'),
         supabase
           .from('signups_events')
           .select('id, account_id, oak_id, account_name, account_owner, signup_package, signup_date, go_live_date'),
+        supabase
+          .from('leads_events')
+          .select('id, lead_id, opportunity_id, company_account, lead_source, lead_owner, lead_status, lead_sub_status, demo_or_quote, created_date, conversion_date, opportunity_amount'),
       ]);
 
       if (!active) return;
@@ -255,6 +438,13 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         setSignupsEvents([]);
       } else {
         setSignupsEvents((signupsRes.data as SignupsEventRow[]) || []);
+      }
+
+      if (leadsRes.error) {
+        console.error('Leads load error:', leadsRes.error);
+        setLeadsEvents([]);
+      } else {
+        setLeadsEvents((leadsRes.data as LeadsEventRow[]) || []);
       }
 
       setSalespipeLoading(false);
@@ -427,28 +617,179 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     return data;
   }, [combined, multiSettings, multiGoLives, goLiveReceiverIds, planTargets]);
 
-  // Forecast data (simple linear projection)
+  // Forecast data: 1) Ist-Monate, 2) Weighted Pipeline (+70 Tage), 3) lineare Heuristik als Fallback
   const forecastData = useMemo(() => {
     if (monthlyData.length === 0) return [];
 
-    // Calculate average growth rate from actual data
-    const actualMonths = monthlyData.filter((m, idx) => idx <= currentMonth);
-    if (actualMonths.length < 2) return monthlyData;
+    const now = new Date();
+    const pipelineEnd = new Date(now);
+    pipelineEnd.setDate(pipelineEnd.getDate() + 70);
+    pipelineEnd.setHours(23, 59, 59, 999);
 
-    const avgGrowth = actualMonths.reduce((sum, m) => sum + m.subsARR, 0) / actualMonths.length;
-    
-    return monthlyData.map((month, idx) => {
-      if (idx <= currentMonth) {
-        return { ...month, forecast: month.subsARR, isActual: true };
-      }
-      // Simple forecast based on average
-      return { 
-        ...month, 
-        forecast: avgGrowth * (1 + (idx - currentMonth) * 0.02), // 2% growth per month
-        isActual: false 
+    const pipelineWeightedByMonth = Array.from({ length: 12 }, () => 0);
+    salespipeEvents.forEach((row) => {
+      const stageKey = normalizeSalespipeStage(row.stage);
+      if (!stageKey || !ACTIVE_PIPELINE_STAGES.includes(stageKey)) return;
+      const filterDate = row.created_date || row.close_date;
+      if (!filterDate) return;
+      const d = new Date(filterDate);
+      if (Number.isNaN(d.getTime())) return;
+      if (d < now || d > pipelineEnd) return;
+      if (d.getFullYear() !== selectedYear) return;
+      const monthIdx = d.getMonth();
+      if (monthIdx < 0 || monthIdx > 11) return;
+      const arr = Number(row.estimated_arr) || 0;
+      const probabilityRaw = Number(row.probability);
+      const probability = Number.isFinite(probabilityRaw)
+        ? (probabilityRaw > 1 ? probabilityRaw / 100 : probabilityRaw)
+        : getDefaultProbability(stageKey);
+      pipelineWeightedByMonth[monthIdx] += arr * probability;
+    });
+    leadsEvents.forEach((row) => {
+      const stageKey = normalizeLeadsStage(row.lead_status, row.lead_sub_status, row.demo_or_quote);
+      if (!stageKey || !ACTIVE_PIPELINE_STAGES.includes(stageKey)) return;
+      const filterDate = row.conversion_date || row.created_date;
+      if (!filterDate) return;
+      const d = new Date(filterDate);
+      if (Number.isNaN(d.getTime())) return;
+      if (d < now || d > pipelineEnd) return;
+      if (d.getFullYear() !== selectedYear) return;
+      const monthIdx = d.getMonth();
+      if (monthIdx < 0 || monthIdx > 11) return;
+      const arr = Number(row.opportunity_amount) || 0;
+      pipelineWeightedByMonth[monthIdx] += arr * getDefaultProbability(stageKey);
+    });
+
+    const plannedChurnByMonth = (() => {
+      const churnData =
+        planzahlen?.churn_arr_data && typeof planzahlen.churn_arr_data === 'object'
+          ? (planzahlen.churn_arr_data as Record<string, unknown>)
+          : {};
+      const invoicedChurn =
+        churnData.invoiced_churn && typeof churnData.invoiced_churn === 'object'
+          ? (churnData.invoiced_churn as Record<string, unknown>)
+          : {};
+      return normalizeMonthlyPlanValues(invoicedChurn.target_arr).map((value) => Math.abs(value));
+    })();
+
+    const actualChurnByMonth = Array.from({ length: 12 }, () => 0);
+    churnEvents.forEach((event) => {
+      if (!event.churn_month) return;
+      const d = new Date(event.churn_month);
+      if (Number.isNaN(d.getTime()) || d.getFullYear() !== selectedYear) return;
+      const idx = d.getMonth();
+      if (idx < 0 || idx > 11) return;
+      actualChurnByMonth[idx] += Number(event.total_arr_lost) || 0;
+    });
+
+    const actualRows = monthlyData.map((month, idx) => {
+      const subsActual = month.subsARR || 0;
+      const payActual = month.payARR || 0;
+      const netActual = subsActual + payActual - actualChurnByMonth[idx];
+      const hasAnyActualValue = subsActual !== 0 || payActual !== 0 || netActual !== 0;
+      const isPastMonth = selectedYear < currentYear || (selectedYear === currentYear && idx <= currentMonth);
+      return {
+        idx,
+        ...month,
+        subsActual,
+        payActual,
+        netActual,
+        hasActual: hasAnyActualValue && isPastMonth,
       };
     });
-  }, [monthlyData, currentMonth]);
+
+    const referenceRows = actualRows.filter((row) => row.hasActual);
+    const avgSubs =
+      referenceRows.length > 0
+        ? referenceRows.reduce((sum, row) => sum + row.subsActual, 0) / referenceRows.length
+        : 0;
+    const avgPay =
+      referenceRows.length > 0
+        ? referenceRows.reduce((sum, row) => sum + row.payActual, 0) / referenceRows.length
+        : 0;
+    const shareDenominator = avgSubs + avgPay;
+    const subsShare = shareDenominator > 0 ? avgSubs / shareDenominator : 0.5;
+    const payShare = shareDenominator > 0 ? avgPay / shareDenominator : 0.5;
+
+    return actualRows.map((row) => {
+      const growthFactor = 1 + Math.max(0, row.idx - currentMonth) * 0.02;
+      const pipelineWeighted = pipelineWeightedByMonth[row.idx] || 0;
+      const plannedChurn = plannedChurnByMonth[row.idx] || 0;
+
+      if (row.hasActual) {
+        return {
+          ...row,
+          subsForecast: row.subsActual,
+          payForecast: row.payActual,
+          netForecast: row.netActual,
+          netTarget: row.subsTarget + row.payTarget - plannedChurn,
+          source: 'actual',
+        };
+      }
+
+      if (pipelineWeighted > 0) {
+        const subsForecast = pipelineWeighted * subsShare;
+        const payForecast = pipelineWeighted * payShare;
+        const netForecast = subsForecast + payForecast - plannedChurn;
+        return {
+          ...row,
+          subsForecast,
+          payForecast,
+          netForecast,
+          netTarget: row.subsTarget + row.payTarget - plannedChurn,
+          source: 'pipeline',
+        };
+      }
+
+      const subsForecast = avgSubs * growthFactor;
+      const payForecast = avgPay * growthFactor;
+      const netForecast = subsForecast + payForecast - plannedChurn;
+      return {
+        ...row,
+        subsForecast,
+        payForecast,
+        netForecast,
+        netTarget: row.subsTarget + row.payTarget - plannedChurn,
+        source: 'heuristic',
+      };
+    });
+  }, [
+    monthlyData,
+    currentMonth,
+    currentYear,
+    selectedYear,
+    salespipeEvents,
+    leadsEvents,
+    planzahlen,
+    churnEvents,
+  ]);
+
+  const forecastSummary = useMemo(
+    () => ({
+      subs: forecastData.reduce((sum, row) => sum + (row.subsForecast || 0), 0),
+      pay: forecastData.reduce((sum, row) => sum + (row.payForecast || 0), 0),
+      net: forecastData.reduce((sum, row) => sum + (row.netForecast || 0), 0),
+    }),
+    [forecastData]
+  );
+
+  const forecastTargetSummary = useMemo(
+    () => ({
+      subs: monthlyData.reduce((sum, row) => sum + (row.subsTarget || 0), 0),
+      pay: monthlyData.reduce((sum, row) => sum + (row.payTarget || 0), 0),
+      net: forecastData.reduce((sum, row) => sum + (row.netTarget || 0), 0),
+    }),
+    [monthlyData, forecastData]
+  );
+
+  const forecastAchievement = useMemo(
+    () => ({
+      subs: forecastTargetSummary.subs > 0 ? forecastSummary.subs / forecastTargetSummary.subs : 0,
+      pay: forecastTargetSummary.pay > 0 ? forecastSummary.pay / forecastTargetSummary.pay : 0,
+      net: forecastTargetSummary.net > 0 ? forecastSummary.net / forecastTargetSummary.net : 0,
+    }),
+    [forecastSummary, forecastTargetSummary]
+  );
 
   const allGoLives = useMemo<GoLive[]>(
     () => combined?.goLives ?? Array.from(multiGoLives?.values() ?? []).flat(),
@@ -813,6 +1154,14 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     });
   }, [salespipeEvents, selectedYear]);
 
+  const yearFilteredLeadsEvents = useMemo(() => {
+    return leadsEvents.filter((row) => {
+      const createdYear = row.created_date ? new Date(row.created_date).getFullYear() : null;
+      const conversionYear = row.conversion_date ? new Date(row.conversion_date).getFullYear() : null;
+      return createdYear === selectedYear || conversionYear === selectedYear;
+    });
+  }, [leadsEvents, selectedYear]);
+
   const yearFilteredSignupsEvents = useMemo(() => {
     return signupsEvents.filter((row) => {
       const signupYear = row.signup_date ? new Date(row.signup_date).getFullYear() : null;
@@ -837,101 +1186,421 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     return byOak;
   }, [yearFilteredSignupsEvents]);
 
-  const mergedSalespipeRows = useMemo(() => {
-    return yearFilteredSalespipeEvents.map((sales) => {
-      const stageKey = normalizeSalespipeStage(sales.stage);
-      const estimatedArr = Number(sales.estimated_arr) || 0;
-      const probabilityRaw = Number(sales.probability);
-      const probability = Number.isFinite(probabilityRaw)
-        ? (probabilityRaw > 1 ? probabilityRaw / 100 : probabilityRaw)
-        : getSalespipeDefaultProbability(stageKey);
-      const weightedArr = estimatedArr * probability;
-      const matchedSignup = sales.oak_id ? newestSignupByOak.get(sales.oak_id) : undefined;
-      return {
-        ...sales,
-        stageKey,
-        estimatedArr,
-        probability,
-        weightedArr,
-        matchedSignup,
-      };
+  const arrByOak = useMemo(() => {
+    const byOak = new Map<number, number>();
+    yearFilteredSalespipeEvents.forEach((row) => {
+      if (!row.oak_id) return;
+      const arr = Number(row.estimated_arr);
+      if (!Number.isFinite(arr) || arr <= 0) return;
+      byOak.set(row.oak_id, Math.max(byOak.get(row.oak_id) || 0, arr));
     });
-  }, [yearFilteredSalespipeEvents, newestSignupByOak]);
+    return byOak;
+  }, [yearFilteredSalespipeEvents]);
+
+  const opportunityToOak = useMemo(() => {
+    const byOpportunity = new Map<string, number>();
+    yearFilteredSalespipeEvents.forEach((row) => {
+      if (!row.oak_id) return;
+      const opportunityId = normalizeId(row.opportunity_id);
+      if (!opportunityId) return;
+      byOpportunity.set(opportunityId, row.oak_id);
+    });
+    return byOpportunity;
+  }, [yearFilteredSalespipeEvents]);
+
+  const leadCreatedByOpportunity = useMemo(() => {
+    const byOpportunity = new Map<string, string>();
+    leadsEvents.forEach((lead) => {
+      const opportunityId = normalizeId(lead.opportunity_id);
+      if (!opportunityId || !lead.created_date) return;
+      const current = byOpportunity.get(opportunityId);
+      if (!current) {
+        byOpportunity.set(opportunityId, lead.created_date);
+        return;
+      }
+      const currentTs = new Date(current).getTime();
+      const nextTs = new Date(lead.created_date).getTime();
+      if (!Number.isNaN(nextTs) && (Number.isNaN(currentTs) || nextTs < currentTs)) {
+        byOpportunity.set(opportunityId, lead.created_date);
+      }
+    });
+    return byOpportunity;
+  }, [leadsEvents]);
+
+  const pipelineRows = useMemo(() => {
+    const salesRows: PipelineRow[] = yearFilteredSalespipeEvents.reduce<PipelineRow[]>((acc, sales) => {
+        const stageKey = normalizeSalespipeStage(sales.stage);
+        if (!stageKey) return acc;
+        const arr = Number(sales.estimated_arr) || 0;
+        const probabilityRaw = Number(sales.probability);
+        const probability = Number.isFinite(probabilityRaw)
+          ? (probabilityRaw > 1 ? probabilityRaw / 100 : probabilityRaw)
+          : null;
+        const probabilityForWeighting = probability ?? getDefaultProbability(stageKey);
+        const mappedOakId = (() => {
+          if (sales.oak_id) return sales.oak_id;
+          const opportunityId = normalizeId(sales.opportunity_id);
+          if (!opportunityId) return null;
+          return opportunityToOak.get(opportunityId) ?? null;
+        })();
+        const matchedSignup = mappedOakId ? newestSignupByOak.get(mappedOakId) : undefined;
+        const filterDate = (stageKey === 'close_won' || stageKey === 'close_lost')
+          ? (sales.close_date || sales.created_date)
+          : (sales.created_date || sales.close_date);
+        acc.push({
+          id: `sales-${sales.id}`,
+          source: 'salespipe',
+          sourceTab: sales.source_tab || null,
+          stageKey,
+          leadId: null,
+          opportunityId: sales.opportunity_id || null,
+          name: sales.opportunity_name || '-',
+          owner: sales.opportunity_owner,
+          leadSource: sales.lead_source || null,
+          oakId: mappedOakId,
+          arr,
+          probability,
+          weightedArr: arr * probabilityForWeighting,
+          filterDate,
+          closeDate: sales.close_date || null,
+          leadCreatedDate: normalizeId(sales.opportunity_id)
+            ? (leadCreatedByOpportunity.get(normalizeId(sales.opportunity_id) as string) || null)
+            : null,
+          matchedSignupName: matchedSignup?.account_name || null,
+        });
+        return acc;
+      }, []);
+
+    const leadsRows: PipelineRow[] = yearFilteredLeadsEvents.reduce<PipelineRow[]>((acc, lead) => {
+        const stageKey = normalizeLeadsStage(lead.lead_status, lead.lead_sub_status, lead.demo_or_quote);
+        if (!stageKey) return acc;
+        const arr = Number(lead.opportunity_amount) || 0;
+        const mappedOakId = (() => {
+          const opportunityId = normalizeId(lead.opportunity_id);
+          if (!opportunityId) return null;
+          return opportunityToOak.get(opportunityId) ?? null;
+        })();
+        const matchedSignup = mappedOakId ? newestSignupByOak.get(mappedOakId) : undefined;
+        acc.push({
+          id: `lead-${lead.id}`,
+          source: 'leads',
+          sourceTab: null,
+          stageKey,
+          leadId: lead.lead_id || null,
+          opportunityId: lead.opportunity_id || null,
+          name: lead.company_account || lead.lead_id || '-',
+          owner: lead.lead_owner,
+          leadSource: lead.lead_source || null,
+          oakId: mappedOakId,
+          arr,
+          probability: null,
+          weightedArr: arr * getDefaultProbability(stageKey),
+          filterDate: lead.conversion_date || lead.created_date,
+          closeDate: null,
+          leadCreatedDate: lead.created_date || null,
+          matchedSignupName: matchedSignup?.account_name || null,
+        });
+        return acc;
+      }, []);
+
+    const signupRows: PipelineRow[] = [];
+    yearFilteredSignupsEvents.forEach((signup) => {
+      const matchedArr = signup.oak_id ? (arrByOak.get(signup.oak_id) || 0) : 0;
+      if (signup.signup_date && new Date(signup.signup_date).getFullYear() === selectedYear) {
+        signupRows.push({
+          id: `signup-${signup.id}`,
+          source: 'signups',
+          sourceTab: null,
+          stageKey: 'signups',
+          leadId: null,
+          opportunityId: null,
+          name: signup.account_name || signup.account_id || '-',
+          owner: signup.account_owner,
+          leadSource: null,
+          oakId: signup.oak_id,
+          arr: matchedArr,
+          probability: null,
+          weightedArr: matchedArr,
+          filterDate: signup.signup_date,
+          closeDate: null,
+          leadCreatedDate: null,
+          matchedSignupName: signup.account_name || null,
+        });
+      }
+      if (signup.go_live_date && new Date(signup.go_live_date).getFullYear() === selectedYear) {
+        signupRows.push({
+          id: `golive-${signup.id}`,
+          source: 'signups',
+          sourceTab: null,
+          stageKey: 'go_live',
+          leadId: null,
+          opportunityId: null,
+          name: signup.account_name || signup.account_id || '-',
+          owner: signup.account_owner,
+          leadSource: null,
+          oakId: signup.oak_id,
+          arr: matchedArr,
+          probability: null,
+          weightedArr: matchedArr,
+          filterDate: signup.go_live_date,
+          closeDate: null,
+          leadCreatedDate: null,
+          matchedSignupName: signup.account_name || null,
+        });
+      }
+    });
+
+    return [...leadsRows, ...salesRows, ...signupRows];
+  }, [yearFilteredSalespipeEvents, yearFilteredLeadsEvents, yearFilteredSignupsEvents, newestSignupByOak, arrByOak, selectedYear, opportunityToOak, leadCreatedByOpportunity]);
 
   const salespipeRowsInDateRange = useMemo(() => {
     const fromDate = salespipeDateFrom ? new Date(salespipeDateFrom) : null;
     const toDate = salespipeDateTo ? new Date(`${salespipeDateTo}T23:59:59`) : null;
-    if (!fromDate && !toDate) return mergedSalespipeRows;
-    return mergedSalespipeRows.filter((row) => {
-      // Gleiches Verhalten wie im Pipeline-Bereich:
-      // Closed Won/Lost nach Close-Date, aktive Stages nach Created-Date.
-      const isClosedStage = row.stageKey === 'close_won' || row.stageKey === 'close_lost';
-      const relevantDate = isClosedStage
-        ? row.close_date
-          ? new Date(row.close_date)
-          : row.created_date
-            ? new Date(row.created_date)
-            : null
-        : row.created_date
-          ? new Date(row.created_date)
-          : row.close_date
-            ? new Date(row.close_date)
-            : null;
-      if (!relevantDate || Number.isNaN(relevantDate.getTime())) return false;
+    const relativeToDate = salespipeRelativeDays !== null ? new Date() : null;
+    const relativeFromDate = salespipeRelativeDays !== null ? new Date() : null;
+    if (relativeToDate) relativeToDate.setHours(23, 59, 59, 999);
+    if (relativeFromDate) {
+      relativeFromDate.setHours(0, 0, 0, 0);
+      relativeFromDate.setDate(relativeFromDate.getDate() - Math.max(0, salespipeRelativeDays - 1));
+    }
+    if (!fromDate && !toDate && !relativeFromDate && !relativeToDate) return pipelineRows;
+    return pipelineRows.filter((row) => {
+      if (!row.filterDate) return false;
+      const relevantDate = new Date(row.filterDate);
+      if (Number.isNaN(relevantDate.getTime())) return false;
       if (fromDate && relevantDate < fromDate) return false;
       if (toDate && relevantDate > toDate) return false;
+      if (relativeFromDate && relevantDate < relativeFromDate) return false;
+      if (relativeToDate && relevantDate > relativeToDate) return false;
       return true;
     });
-  }, [mergedSalespipeRows, salespipeDateFrom, salespipeDateTo]);
+  }, [pipelineRows, salespipeDateFrom, salespipeDateTo, salespipeRelativeDays]);
 
-  const filteredSalespipeRows = useMemo(() => {
+  const baseFilteredSalespipeRows = useMemo(() => {
     const query = salespipeSearch.trim().toLowerCase();
     return salespipeRowsInDateRange.filter((row) => {
-      if (salespipeStageFilter !== 'all' && row.stageKey !== salespipeStageFilter) return false;
+      if (salespipeSourceFilter === 'salespipe2_only') {
+        // Fokus auf Salespipe2-Datensaetze plus davon getrackte Journey-Events.
+        if (row.source === 'salespipe' && row.sourceTab !== 'drive_salespipe2_csv') return false;
+      }
       if (!query) return true;
       const searchValues = [
-        row.opportunity_name || '',
-        row.opportunity_owner || '',
-        row.lead_source || '',
-        String(row.oak_id ?? ''),
-        row.matchedSignup?.account_name || '',
-        row.matchedSignup?.account_owner || '',
+        row.name || '',
+        row.owner || '',
+        row.leadId || '',
+        row.opportunityId || '',
+        String(row.oakId ?? ''),
+        row.matchedSignupName || '',
+        row.source || '',
       ];
       return searchValues.some((value) => value.toLowerCase().includes(query));
     });
-  }, [salespipeRowsInDateRange, salespipeSearch, salespipeStageFilter]);
+  }, [salespipeRowsInDateRange, salespipeSearch, salespipeSourceFilter]);
+
+  const connectedJourneyOakSet = useMemo(() => {
+    const set = new Set<number>();
+    baseFilteredSalespipeRows.forEach((row) => {
+      // Strikte Journey-Definition:
+      // Lead-ID + Opportunity-ID + daraus gemappte OAK-ID muessen vorhanden sein.
+      if (row.source !== 'leads') return;
+      if (!row.leadId || !row.opportunityId || row.oakId === null) return;
+      set.add(row.oakId);
+    });
+    return set;
+  }, [baseFilteredSalespipeRows]);
+
+  const filteredSalespipeRows = useMemo(() => {
+    return baseFilteredSalespipeRows.filter((row) => {
+      if (salespipeStageFilter !== 'all' && row.stageKey !== salespipeStageFilter) return false;
+      // Nur zusammenhaengende Journey-Signups/-GoLives anzeigen.
+      if ((row.stageKey === 'signups' || row.stageKey === 'go_live')) {
+        if (row.oakId === null) return false;
+        return connectedJourneyOakSet.has(row.oakId);
+      }
+      return true;
+    });
+  }, [baseFilteredSalespipeRows, salespipeStageFilter, connectedJourneyOakSet]);
+
+  const journeyTrackOakSet = useMemo(() => {
+    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
+    const closeWonRows = filteredSalespipeRows.filter((row) => row.stageKey === 'close_won');
+    const openAndWonOakSet = new Set(
+      [...openRows, ...closeWonRows]
+        .map((row) => row.oakId)
+        .filter((oakId): oakId is number => oakId !== null)
+    );
+    return new Set(
+      Array.from(openAndWonOakSet).filter((oakId) => connectedJourneyOakSet.has(oakId))
+    );
+  }, [filteredSalespipeRows, connectedJourneyOakSet]);
+
+  const trackedSignupsStageStats = useMemo(() => {
+    const byOak = new Map<number, number>();
+    filteredSalespipeRows.forEach((row) => {
+      if (row.stageKey !== 'signups' || row.oakId === null || !journeyTrackOakSet.has(row.oakId)) return;
+      byOak.set(row.oakId, Math.max(byOak.get(row.oakId) || 0, row.arr));
+    });
+    return {
+      count: byOak.size,
+      arr: Array.from(byOak.values()).reduce((sum, value) => sum + value, 0),
+    };
+  }, [filteredSalespipeRows, journeyTrackOakSet]);
+
+  const trackedGoLiveStageStats = useMemo(() => {
+    const byOak = new Map<number, number>();
+    filteredSalespipeRows.forEach((row) => {
+      if (row.stageKey !== 'go_live' || row.oakId === null || !journeyTrackOakSet.has(row.oakId)) return;
+      byOak.set(row.oakId, Math.max(byOak.get(row.oakId) || 0, row.arr));
+    });
+    return {
+      count: byOak.size,
+      arr: Array.from(byOak.values()).reduce((sum, value) => sum + value, 0),
+    };
+  }, [filteredSalespipeRows, journeyTrackOakSet]);
+
+  const trackedCloseWonStageStats = useMemo(() => {
+    const byOak = new Map<number, number>();
+    filteredSalespipeRows.forEach((row) => {
+      if (row.stageKey !== 'close_won' || row.oakId === null || !journeyTrackOakSet.has(row.oakId)) return;
+      byOak.set(row.oakId, Math.max(byOak.get(row.oakId) || 0, row.arr));
+    });
+    return {
+      count: byOak.size,
+      arr: Array.from(byOak.values()).reduce((sum, value) => sum + value, 0),
+    };
+  }, [filteredSalespipeRows, journeyTrackOakSet]);
 
   const salespipeStageSummary = useMemo(() => {
-    const initial = SALESPIPE_STAGE_CONFIG.reduce(
+    const initial = PIPELINE_STAGE_CONFIG.reduce(
       (acc, stage) => ({ ...acc, [stage.key]: { count: 0, arr: 0 } }),
-      {} as Record<SalespipeStageKey, { count: number; arr: number }>
+      {} as Record<PipelineStageKey, { count: number; arr: number }>
     );
     filteredSalespipeRows.forEach((row) => {
       initial[row.stageKey].count += 1;
-      initial[row.stageKey].arr += row.estimatedArr;
+      initial[row.stageKey].arr += row.arr;
     });
+    // Sign-up/Go-Live folgen derselben Tracking-Logik wie die KPI-Karten oben.
+    initial.close_won = trackedCloseWonStageStats;
+    initial.signups = trackedSignupsStageStats;
+    initial.go_live = trackedGoLiveStageStats;
     return initial;
-  }, [filteredSalespipeRows]);
+  }, [filteredSalespipeRows, trackedCloseWonStageStats, trackedSignupsStageStats, trackedGoLiveStageStats]);
 
   const salespipeKpis = useMemo(() => {
-    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_SALESPIPE_STAGES.includes(row.stageKey));
-    const totalPipelineArr = openRows.reduce((sum, row) => sum + row.estimatedArr, 0);
+    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
+    const totalPipelineArr = openRows.reduce((sum, row) => sum + row.arr, 0);
     const weightedArr = openRows.reduce((sum, row) => sum + row.weightedArr, 0);
-    const matchedSignups = filteredSalespipeRows.filter((row) => !!row.matchedSignup).length;
-    const wonCount = filteredSalespipeRows.filter((row) => row.stageKey === 'close_won').length;
+    const signupsCount = trackedSignupsStageStats.count;
+    const goLiveCount = trackedGoLiveStageStats.count;
     return {
-      totalRows: filteredSalespipeRows.length,
       openRows: openRows.length,
       totalPipelineArr,
       weightedArr,
-      matchedSignups,
-      wonCount,
+      signupsCount,
+      goLiveCount,
     };
+  }, [filteredSalespipeRows, trackedSignupsStageStats.count, trackedGoLiveStageStats.count]);
+
+  const probabilityBuckets = useMemo(() => {
+    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
+    const bucketDefs = [
+      { key: 'p10', label: '10%', min: 0.1, max: 0.2 },
+      { key: 'p20', label: '20%', min: 0.2, max: 0.35 },
+      { key: 'p35', label: '35%', min: 0.35, max: 0.5 },
+      { key: 'p50', label: '50%', min: 0.5, max: 0.7 },
+      { key: 'p70', label: '70%', min: 0.7, max: 0.9 },
+      { key: 'p90', label: '90%+', min: 0.9, max: 1.01 },
+    ] as const;
+
+    return bucketDefs.map((bucket) => {
+      const rows = openRows.filter((row) => {
+        const prob = row.probability ?? 0;
+        return prob >= bucket.min && prob < bucket.max;
+      });
+      return {
+        ...bucket,
+        count: rows.length,
+        arr: rows.reduce((sum, row) => sum + row.arr, 0),
+      };
+    });
   }, [filteredSalespipeRows]);
+
+  const salesCyclePlanRules = useMemo(() => {
+    const newClients =
+      planzahlen?.new_clients_data && typeof planzahlen.new_clients_data === 'object'
+        ? (planzahlen.new_clients_data as Record<string, unknown>)
+        : {};
+    const rawRules =
+      newClients.sales_cycle_plan_rules && typeof newClients.sales_cycle_plan_rules === 'object'
+        ? newClients.sales_cycle_plan_rules
+        : null;
+    return parseSalesCyclePlanRules(rawRules);
+  }, [planzahlen]);
+
+  const overdueCloseDaysByProbability = useMemo(() => {
+    const to20 =
+      salesCyclePlanRules.lead_to_demo_booked_days + salesCyclePlanRules.demo_booked_to_sent_quote_20_days;
+    const to50 = to20 + salesCyclePlanRules.sent_quote_20_to_sent_quote_50_days;
+    const to70 = to50 + salesCyclePlanRules.sent_quote_50_to_sent_quote_70_days;
+    const to90 = to70 + salesCyclePlanRules.sent_quote_70_to_sent_quote_90_days;
+
+    const getLimit = (probability: number | null) => {
+      if (probability === null) return to20;
+      if (probability >= 0.9) return to90;
+      if (probability >= 0.7) return to70;
+      if (probability >= 0.5) return to50;
+      return to20;
+    };
+
+    return { to20, to50, to70, to90, getLimit };
+  }, [salesCyclePlanRules]);
+
+  const overdueOpportunities = useMemo(() => {
+    const today = new Date();
+    const openOpportunities = baseFilteredSalespipeRows.filter((row) => {
+      if (row.source !== 'salespipe') return false;
+      if (!row.opportunityId) return false;
+      if (row.stageKey === 'sql' || row.stageKey === 'close_won' || row.stageKey === 'close_lost') return false;
+      if (!row.filterDate) return false;
+      return true;
+    });
+
+    return openOpportunities
+      .map((row) => {
+        const startDate = new Date(row.filterDate as string);
+        if (Number.isNaN(startDate.getTime())) return null;
+        const ageDays = Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+        const limitDays = overdueCloseDaysByProbability.getLimit(row.probability);
+        const overdueDays = ageDays - limitDays;
+        if (overdueDays <= 0) return null;
+        return { row, ageDays, limitDays, overdueDays };
+      })
+      .filter((entry): entry is { row: PipelineRow; ageDays: number; limitDays: number; overdueDays: number } => !!entry)
+      .sort((a, b) => b.overdueDays - a.overdueDays || b.row.arr - a.row.arr);
+  }, [baseFilteredSalespipeRows, overdueCloseDaysByProbability]);
+
+  const salespipeMainTableMinWidth = useMemo(
+    () => salespipeMainColWidths.reduce((sum, width) => sum + width, 0),
+    [salespipeMainColWidths]
+  );
+
+  const startResizeSalespipeColumn = (index: number, event: any) => {
+    event.preventDefault();
+    event.stopPropagation();
+    resizingSalespipeColRef.current = {
+      index,
+      startX: event.clientX,
+      startWidth: salespipeMainColWidths[index] ?? SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT[index] ?? 120,
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
 
   const applySalespipeDateFilter = () => {
     setSalespipeDateFrom(salespipeDateFromInput);
     setSalespipeDateTo(salespipeDateToInput);
+    const parsedRelative = parseInt(salespipeRelativeDaysInput, 10);
+    setSalespipeRelativeDays(Number.isFinite(parsedRelative) ? parsedRelative : null);
   };
 
   const resetSalespipeDateFilter = () => {
@@ -939,6 +1608,39 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     setSalespipeDateToInput('');
     setSalespipeDateFrom('');
     setSalespipeDateTo('');
+    setSalespipeRelativeDaysInput('none');
+    setSalespipeRelativeDays(null);
+  };
+
+  const applySalespipeQuickPreset = (preset: 'today' | 'this_week' | 'this_month' | 'ytd') => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const end = new Date(today);
+    let start = new Date(today);
+
+    if (preset === 'this_week') {
+      const day = today.getDay();
+      const diffToMonday = day === 0 ? 6 : day - 1;
+      start.setDate(today.getDate() - diffToMonday);
+    } else if (preset === 'this_month') {
+      start = new Date(today.getFullYear(), today.getMonth(), 1);
+    } else if (preset === 'ytd') {
+      if (selectedYear === currentYear) {
+        start = new Date(currentYear, 0, 1);
+      } else {
+        start = new Date(selectedYear, 0, 1);
+        end.setFullYear(selectedYear, 11, 31);
+      }
+    }
+
+    const startValue = formatDateForInput(start);
+    const endValue = formatDateForInput(end);
+    setSalespipeDateFromInput(startValue);
+    setSalespipeDateToInput(endValue);
+    setSalespipeDateFrom(startValue);
+    setSalespipeDateTo(endValue);
+    setSalespipeRelativeDaysInput('none');
+    setSalespipeRelativeDays(null);
   };
 
   const loading = usersLoading || dataLoading || planzahlenLoading || churnLoading;
@@ -957,7 +1659,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   }
 
   return (
-    <main className="max-w-7xl mx-auto px-4 py-8">
+    <main className={`mx-auto px-4 py-8 ${reportType === 'salespipe' ? 'max-w-[1800px]' : 'max-w-7xl'}`}>
       {/* Title & Controls */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>
@@ -995,7 +1697,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       {/* Report Type Tabs */}
       <div className="flex gap-2 mb-6">
         {[
-          { id: 'trend', label: t('dlt.reports.trendAnalysis'), icon: '📊' },
           { id: 'forecast', label: t('dlt.reports.forecast'), icon: '🔮' },
           { id: 'ytd', label: t('dlt.reports.ytdSummary'), icon: '📋' },
           { id: 'salespipe', label: 'New Sales Pipe', icon: '🧭' }
@@ -1017,158 +1718,38 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
 
       {/* Export Container */}
       <div ref={exportRef}>
-        {/* Trend Analysis */}
-        {reportType === 'trend' && (
-          <div className="space-y-6">
-            {/* Cumulative Subs ARR Chart */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h3 className="text-lg font-semibold text-gray-800 mb-4">Kummulierter Subs ARR</h3>
-              <ResponsiveContainer width="100%" height={350}>
-                <AreaChart data={monthlyData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis tickFormatter={(val) => `${(val / 1000000).toFixed(1)}M`} />
-                  <Tooltip 
-                    formatter={(value: number) => formatCurrency(value)}
-                    labelFormatter={(label) => `${label} ${selectedYear}`}
-                  />
-                  <Legend />
-                  <Area 
-                    type="monotone" 
-                    dataKey="cumSubsARR" 
-                    name="Subs ARR IST"
-                    stroke="#10B981" 
-                    fill="#10B98133"
-                    strokeWidth={2}
-                  />
-                  <Area 
-                    type="monotone" 
-                    dataKey="cumSubsTarget" 
-                    name="Subs ARR Ziel"
-                    stroke="#6B7280" 
-                    fill="#6B728033"
-                    strokeWidth={2}
-                    strokeDasharray="5 5"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Cumulative Pay ARR Chart */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h3 className="text-lg font-semibold text-gray-800 mb-4">Kummulierter Pay ARR</h3>
-              <ResponsiveContainer width="100%" height={350}>
-                <AreaChart data={monthlyData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis tickFormatter={(val) => `${(val / 1000000).toFixed(1)}M`} />
-                  <Tooltip 
-                    formatter={(value: number) => formatCurrency(value)}
-                    labelFormatter={(label) => `${label} ${selectedYear}`}
-                  />
-                  <Legend />
-                  <Area 
-                    type="monotone" 
-                    dataKey="cumPayARR" 
-                    name="Pay ARR IST"
-                    stroke="#F97316" 
-                    fill="#F9731633"
-                    strokeWidth={2}
-                  />
-                  <Area 
-                    type="monotone" 
-                    dataKey="cumPayTarget" 
-                    name="Pay ARR Ziel"
-                    stroke="#6B7280" 
-                    fill="#6B728033"
-                    strokeWidth={2}
-                    strokeDasharray="5 5"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Cumulative Total ARR Chart */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h3 className="text-lg font-semibold text-gray-800 mb-4">Kummulierter Gesamt ARR</h3>
-              <ResponsiveContainer width="100%" height={350}>
-                <AreaChart data={monthlyData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis tickFormatter={(val) => `${(val / 1000000).toFixed(1)}M`} />
-                  <Tooltip 
-                    formatter={(value: number) => formatCurrency(value)}
-                    labelFormatter={(label) => `${label} ${selectedYear}`}
-                  />
-                  <Legend />
-                  <Area 
-                    type="monotone" 
-                    dataKey="cumTotalARR" 
-                    name="Gesamt ARR IST"
-                    stroke="#3B82F6" 
-                    fill="#3B82F633"
-                    strokeWidth={2}
-                  />
-                  <Area 
-                    type="monotone" 
-                    dataKey="cumTotalTarget" 
-                    name="Gesamt ARR Ziel"
-                    stroke="#6B7280" 
-                    fill="#6B728033"
-                    strokeWidth={2}
-                    strokeDasharray="5 5"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-
-            {/* Monthly Comparison */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h3 className="text-lg font-semibold text-gray-800 mb-4">{t('dlt.reports.monthlyARR')}</h3>
-              <ResponsiveContainer width="100%" height={300}>
-                <ComposedChart data={monthlyData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
-                  <YAxis tickFormatter={(val) => `${(val / 1000).toFixed(0)}k`} />
-                  <Tooltip formatter={(value: number) => formatCurrency(value)} />
-                  <Legend />
-                  <Bar dataKey="subsARR" name={t('dlt.kpi.subsARR')} fill="#3B82F6" />
-                  <Line type="monotone" dataKey="subsTarget" name={t('dlt.kpi.target')} stroke="#EF4444" strokeWidth={2} dot={false} />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        )}
-
         {/* Forecast */}
         {reportType === 'forecast' && (
           <div className="space-y-6">
             <div className="bg-white rounded-xl shadow-sm p-6">
-              <h3 className="text-lg font-semibold text-gray-800 mb-4">{t('dlt.reports.arrForecast')}</h3>
+              <h3 className="text-lg font-semibold text-gray-800 mb-4">NET ARR Forecast (Subs + Pay - Churn)</h3>
               <ResponsiveContainer width="100%" height={400}>
                 <ComposedChart data={forecastData}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="name" />
                   <YAxis tickFormatter={(val) => `${(val / 1000).toFixed(0)}k`} />
-                  <Tooltip formatter={(value: number) => formatCurrency(value)} />
+                  <Tooltip
+                    formatter={(value: number, name: string) => [formatCurrency(value), name]}
+                    labelFormatter={(label) => `${label} ${selectedYear}`}
+                  />
                   <Legend />
                   <Bar 
-                    dataKey="subsARR" 
-                    name={t('dlt.reports.actualARR')}
+                    dataKey="netActual" 
+                    name="Ist NET ARR"
                     fill="#10B981" 
                   />
                   <Line 
                     type="monotone" 
-                    dataKey="forecast" 
-                    name={t('dlt.reports.forecast')}
+                    dataKey="netForecast" 
+                    name="Forecast NET ARR"
                     stroke="#F59E0B" 
                     strokeWidth={2}
                     strokeDasharray="5 5"
                   />
                   <Line 
                     type="monotone" 
-                    dataKey="subsTarget" 
-                    name={t('dlt.kpi.target')}
+                    dataKey="netTarget" 
+                    name="Goal NET ARR"
                     stroke="#EF4444" 
                     strokeWidth={2}
                   />
@@ -1176,14 +1757,37 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               </ResponsiveContainer>
             </div>
 
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="bg-white rounded-lg shadow-sm p-4 border border-green-200">
+                <div className="text-xs text-gray-500">Forecast Summe Subs ARR</div>
+                <div className="text-xl font-bold text-green-700">{formatCurrency(forecastSummary.subs)}</div>
+                <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.subs)}</div>
+                <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.subs * 100).toFixed(1)}% erreicht</div>
+              </div>
+              <div className="bg-white rounded-lg shadow-sm p-4 border border-orange-200">
+                <div className="text-xs text-gray-500">Forecast Summe Pay ARR</div>
+                <div className="text-xl font-bold text-orange-700">{formatCurrency(forecastSummary.pay)}</div>
+                <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.pay)}</div>
+                <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.pay * 100).toFixed(1)}% erreicht</div>
+              </div>
+              <div className="bg-white rounded-lg shadow-sm p-4 border border-blue-200">
+                <div className="text-xs text-gray-500">Forecast Summe NET ARR</div>
+                <div className="text-xl font-bold text-blue-700">{formatCurrency(forecastSummary.net)}</div>
+                <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.net)}</div>
+                <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.net * 100).toFixed(1)}% erreicht</div>
+              </div>
+            </div>
+
             {/* Forecast Info */}
             <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-6">
               <div className="flex items-start gap-3">
                 <span className="text-2xl">🔮</span>
                 <div>
-                  <h4 className="font-semibold text-yellow-800 mb-1">{t('dlt.reports.forecastNote')}</h4>
+                  <h4 className="font-semibold text-yellow-800 mb-1">Forecast-Logik (3 Stufen)</h4>
                   <p className="text-sm text-yellow-700">
-                    {t('dlt.reports.forecastDescription')}
+                    1) Ist-Monate übernehmen vorhandene Werte für Subs, Pay und NET ARR. 2) Für heute bis +70 Tage wird
+                    Weighted ARR aus der New Sales Pipe in Forecast-Monate eingesteuert. 3) Nur verbleibende Monate
+                    werden per linearer Heuristik ergänzt.
                   </p>
                 </div>
               </div>
@@ -1197,7 +1801,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h3 className="text-lg font-semibold text-gray-800">New Sales Pipe</h3>
               <p className="text-sm text-gray-500 mt-1">
-                Kombinierte Pipeline aus Salespipe-Import und DACH Sign-ups (Match über OAK ID).
+                Kombinierte Journey aus Leads-Import, Sales-Import und Sign-up/Go-Live-Matches über OAK ID.
               </p>
             </div>
 
@@ -1207,11 +1811,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 md:gap-4">
-                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Opportunities</span>
-                    <p className="text-lg md:text-2xl font-bold text-gray-800">{salespipeKpis.totalRows}</p>
-                  </div>
+                <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 md:gap-4">
                   <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
                     <span className="text-xs text-gray-500">Open Pipeline #</span>
                     <p className="text-lg md:text-2xl font-bold text-indigo-700">{salespipeKpis.openRows}</p>
@@ -1225,12 +1825,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                     <p className="text-lg md:text-2xl font-bold text-emerald-700">{formatCurrency(salespipeKpis.weightedArr)}</p>
                   </div>
                   <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Matched Sign-ups</span>
-                    <p className="text-lg md:text-2xl font-bold text-violet-700">{salespipeKpis.matchedSignups}</p>
+                    <span className="text-xs text-gray-500">Sign-ups</span>
+                    <p className="text-lg md:text-2xl font-bold text-cyan-700">{salespipeKpis.signupsCount}</p>
                   </div>
                   <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Close Won</span>
-                    <p className="text-lg md:text-2xl font-bold text-emerald-700">{salespipeKpis.wonCount}</p>
+                    <span className="text-xs text-gray-500">Go-Live</span>
+                    <p className="text-lg md:text-2xl font-bold text-teal-700">{salespipeKpis.goLiveCount}</p>
                   </div>
                 </div>
 
@@ -1245,14 +1845,25 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                         className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none md:max-w-md"
                       />
                       <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-500">Quelle</span>
+                        <select
+                          value={salespipeSourceFilter}
+                          onChange={(e) => setSalespipeSourceFilter(e.target.value as PipelineSourceFilter)}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                        >
+                          <option value="all">Alle Quellen</option>
+                          <option value="salespipe2_only">Nur SalesImport2</option>
+                        </select>
+                      </div>
+                      <div className="flex items-center gap-2">
                         <span className="text-xs text-gray-500">Stage</span>
                         <select
                           value={salespipeStageFilter}
-                          onChange={(e) => setSalespipeStageFilter(e.target.value as SalespipeStageKey | 'all')}
+                          onChange={(e) => setSalespipeStageFilter(e.target.value as PipelineStageKey | 'all')}
                           className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
                         >
                           <option value="all">Alle</option>
-                          {SALESPIPE_STAGE_CONFIG.map((stage) => (
+                          {PIPELINE_STAGE_CONFIG_VISIBLE.map((stage) => (
                             <option key={stage.key} value={stage.key}>{stage.label}</option>
                           ))}
                         </select>
@@ -1292,15 +1903,74 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                       </div>
                     </div>
 
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                      <span className="text-xs text-gray-500 md:w-28">Relativ ab heute</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={salespipeRelativeDaysInput}
+                          onChange={(e) => setSalespipeRelativeDaysInput(e.target.value)}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                        >
+                          <option value="none">Kein relativer Filter</option>
+                          <option value="7">Letzte 7 Tage</option>
+                          <option value="30">Letzte 30 Tage</option>
+                          <option value="60">Letzte 60 Tage</option>
+                          <option value="90">Letzte 90 Tage</option>
+                          <option value="180">Letzte 180 Tage</option>
+                        </select>
+                        <span className="text-xs text-gray-400">mit „Anwenden“ aktivieren (optional zusätzlich zum Zeitraum)</span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                      <span className="text-xs text-gray-500 md:w-28">Schnellfilter</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => applySalespipeQuickPreset('today')}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        >
+                          Heute
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applySalespipeQuickPreset('this_week')}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        >
+                          Diese Woche
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applySalespipeQuickPreset('this_month')}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        >
+                          Dieser Monat
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => applySalespipeQuickPreset('ytd')}
+                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                        >
+                          YTD
+                        </button>
+                      </div>
+                    </div>
+
                     <p className="text-xs text-gray-500">
-                      Zeitraum: {salespipeDateFrom || salespipeDateTo ? `${salespipeDateFrom || '...'} bis ${salespipeDateTo || '...'}` : `gesamtes Jahr ${selectedYear}`}{' '}
-                      (Filterdatum = Close Date, fallback Created Date)
+                      Zeitraum:{' '}
+                      {salespipeDateFrom || salespipeDateTo
+                        ? `${salespipeDateFrom || '...'} bis ${salespipeDateTo || '...'}`
+                        : `gesamtes Jahr ${selectedYear}`}
+                      {' · '}
+                      Relativ:{' '}
+                      {salespipeRelativeDays !== null ? `letzte ${salespipeRelativeDays} Tage (ab heute)` : 'aus'}
+                      {' '} (Filterdatum je Stage aus Importdatum/Close Date/Signup Date)
                     </p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
-                  {SALESPIPE_STAGE_CONFIG.map((stage) => (
+                  {PIPELINE_STAGE_CONFIG_VISIBLE.map((stage) => (
                     <div key={stage.key} className={`rounded-lg border p-3 ${stage.bg}`}>
                       <div className={`text-xs font-medium ${stage.color}`}>{stage.label}</div>
                       <div className="text-lg font-bold text-gray-800">{salespipeStageSummary[stage.key].count}</div>
@@ -1309,64 +1979,199 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                   ))}
                 </div>
 
-                <div className="bg-white rounded-xl shadow-sm overflow-x-auto">
-                  <table className="w-full text-sm">
+                <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-semibold text-gray-700">Probability Stages (Open Pipeline)</h4>
+                    <span className="text-xs text-gray-500">aus gemergten Daten, inkl. SalesImport2</span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+                    {probabilityBuckets.map((bucket) => (
+                      <div key={bucket.key} className="rounded-lg border border-gray-200 p-3 bg-gray-50">
+                        <div className="text-xs font-medium text-gray-600">{bucket.label}</div>
+                        <div className="text-lg font-bold text-gray-800">{bucket.count}</div>
+                        <div className="text-xs text-gray-500">{formatCurrency(bucket.arr)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ overflowX: 'auto' }} className="bg-white rounded-xl shadow-sm pb-2">
+                  <table style={{ minWidth: salespipeMainTableMinWidth }} className="text-xs table-fixed">
+                    <colgroup>
+                      {salespipeMainColWidths.map((width, idx) => (
+                        <col key={`salespipe-col-${idx}`} style={{ width }} />
+                      ))}
+                    </colgroup>
                     <thead className="bg-gray-50">
                       <tr>
-                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Opportunity</th>
-                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Stage</th>
-                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Owner</th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-600">Estimated ARR</th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-600">Probability</th>
-                        <th className="px-3 py-2 text-right font-semibold text-gray-600">Weighted ARR</th>
-                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Matched Signup</th>
-                        <th className="px-3 py-2 text-left font-semibold text-gray-600">Close Date</th>
+                        {[
+                          { label: 'Datensatz', align: 'text-left' },
+                          { label: 'Stage', align: 'text-left' },
+                          { label: 'Owner', align: 'text-left' },
+                          { label: 'Leadsource', align: 'text-left' },
+                          { label: 'ARR', align: 'text-right' },
+                          { label: 'Probability', align: 'text-right' },
+                          { label: 'Weighted ARR', align: 'text-right' },
+                          { label: 'Match', align: 'text-left' },
+                          { label: 'Schlusstermin', align: 'text-left' },
+                          { label: 'Lead erstellt am', align: 'text-left' },
+                          { label: 'Tage bis Schlusstermin', align: 'text-right' },
+                        ].map((column, index) => (
+                          <th
+                            key={column.label}
+                            className={`relative px-2 py-2 font-semibold text-gray-600 ${column.align}`}
+                          >
+                            {column.label}
+                            <span
+                              onMouseDown={(event) => startResizeSalespipeColumn(index, event)}
+                              className="absolute top-0 right-0 h-full w-2 cursor-col-resize hover:bg-indigo-100"
+                              title="Spalte ziehen zum Anpassen"
+                            />
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
                       {filteredSalespipeRows.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="px-3 py-8 text-center text-gray-500">
+                          <td colSpan={11} className="px-2 py-8 text-center text-gray-500">
                             Keine Pipeline-Daten für die aktuelle Auswahl.
                           </td>
                         </tr>
                       ) : (
                         filteredSalespipeRows
                           .slice()
-                          .sort((a, b) => b.estimatedArr - a.estimatedArr)
+                          .sort((a, b) => b.arr - a.arr)
                           .map((row) => {
-                            const stageCfg = SALESPIPE_STAGE_CONFIG.find((cfg) => cfg.key === row.stageKey) || SALESPIPE_STAGE_CONFIG[7];
+                            const stageCfg = PIPELINE_STAGE_CONFIG.find((cfg) => cfg.key === row.stageKey) || PIPELINE_STAGE_CONFIG[0];
+                            const leadToCloseDays = calculateDaysBetween(row.leadCreatedDate, row.closeDate);
                             return (
                               <tr key={row.id} className="border-b last:border-b-0">
-                                <td className="px-3 py-2">
-                                  <div className="font-medium text-gray-800">{row.opportunity_name}</div>
-                                  <div className="text-xs text-gray-500">OAK: {row.oak_id ?? '-'}</div>
+                                <td className="px-2 py-1.5">
+                                  <div className="font-medium text-gray-800">
+                                    {row.opportunityId ? (
+                                      <a
+                                        href={buildSalesforceOpportunityUrl(row.opportunityId) || '#'}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-indigo-700 hover:text-indigo-900 underline"
+                                      >
+                                        {row.name}
+                                      </a>
+                                    ) : (
+                                      row.name
+                                    )}
+                                  </div>
+                                  <div className="text-xs text-gray-500">OAK: {row.oakId ?? '-'}</div>
                                 </td>
-                                <td className="px-3 py-2">
+                                <td className="px-2 py-1.5">
                                   <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCfg.bg} ${stageCfg.color}`}>
                                     {stageCfg.label}
                                   </span>
                                 </td>
-                                <td className="px-3 py-2 text-gray-700">{row.opportunity_owner || '-'}</td>
-                                <td className="px-3 py-2 text-right text-blue-700">{formatCurrency(row.estimatedArr)}</td>
-                                <td className="px-3 py-2 text-right text-gray-700">{(row.probability * 100).toFixed(0)}%</td>
-                                <td className="px-3 py-2 text-right text-emerald-700">{formatCurrency(row.weightedArr)}</td>
-                                <td className="px-3 py-2 text-gray-700">
-                                  {row.matchedSignup ? (
-                                    <div>
-                                      <div className="font-medium">{row.matchedSignup.account_name}</div>
-                                      <div className="text-xs text-gray-500">{row.matchedSignup.signup_package || '-'}</div>
-                                    </div>
-                                  ) : (
-                                    '-'
-                                  )}
+                                <td className="px-2 py-1.5 text-gray-700">{row.owner || '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{row.leadSource || '-'}</td>
+                                <td className="px-2 py-1.5 text-right text-blue-700">{formatCurrency(row.arr)}</td>
+                                <td className="px-2 py-1.5 text-right text-gray-700">
+                                  {row.probability === null ? '-' : `${(row.probability * 100).toFixed(0)}%`}
                                 </td>
-                                <td className="px-3 py-2 text-gray-700">
-                                  {row.close_date ? new Date(row.close_date).toLocaleDateString('de-DE') : '-'}
+                                <td className="px-2 py-1.5 text-right text-emerald-700">{formatCurrency(row.weightedArr)}</td>
+                                <td className="px-2 py-1.5 text-gray-700">
+                                  {row.matchedSignupName || '-'}
+                                </td>
+                                <td className="px-2 py-1.5 text-gray-700">
+                                  {row.closeDate ? new Date(row.closeDate).toLocaleDateString('de-DE') : '-'}
+                                </td>
+                                <td className="px-2 py-1.5 text-gray-700">
+                                  {row.leadCreatedDate ? new Date(row.leadCreatedDate).toLocaleDateString('de-DE') : '-'}
+                                </td>
+                                <td className="px-2 py-1.5 text-right text-gray-700">
+                                  {leadToCloseDays === null ? '-' : leadToCloseDays}
                                 </td>
                               </tr>
                             );
                           })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div style={{ overflowX: 'auto', width: '100%' }} className="bg-white rounded-xl shadow-sm border border-rose-200 pb-2">
+                  <div className="px-4 py-3 border-b border-rose-200 bg-rose-50 flex items-center justify-between">
+                    <div>
+                      <h4 className="text-sm font-semibold text-rose-800">Überfällige Opportunities (nach Probability-Stage-Regeln)</h4>
+                      <p className="text-xs text-rose-700">
+                        Nur offene Opportunities (ohne SQL). Direktlink öffnet den Salesforce-Datensatz.
+                      </p>
+                    </div>
+                    <span className="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-800">
+                      {overdueOpportunities.length} überfällig
+                    </span>
+                  </div>
+                  <table style={{ minWidth: 1120 }} className="w-full text-xs">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-2 py-2 text-left font-semibold text-gray-600">Opportunity</th>
+                        <th className="px-2 py-2 text-left font-semibold text-gray-600">Stage</th>
+                        <th className="px-2 py-2 text-right font-semibold text-gray-600">Probability</th>
+                        <th className="px-2 py-2 text-right font-semibold text-gray-600">Alter (Tage)</th>
+                        <th className="px-2 py-2 text-right font-semibold text-gray-600">Max bis Close</th>
+                        <th className="px-2 py-2 text-right font-semibold text-gray-600">Überfällig</th>
+                        <th className="px-2 py-2 text-right font-semibold text-gray-600">ARR</th>
+                        <th className="px-2 py-2 text-left font-semibold text-gray-600">Owner</th>
+                        <th className="px-2 py-2 text-left font-semibold text-gray-600">Schlusstermin</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {overdueOpportunities.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="px-2 py-8 text-center text-gray-500">
+                            Keine überfälligen Opportunities für die aktuelle Auswahl.
+                          </td>
+                        </tr>
+                      ) : (
+                        overdueOpportunities.map((entry) => {
+                          const stageCfg =
+                            PIPELINE_STAGE_CONFIG.find((cfg) => cfg.key === entry.row.stageKey) || PIPELINE_STAGE_CONFIG[0];
+                          const sfUrl = buildSalesforceOpportunityUrl(entry.row.opportunityId);
+                          return (
+                            <tr key={`overdue-${entry.row.id}`} className="border-b last:border-b-0">
+                              <td className="px-2 py-1.5">
+                                <div className="font-medium text-gray-800">
+                                  {sfUrl ? (
+                                    <a
+                                      href={sfUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-indigo-700 hover:text-indigo-900 underline"
+                                    >
+                                      {entry.row.name}
+                                    </a>
+                                  ) : (
+                                    entry.row.name
+                                  )}
+                                </div>
+                                <div className="text-xs text-gray-500">ID: {entry.row.opportunityId || '-'}</div>
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCfg.bg} ${stageCfg.color}`}>
+                                  {stageCfg.label}
+                                </span>
+                              </td>
+                              <td className="px-2 py-1.5 text-right text-gray-700">
+                                {entry.row.probability === null ? '-' : `${(entry.row.probability * 100).toFixed(0)}%`}
+                              </td>
+                              <td className="px-2 py-1.5 text-right text-gray-700">{entry.ageDays}</td>
+                              <td className="px-2 py-1.5 text-right text-gray-700">{entry.limitDays}</td>
+                              <td className="px-2 py-1.5 text-right font-semibold text-rose-700">{entry.overdueDays}</td>
+                              <td className="px-2 py-1.5 text-right text-blue-700">{formatCurrency(entry.row.arr)}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{entry.row.owner || '-'}</td>
+                              <td className="px-2 py-1.5 text-gray-700">
+                                {entry.row.closeDate ? new Date(entry.row.closeDate).toLocaleDateString('de-DE') : '-'}
+                              </td>
+                            </tr>
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
@@ -1379,17 +2184,28 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         {/* YTD Summary – wie Jahresübersicht, basierend auf zentralen DLT-Settings (ohne Provision) */}
         {reportType === 'ytd' && (
           <div className="space-y-6">
-            {/*
-              Bill-KPIs basieren auf den aktuell ausgewählten Monaten.
-              Monthly Pay Bill = Summe Pay ARR / Summe Go-Lives (über alle ausgewählten Monate).
-            */}
-            {(() => {
-              const monthlySubsBill = selectedBillMetrics?.subsBill ?? 0;
-              const monthlyPayBill = selectedBillMetrics?.payBill ?? 0;
-              const monthlyAllInBill = selectedBillMetrics?.allInBill ?? 0;
-              const hasBillMetrics = !!selectedBillMetrics;
-              return (
-                <>
+            <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setYtdKpiSectionExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition"
+              >
+                <span className="text-sm font-semibold text-gray-700">YTD KPI-Bereich</span>
+                <span className="text-sm text-gray-500">{ytdKpiSectionExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
+              </button>
+              {ytdKpiSectionExpanded && (
+                <div className="p-4 pt-3 border-t border-gray-200 space-y-4">
+                  {/*
+                    Bill-KPIs basieren auf den aktuell ausgewählten Monaten.
+                    Monthly Pay Bill = Summe Pay ARR / Summe Go-Lives (über alle ausgewählten Monate).
+                  */}
+                  {(() => {
+                    const monthlySubsBill = selectedBillMetrics?.subsBill ?? 0;
+                    const monthlyPayBill = selectedBillMetrics?.payBill ?? 0;
+                    const monthlyAllInBill = selectedBillMetrics?.allInBill ?? 0;
+                    const hasBillMetrics = !!selectedBillMetrics;
+                    return (
+                      <>
             {/* Reihe 1: Basis-KPIs (wie Jahresübersicht) */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 md:gap-4">
               <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4">
@@ -1544,9 +2360,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </p>
               </div>
             </div>
-                </>
-              );
-            })()}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
 
             <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
               <button
@@ -1573,139 +2392,177 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
             </div>
 
             {/* Monatliche Übersicht (ohne Provision) */}
-            <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h3 className="text-lg font-semibold text-gray-800">{t('yearOverview.monthlyOverview')}</h3>
-                <p className="text-sm text-gray-500 mt-1">💡 {t('yearOverview.clickForDetails')}</p>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('dlt.reports.month')}</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Go-Lives</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Terminals</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-green-600 uppercase">Subs Plan</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-green-600 uppercase">Subs IST</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-orange-600 uppercase">Pay Plan</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-orange-600 uppercase">Pay IST</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-blue-600 uppercase">Gesamt ARR Plan</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-blue-700 uppercase">Gesamt ARR Ist</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {ytdSelectedMonthlyResult.map((r) => {
-                      const subsPct = r.subs_target > 0 ? r.subs_actual / r.subs_target : 0;
-                      const payPct = r.pay_target > 0 ? r.pay_actual / r.pay_target : 0;
-                      const totalPlan = r.subs_target + r.pay_target;
-                      const totalActual = r.subs_actual + r.pay_actual;
-                      const totalPct = totalPlan > 0 ? totalActual / totalPlan : 0;
-                      const isPast = (r.month - 1) <= currentMonth;
-                      return (
-                        <tr
-                          key={r.month}
-                          className={`transition ${isPast ? 'cursor-pointer hover:bg-blue-50' : 'text-gray-400 cursor-pointer hover:bg-gray-50'}`}
-                          onClick={() => setSelectedMonthDetail(r.month)}
-                        >
-                          <td className="px-4 py-3 font-medium">{MONTH_NAMES[r.month - 1]}</td>
-                          <td className="px-4 py-3 text-right">{r.go_lives_count}</td>
-                          <td className="px-4 py-3 text-right">{r.terminals_count}</td>
-                          <td className="px-4 py-3 text-right text-green-600">{formatCurrency(r.subs_target)}</td>
-                          <td className="px-4 py-3 text-right text-green-700 font-medium">{formatCurrency(r.subs_actual)}</td>
-                          <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(subsPct)}`}>{formatPercent(subsPct)}</td>
-                          <td className="px-4 py-3 text-right text-orange-600">{formatCurrency(r.pay_target)}</td>
-                          <td className="px-4 py-3 text-right text-orange-700 font-medium">{formatCurrency(r.pay_actual)}</td>
-                          <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(payPct)}`}>{formatPercent(payPct)}</td>
-                          <td className="px-4 py-3 text-right text-blue-600">{formatCurrency(totalPlan)}</td>
-                          <td className="px-4 py-3 text-right text-blue-700 font-medium">{formatCurrency(totalActual)}</td>
-                          <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(totalPct)}`}>{formatPercent(totalPct)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  <tfoot className="bg-gray-50 font-semibold">
-                    <tr>
-                      <td className="px-4 py-3">{t('dlt.reports.total')}</td>
-                      <td className="px-4 py-3 text-right">{ytdSelectedTotals.totalGoLives}</td>
-                      <td className="px-4 py-3 text-right">{ytdSelectedTotals.totalTerminals}</td>
-                      <td className="px-4 py-3 text-right text-green-600">{formatCurrency(ytdSelectedTotals.totalSubsTarget)}</td>
-                      <td className="px-4 py-3 text-right text-green-700">{formatCurrency(ytdSelectedTotals.totalSubsARR)}</td>
-                      <td className={`px-4 py-3 text-right ${getAchievementColor(ytdSelectedTotals.totalSubsTarget > 0 ? ytdSelectedTotals.totalSubsARR / ytdSelectedTotals.totalSubsTarget : 0)}`}>
-                        {formatPercent(ytdSelectedTotals.totalSubsTarget > 0 ? ytdSelectedTotals.totalSubsARR / ytdSelectedTotals.totalSubsTarget : 0)}
-                      </td>
-                      <td className="px-4 py-3 text-right text-orange-600">{formatCurrency(ytdSelectedTotals.totalPayTarget)}</td>
-                      <td className="px-4 py-3 text-right text-orange-700">{formatCurrency(ytdSelectedTotals.totalPayARR)}</td>
-                      <td className={`px-4 py-3 text-right ${getAchievementColor(ytdSelectedTotals.totalPayTarget > 0 ? ytdSelectedTotals.totalPayARR / ytdSelectedTotals.totalPayTarget : 0)}`}>
-                        {formatPercent(ytdSelectedTotals.totalPayTarget > 0 ? ytdSelectedTotals.totalPayARR / ytdSelectedTotals.totalPayTarget : 0)}
-                      </td>
-                      <td className="px-4 py-3 text-right text-blue-600">{formatCurrency(ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget)}</td>
-                      <td className="px-4 py-3 text-right text-blue-700">{formatCurrency(ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR)}</td>
-                      <td className={`px-4 py-3 text-right ${getAchievementColor((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) > 0 ? (ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) / (ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) : 0)}`}>
-                        {formatPercent((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) > 0 ? (ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) / (ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) : 0)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
+            <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setYtdMonthlyOverviewExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-gray-50 transition"
+              >
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">{t('yearOverview.monthlyOverview')}</h3>
+                  <p className="text-sm text-gray-500 mt-1">💡 {t('yearOverview.clickForDetails')}</p>
+                </div>
+                <span className="text-sm text-gray-500">{ytdMonthlyOverviewExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
+              </button>
+              {ytdMonthlyOverviewExpanded && (
+                <div className="overflow-x-auto border-t border-gray-200">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('dlt.reports.month')}</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Go-Lives</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Terminals</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-green-600 uppercase">Subs Plan</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-green-600 uppercase">Subs IST</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-orange-600 uppercase">Pay Plan</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-orange-600 uppercase">Pay IST</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-blue-600 uppercase">Gesamt ARR Brutto Plan</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-blue-700 uppercase">Gesamt ARR Brutto IST</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-indigo-600 uppercase">Gesamt ARR Netto Plan</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-indigo-700 uppercase">Gesamt ARR Netto IST</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">%</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {ytdSelectedMonthlyResult.map((r) => {
+                        const subsPct = r.subs_target > 0 ? r.subs_actual / r.subs_target : 0;
+                        const payPct = r.pay_target > 0 ? r.pay_actual / r.pay_target : 0;
+                        const totalBruttoPlan = r.subs_target + r.pay_target;
+                        const totalBruttoActual = r.subs_actual + r.pay_actual;
+                        const totalBruttoPct = totalBruttoPlan > 0 ? totalBruttoActual / totalBruttoPlan : 0;
+                        const totalArrLost = monthlyChurnData.find((row) => row.month === r.month)?.totalArrLost || 0;
+                        const monthlyChurnTarget = invoicedChurnTargetArrByMonth[r.month - 1] || 0;
+                        const totalNettoPlan = totalBruttoPlan - monthlyChurnTarget;
+                        const totalNettoActual = totalBruttoActual - totalArrLost;
+                        const totalNettoPct = totalNettoPlan > 0 ? totalNettoActual / totalNettoPlan : 0;
+                        const isPast = (r.month - 1) <= currentMonth;
+                        return (
+                          <tr
+                            key={r.month}
+                            className={`transition ${isPast ? 'cursor-pointer hover:bg-blue-50' : 'text-gray-400 cursor-pointer hover:bg-gray-50'}`}
+                            onClick={() => setSelectedMonthDetail(r.month)}
+                          >
+                            <td className="px-4 py-3 font-medium">{MONTH_NAMES[r.month - 1]}</td>
+                            <td className="px-4 py-3 text-right">{r.go_lives_count}</td>
+                            <td className="px-4 py-3 text-right">{r.terminals_count}</td>
+                            <td className="px-4 py-3 text-right text-green-600">{formatCurrency(r.subs_target)}</td>
+                            <td className="px-4 py-3 text-right text-green-700 font-medium">{formatCurrency(r.subs_actual)}</td>
+                            <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(subsPct)}`}>{formatPercent(subsPct)}</td>
+                            <td className="px-4 py-3 text-right text-orange-600">{formatCurrency(r.pay_target)}</td>
+                            <td className="px-4 py-3 text-right text-orange-700 font-medium">{formatCurrency(r.pay_actual)}</td>
+                            <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(payPct)}`}>{formatPercent(payPct)}</td>
+                            <td className="px-4 py-3 text-right text-blue-600">{formatCurrency(totalBruttoPlan)}</td>
+                            <td className="px-4 py-3 text-right text-blue-700 font-medium">{formatCurrency(totalBruttoActual)}</td>
+                            <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(totalBruttoPct)}`}>{formatPercent(totalBruttoPct)}</td>
+                            <td className="px-4 py-3 text-right text-indigo-600">{formatCurrency(totalNettoPlan)}</td>
+                            <td className="px-4 py-3 text-right text-indigo-700 font-medium">{formatCurrency(totalNettoActual)}</td>
+                            <td className={`px-4 py-3 text-right font-medium ${getAchievementColor(totalNettoPct)}`}>{formatPercent(totalNettoPct)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot className="bg-gray-50 font-semibold">
+                      <tr>
+                        <td className="px-4 py-3">{t('dlt.reports.total')}</td>
+                        <td className="px-4 py-3 text-right">{ytdSelectedTotals.totalGoLives}</td>
+                        <td className="px-4 py-3 text-right">{ytdSelectedTotals.totalTerminals}</td>
+                        <td className="px-4 py-3 text-right text-green-600">{formatCurrency(ytdSelectedTotals.totalSubsTarget)}</td>
+                        <td className="px-4 py-3 text-right text-green-700">{formatCurrency(ytdSelectedTotals.totalSubsARR)}</td>
+                        <td className={`px-4 py-3 text-right ${getAchievementColor(ytdSelectedTotals.totalSubsTarget > 0 ? ytdSelectedTotals.totalSubsARR / ytdSelectedTotals.totalSubsTarget : 0)}`}>
+                          {formatPercent(ytdSelectedTotals.totalSubsTarget > 0 ? ytdSelectedTotals.totalSubsARR / ytdSelectedTotals.totalSubsTarget : 0)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-orange-600">{formatCurrency(ytdSelectedTotals.totalPayTarget)}</td>
+                        <td className="px-4 py-3 text-right text-orange-700">{formatCurrency(ytdSelectedTotals.totalPayARR)}</td>
+                        <td className={`px-4 py-3 text-right ${getAchievementColor(ytdSelectedTotals.totalPayTarget > 0 ? ytdSelectedTotals.totalPayARR / ytdSelectedTotals.totalPayTarget : 0)}`}>
+                          {formatPercent(ytdSelectedTotals.totalPayTarget > 0 ? ytdSelectedTotals.totalPayARR / ytdSelectedTotals.totalPayTarget : 0)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-blue-600">{formatCurrency(ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget)}</td>
+                        <td className="px-4 py-3 text-right text-blue-700">{formatCurrency(ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR)}</td>
+                        <td className={`px-4 py-3 text-right ${getAchievementColor((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) > 0 ? (ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) / (ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) : 0)}`}>
+                          {formatPercent((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) > 0 ? (ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) / (ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) : 0)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-indigo-600">
+                          {formatCurrency((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) - selectedInvoicedChurnTargetArr)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-indigo-700">
+                          {formatCurrency((ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) - selectedChurnTotals.totalArrLost)}
+                        </td>
+                        <td className={`px-4 py-3 text-right ${getAchievementColor(((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) - selectedInvoicedChurnTargetArr) > 0 ? ((ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) - selectedChurnTotals.totalArrLost) / ((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) - selectedInvoicedChurnTargetArr) : 0)}`}>
+                          {formatPercent(((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) - selectedInvoicedChurnTargetArr) > 0 ? ((ytdSelectedTotals.totalSubsARR + ytdSelectedTotals.totalPayARR) - selectedChurnTotals.totalArrLost) / ((ytdSelectedTotals.totalSubsTarget + ytdSelectedTotals.totalPayTarget) - selectedInvoicedChurnTargetArr) : 0)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
             </div>
 
-            <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h3 className="text-lg font-semibold text-gray-800">Churn pro Monat</h3>
-                <p className="text-sm text-gray-500 mt-1">
-                  Scheduled und Non-Scheduled Churn im gleichen Monatsraster wie die Go-Live-Übersicht.
-                </p>
-                <p className="text-sm text-gray-500 mt-1">💡 Zeile anklicken für Churn-Details</p>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('dlt.reports.month')}</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled Churns</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled Churn ARR</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">Churns</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">Churn ARR Lost</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Total Churn</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-red-700 uppercase">Total ARR Lost</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {selectedMonthlyChurnData.map((row) => {
-                      const hasData = row.totalCount > 0;
-                      return (
-                        <tr
-                          key={`churn-${row.month}`}
-                          className={`transition cursor-pointer ${hasData ? 'hover:bg-rose-50' : 'text-gray-400 hover:bg-gray-50'}`}
-                          onClick={() => setSelectedChurnMonthDetail(row.month)}
-                        >
-                          <td className="px-4 py-3 font-medium">{MONTH_NAMES[row.month - 1]}</td>
-                          <td className="px-4 py-3 text-right text-amber-700">{row.scheduledCount}</td>
-                          <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(row.scheduledArrLost)}</td>
-                          <td className="px-4 py-3 text-right text-rose-700">{row.nonScheduledCount}</td>
-                          <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(row.nonScheduledArrLost)}</td>
-                          <td className="px-4 py-3 text-right">{row.totalCount}</td>
-                          <td className="px-4 py-3 text-right font-semibold text-red-700">{formatCurrency(row.totalArrLost)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                  <tfoot className="bg-gray-50 font-semibold">
-                    <tr>
-                      <td className="px-4 py-3">{t('dlt.reports.total')}</td>
-                      <td className="px-4 py-3 text-right text-amber-700">{selectedChurnTotals.scheduledCount}</td>
-                      <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(selectedChurnTotals.scheduledArrLost)}</td>
-                      <td className="px-4 py-3 text-right text-rose-700">{selectedChurnTotals.nonScheduledCount}</td>
-                      <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(selectedChurnTotals.nonScheduledArrLost)}</td>
-                      <td className="px-4 py-3 text-right">{selectedChurnTotals.totalCount}</td>
-                      <td className="px-4 py-3 text-right text-red-700">{formatCurrency(selectedChurnTotals.totalArrLost)}</td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
+            <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setYtdChurnOverviewExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between px-6 py-4 text-left hover:bg-gray-50 transition"
+              >
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">Churn pro Monat</h3>
+                  <p className="text-sm text-gray-500 mt-1">
+                    Scheduled und Non-Scheduled Churn im gleichen Monatsraster wie die Go-Live-Übersicht.
+                  </p>
+                  <p className="text-sm text-gray-500 mt-1">💡 Zeile anklicken für Churn-Details</p>
+                </div>
+                <span className="text-sm text-gray-500">{ytdChurnOverviewExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
+              </button>
+              {ytdChurnOverviewExpanded && (
+                <div className="overflow-x-auto border-t border-gray-200">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">{t('dlt.reports.month')}</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled Churns</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-amber-700 uppercase">Scheduled Churn ARR</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">Churns</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-rose-700 uppercase">Churn ARR Lost</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Total Churn</th>
+                        <th className="px-4 py-3 text-right text-xs font-medium text-red-700 uppercase">Total ARR Lost</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {selectedMonthlyChurnData.map((row) => {
+                        const hasData = row.totalCount > 0;
+                        return (
+                          <tr
+                            key={`churn-${row.month}`}
+                            className={`transition cursor-pointer ${hasData ? 'hover:bg-rose-50' : 'text-gray-400 hover:bg-gray-50'}`}
+                            onClick={() => setSelectedChurnMonthDetail(row.month)}
+                          >
+                            <td className="px-4 py-3 font-medium">{MONTH_NAMES[row.month - 1]}</td>
+                            <td className="px-4 py-3 text-right text-amber-700">{row.scheduledCount}</td>
+                            <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(row.scheduledArrLost)}</td>
+                            <td className="px-4 py-3 text-right text-rose-700">{row.nonScheduledCount}</td>
+                            <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(row.nonScheduledArrLost)}</td>
+                            <td className="px-4 py-3 text-right">{row.totalCount}</td>
+                            <td className="px-4 py-3 text-right font-semibold text-red-700">{formatCurrency(row.totalArrLost)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot className="bg-gray-50 font-semibold">
+                      <tr>
+                        <td className="px-4 py-3">{t('dlt.reports.total')}</td>
+                        <td className="px-4 py-3 text-right text-amber-700">{selectedChurnTotals.scheduledCount}</td>
+                        <td className="px-4 py-3 text-right text-amber-700">{formatCurrency(selectedChurnTotals.scheduledArrLost)}</td>
+                        <td className="px-4 py-3 text-right text-rose-700">{selectedChurnTotals.nonScheduledCount}</td>
+                        <td className="px-4 py-3 text-right text-rose-700">{formatCurrency(selectedChurnTotals.nonScheduledArrLost)}</td>
+                        <td className="px-4 py-3 text-right">{selectedChurnTotals.totalCount}</td>
+                        <td className="px-4 py-3 text-right text-red-700">{formatCurrency(selectedChurnTotals.totalArrLost)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
         )}
