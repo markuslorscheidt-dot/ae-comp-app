@@ -8,7 +8,7 @@ import {
   formatPercent,
   getAchievementColor,
   calculateYearSummary,
-  calculateYTDSummary
+  type PayArrReportingOptions
 } from '@/lib/calculations';
 import { 
   calculateBadges, 
@@ -35,6 +35,7 @@ interface LeaderboardProps {
   // Optional: Challenges können von außen übergeben werden (für Demo-Modus)
   challenges?: Challenge[];
   isDemo?: boolean;
+  payArrReportingOptions?: PayArrReportingOptions;
 }
 
 type FilterPeriod = 'month' | 'quarter' | 'ytd' | 'year';
@@ -65,7 +66,8 @@ export default function Leaderboard({
   goLivesMap, 
   onBack,
   challenges: propChallenges,
-  isDemo = false
+  isDemo = false,
+  payArrReportingOptions
 }: LeaderboardProps) {
   const { t } = useLanguage();
   const permissions = getPermissions(currentUser.role);
@@ -175,7 +177,7 @@ export default function Leaderboard({
       const payAchievement = payTarget > 0 ? payActual / payTarget : 0;
 
       // Berechne Provision (vereinfacht für Leaderboard)
-      const summary = calculateYearSummary(filteredGoLives, settings);
+      const summary = calculateYearSummary(filteredGoLives, settings, payArrReportingOptions);
       const totalProvision = summary.total_provision;
 
       // Berechne Badges für diesen User
@@ -239,7 +241,7 @@ export default function Leaderboard({
     });
 
     return entries;
-  }, [users, settingsMap, goLivesMap, allUsersData, filterPeriod, selectedMonth, selectedQuarter, sortField, currentMonth]);
+  }, [users, settingsMap, goLivesMap, allUsersData, filterPeriod, selectedMonth, selectedQuarter, sortField, currentMonth, payArrReportingOptions]);
 
   // Check for new badges for current user
   const currentUserEntry = leaderboardData.find(e => e.user.id === currentUser.id);

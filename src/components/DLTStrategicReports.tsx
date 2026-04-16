@@ -1,14 +1,21 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
-import { User, GoLive, isPlannable, canReceiveGoLives, MONTH_NAMES } from '@/lib/types';
+import { useState, useMemo, useEffect, useCallback } from 'react';
+import { User, GoLive, isPlannable, canReceiveGoLives, MONTH_NAMES, DEFAULT_SETTINGS } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
-import { useAllUsers, useMultiUserData } from '@/lib/hooks';
-import { calculateYearSummary, formatCurrency, formatPercent, getAchievementColor } from '@/lib/calculations';
+import { useAllUsers, useMultiUserData, usePaymarginImportedCohortKeys } from '@/lib/hooks';
+import {
+  calculateYearSummary,
+  formatCurrency,
+  formatPercent,
+  getAchievementColor,
+  getEffectivePayArrForReporting,
+  paymarginCohortKey,
+  type PayArrReportingOptions,
+} from '@/lib/calculations';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area, ComposedChart, Bar } from 'recharts';
 import PDFExportButton from './PDFExportButton';
 import { useRef } from 'react';
-import { PerformanceChart, GoLivesBarChart, PayPerformanceChart } from './TrendCharts';
 import { supabase } from '@/lib/supabase';
 
 /** Form für YTD-Monatsdaten (IST + Plan, wie Jahresübersicht) */
@@ -75,12 +82,14 @@ interface SignupsEventRow {
   signup_package: string | null;
   signup_date: string | null;
   go_live_date: string | null;
+  customer_info_stage: string | null;
 }
 
 interface LeadsEventRow {
   id: string;
   lead_id: string;
   opportunity_id: string | null;
+  opportunity_account: string | null;
   company_account: string;
   lead_source: string | null;
   lead_owner: string | null;
@@ -92,8 +101,16 @@ interface LeadsEventRow {
   opportunity_amount: number | null;
 }
 
+interface LookerLeadsMetricRow {
+  csv_entry_name: string;
+  payload: Record<string, unknown> | null;
+}
+
 type PipelineStageKey =
   | 'sql'
+  | 'not_converted_new'
+  | 'working'
+  | 'converted'
   | 'demo_booked'
   | 'demo_completed'
   | 'sent_quote'
@@ -205,6 +222,9 @@ function parseSalesCyclePlanRules(raw: unknown): SalesCyclePlanRules {
 
 const PIPELINE_STAGE_CONFIG: Array<{ key: PipelineStageKey; label: string; color: string; bg: string }> = [
   { key: 'sql', label: 'SQL', color: 'text-blue-700', bg: 'bg-blue-50' },
+  { key: 'converted', label: 'Converted', color: 'text-fuchsia-700', bg: 'bg-fuchsia-50' },
+  { key: 'not_converted_new', label: 'Not converted', color: 'text-slate-700', bg: 'bg-slate-50' },
+  { key: 'working', label: 'Working', color: 'text-violet-700', bg: 'bg-violet-50' },
   { key: 'demo_booked', label: 'Demo Booked', color: 'text-indigo-700', bg: 'bg-indigo-50' },
   { key: 'demo_completed', label: 'Demo Completed', color: 'text-purple-700', bg: 'bg-purple-50' },
   { key: 'sent_quote', label: 'Sent Quote', color: 'text-amber-700', bg: 'bg-amber-50' },
@@ -214,9 +234,20 @@ const PIPELINE_STAGE_CONFIG: Array<{ key: PipelineStageKey; label: string; color
   { key: 'go_live', label: 'Go-Live', color: 'text-teal-700', bg: 'bg-teal-50' },
 ];
 
-const PIPELINE_STAGE_CONFIG_VISIBLE = PIPELINE_STAGE_CONFIG.filter((stage) => stage.key !== 'close_won');
+const PIPELINE_STAGE_CONFIG_VISIBLE = PIPELINE_STAGE_CONFIG.filter(
+  (stage) => stage.key !== 'signups' && stage.key !== 'go_live'
+);
 
-const ACTIVE_PIPELINE_STAGES: PipelineStageKey[] = ['sql', 'demo_booked', 'demo_completed', 'sent_quote'];
+const ACTIVE_PIPELINE_STAGES: PipelineStageKey[] = [
+  'sql',
+  'not_converted_new',
+  'working',
+  'converted',
+  'demo_booked',
+  'demo_completed',
+  'sent_quote',
+];
+const OPEN_PIPELINE_KPI_STAGES: PipelineStageKey[] = ['demo_booked', 'demo_completed', 'sent_quote'];
 
 const SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT = [280, 110, 120, 130, 90, 90, 110, 140, 120, 120, 130];
 const SALESPIPE_MAIN_COLUMN_MIN_WIDTH = [180, 90, 100, 100, 70, 70, 90, 110, 100, 100, 110];
@@ -235,25 +266,46 @@ function normalizeSalespipeStage(stage: string | null): PipelineStageKey | null 
 function normalizeLeadsStage(
   leadStatus: string | null,
   leadSubStatus: string | null,
-  demoOrQuote: string | null
+  demoOrQuote: string | null,
+  leadId: string | null,
+  opportunityId: string | null,
+  opportunityAccount: string | null
 ): PipelineStageKey | null {
   const status = `${leadStatus || ''} ${leadSubStatus || ''} ${demoOrQuote || ''}`
     .toLowerCase()
     .replace(/[-\s]+/g, ' ')
     .trim();
-  if (!status) return null;
-  if (status.includes('close won') || status.includes('closed won') || status.includes('gewonnen')) return 'close_won';
-  if (status.includes('close lost') || status.includes('closed lost') || status.includes('verloren')) return 'close_lost';
-  if (status.includes('sent quote') || status.includes('quote sent') || status.includes('angebot')) return 'sent_quote';
-  if (status.includes('demo completed') || status.includes('demo done') || status.includes('demo durchgef')) return 'demo_completed';
-  if (status.includes('demo booked') || status.includes('demo vereinbart') || status.includes('demo gebucht')) return 'demo_booked';
+
+  const hasLeadId = normalizeId(leadId) !== null;
+  const hasOpportunityId = normalizeId(opportunityId) !== null;
+  // leads_events hat derzeit keine account_id-Spalte; opportunity_account ist der beste verfügbare Proxy.
+  const hasAccountLink = normalizeId(opportunityAccount) !== null;
+
+  if (hasLeadId && hasOpportunityId && hasAccountLink) return 'converted';
+
+  const isNewOrNotConverted =
+    status === 'new' ||
+    status === 'not converted' ||
+    status.includes('not converted');
+  if (!hasAccountLink && isNewOrNotConverted) return 'not_converted_new';
+
+  const isWorking = status === 'working' || status.includes('working');
+  if (!hasOpportunityId && !hasAccountLink && isWorking) return 'working';
+
+  // Converted-Basis: Lead + Opportunity vorhanden (Account-Link optional, da Feldlage je Import variiert).
+  if (hasLeadId && hasOpportunityId) return 'converted';
+
   if (status.includes('sql') || status.includes('sales qualified')) return 'sql';
-  // Leads ohne klares Stage-Signal zählen als SQL-Basis.
+
+  // Fallback für alle übrigen/unklaren Leads.
   return 'sql';
 }
 
 function getDefaultProbability(stage: PipelineStageKey): number {
   if (stage === 'sql') return 0.2;
+  if (stage === 'not_converted_new') return 0.2;
+  if (stage === 'working') return 0.25;
+  if (stage === 'converted') return 0.35;
   if (stage === 'demo_booked') return 0.35;
   if (stage === 'demo_completed') return 0.5;
   if (stage === 'sent_quote') return 0.7;
@@ -297,6 +349,40 @@ function formatDateForInput(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
+function parseMetricNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/[%,$€\s]/g, '').replace(',', '.');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function readPayloadNumber(payload: Record<string, unknown> | null | undefined, keys: string[]): number | null {
+  if (!payload) return null;
+  for (const key of keys) {
+    if (!(key in payload)) continue;
+    const parsed = parseMetricNumber(payload[key]);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
+function parsePayloadMonthIndex(payload: Record<string, unknown> | null | undefined, keys: string[], selectedYear: number): number | null {
+  if (!payload) return null;
+  for (const key of keys) {
+    const raw = String(payload[key] ?? '').trim();
+    if (!raw) continue;
+    const parsed = new Date(raw.length === 7 ? `${raw}-01` : raw);
+    if (Number.isNaN(parsed.getTime())) continue;
+    if (parsed.getFullYear() !== selectedYear) continue;
+    const idx = parsed.getMonth();
+    if (idx < 0 || idx > 11) continue;
+    return idx;
+  }
+  return null;
+}
+
 export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) {
   const { t } = useLanguage();
   const currentYear = new Date().getFullYear();
@@ -314,10 +400,11 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     []
   );
   const [reportType, setReportType] = useState<'forecast' | 'ytd' | 'salespipe'>('forecast');
+  const [leadToGoLiveForecastPercent, setLeadToGoLiveForecastPercent] = useState(16);
+  const [futureLeadVolumeScenarioMonthlyLeads, setFutureLeadVolumeScenarioMonthlyLeads] = useState(0);
   const [selectedYtdMonths, setSelectedYtdMonths] = useState<number[]>(defaultYtdMonths);
   const [selectedMonthDetail, setSelectedMonthDetail] = useState<number | null>(null);
   const [selectedChurnMonthDetail, setSelectedChurnMonthDetail] = useState<number | null>(null);
-  const [chartsExpanded, setChartsExpanded] = useState(true);
   const [ytdKpiSectionExpanded, setYtdKpiSectionExpanded] = useState(true);
   const [ytdMonthlyOverviewExpanded, setYtdMonthlyOverviewExpanded] = useState(true);
   const [ytdChurnOverviewExpanded, setYtdChurnOverviewExpanded] = useState(true);
@@ -326,16 +413,31 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const [salespipeEvents, setSalespipeEvents] = useState<SalespipeEventRow[]>([]);
   const [signupsEvents, setSignupsEvents] = useState<SignupsEventRow[]>([]);
   const [leadsEvents, setLeadsEvents] = useState<LeadsEventRow[]>([]);
+  const [lookerLeadsMetrics, setLookerLeadsMetrics] = useState<LookerLeadsMetricRow[]>([]);
   const [salespipeLoading, setSalespipeLoading] = useState(true);
   const [salespipeSearch, setSalespipeSearch] = useState('');
   const [salespipeStageFilter, setSalespipeStageFilter] = useState<PipelineStageKey | 'all'>('all');
   const [salespipeSourceFilter, setSalespipeSourceFilter] = useState<PipelineSourceFilter>('all');
-  const [salespipeDateFromInput, setSalespipeDateFromInput] = useState('');
-  const [salespipeDateToInput, setSalespipeDateToInput] = useState('');
-  const [salespipeDateFrom, setSalespipeDateFrom] = useState('');
-  const [salespipeDateTo, setSalespipeDateTo] = useState('');
+  const defaultSalespipeYtdRange = useMemo(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const fromDate = new Date(selectedYear, 0, 1);
+    const toDate = selectedYear === currentYear ? today : new Date(selectedYear, 11, 31);
+    return {
+      from: formatDateForInput(fromDate),
+      to: formatDateForInput(toDate),
+    };
+  }, [selectedYear, currentYear]);
+  const [salespipeDateFromInput, setSalespipeDateFromInput] = useState(defaultSalespipeYtdRange.from);
+  const [salespipeDateToInput, setSalespipeDateToInput] = useState(defaultSalespipeYtdRange.to);
+  const [salespipeDateFrom, setSalespipeDateFrom] = useState(defaultSalespipeYtdRange.from);
+  const [salespipeDateTo, setSalespipeDateTo] = useState(defaultSalespipeYtdRange.to);
   const [salespipeRelativeDaysInput, setSalespipeRelativeDaysInput] = useState<string>('none');
   const [salespipeRelativeDays, setSalespipeRelativeDays] = useState<number | null>(null);
+  const [salespipeOverviewExpanded, setSalespipeOverviewExpanded] = useState(true);
+  const [salespipeWhatIfExpanded, setSalespipeWhatIfExpanded] = useState(false);
+  const [whatIfConvertedRatePct, setWhatIfConvertedRatePct] = useState(0);
+  const [whatIfWinRatePct, setWhatIfWinRatePct] = useState(0);
   const [churnEvents, setChurnEvents] = useState<ChurnEventRow[]>([]);
   const [churnLoading, setChurnLoading] = useState(true);
   const [payIstInputsByGoLiveId, setPayIstInputsByGoLiveId] = useState<Record<string, string>>({});
@@ -346,10 +448,48 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     ...SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT,
   ]);
   const resizingSalespipeColRef = useRef<{ index: number; startX: number; startWidth: number } | null>(null);
+  const salespipeMainTopScrollRef = useRef<HTMLDivElement>(null);
+  const salespipeMainBottomScrollRef = useRef<HTMLDivElement>(null);
+  const salespipeScrollSyncSourceRef = useRef<'top' | 'bottom' | null>(null);
+  const salespipeMainTableMinWidth = useMemo(
+    () => salespipeMainColWidths.reduce((sum, width) => sum + width, 0),
+    [salespipeMainColWidths]
+  );
+
+  const handleTopScroll = useCallback(() => {
+    if (salespipeScrollSyncSourceRef.current === 'bottom') return;
+    salespipeScrollSyncSourceRef.current = 'top';
+    const topEl = salespipeMainTopScrollRef.current;
+    const bottomEl = salespipeMainBottomScrollRef.current;
+    if (topEl && bottomEl) bottomEl.scrollLeft = topEl.scrollLeft;
+    requestAnimationFrame(() => {
+      if (salespipeScrollSyncSourceRef.current === 'top') salespipeScrollSyncSourceRef.current = null;
+    });
+  }, []);
+
+  const handleBottomScroll = useCallback(() => {
+    if (salespipeScrollSyncSourceRef.current === 'top') return;
+    salespipeScrollSyncSourceRef.current = 'bottom';
+    const topEl = salespipeMainTopScrollRef.current;
+    const bottomEl = salespipeMainBottomScrollRef.current;
+    if (topEl && bottomEl) topEl.scrollLeft = bottomEl.scrollLeft;
+    requestAnimationFrame(() => {
+      if (salespipeScrollSyncSourceRef.current === 'bottom') salespipeScrollSyncSourceRef.current = null;
+    });
+  }, []);
 
   useEffect(() => {
     setSelectedYtdMonths(defaultYtdMonths);
   }, [defaultYtdMonths]);
+
+  useEffect(() => {
+    setSalespipeDateFromInput(defaultSalespipeYtdRange.from);
+    setSalespipeDateToInput(defaultSalespipeYtdRange.to);
+    setSalespipeDateFrom(defaultSalespipeYtdRange.from);
+    setSalespipeDateTo(defaultSalespipeYtdRange.to);
+    setSalespipeRelativeDaysInput('none');
+    setSalespipeRelativeDays(null);
+  }, [defaultSalespipeYtdRange]);
 
   useEffect(() => {
     const onMouseMove = (event: MouseEvent) => {
@@ -412,16 +552,25 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const fetchSalespipeAndSignups = async () => {
       setSalespipeLoading(true);
 
-      const [salespipeRes, signupsRes, leadsRes] = await Promise.all([
+      const [salespipeRes, signupsRes, leadsRes, lookerLeadsRes] = await Promise.all([
         supabase
           .from('salespipe_events')
           .select('id, opportunity_id, oak_id, opportunity_name, rating, next_step, stage, estimated_arr, probability, close_date, created_date, opportunity_owner, lead_source, source_tab'),
         supabase
           .from('signups_events')
-          .select('id, account_id, oak_id, account_name, account_owner, signup_package, signup_date, go_live_date'),
+          .select('id, account_id, oak_id, account_name, account_owner, signup_package, signup_date, go_live_date, customer_info_stage'),
         supabase
           .from('leads_events')
-          .select('id, lead_id, opportunity_id, company_account, lead_source, lead_owner, lead_status, lead_sub_status, demo_or_quote, created_date, conversion_date, opportunity_amount'),
+          .select('id, lead_id, opportunity_id, opportunity_account, company_account, lead_source, lead_owner, lead_status, lead_sub_status, demo_or_quote, created_date, conversion_date, opportunity_amount'),
+        supabase
+          .from('looker_leads_events')
+          .select('csv_entry_name, payload')
+          .in('csv_entry_name', [
+            'dashboard-lead/lead_funnel.csv',
+            'dashboard-lead/_avg_day_lead_to_signup_by_lead_created_month.csv',
+            'dashboard-lead/avg_day_lead_to_golive_by_lead_created_month.csv',
+            'dashboard-lead/lead_count_by_month_vs_target_with_tam_fit_.csv',
+          ]),
       ]);
 
       if (!active) return;
@@ -447,6 +596,13 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         setLeadsEvents((leadsRes.data as LeadsEventRow[]) || []);
       }
 
+      if (lookerLeadsRes.error) {
+        console.error('Looker Leads metrics load error:', lookerLeadsRes.error);
+        setLookerLeadsMetrics([]);
+      } else {
+        setLookerLeadsMetrics((lookerLeadsRes.data as LookerLeadsMetricRow[]) || []);
+      }
+
       setSalespipeLoading(false);
     };
 
@@ -465,13 +621,17 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   useEffect(() => {
     const fetchPlanzahlen = async () => {
       setPlanzahlenLoading(true);
+      // Gleiche Logik wie DLTSettings: bei mehreren Zeilen pro Jahr liefert .single() PGRST116
+      // und es gibt keine zuverlässige Zeile — immer die zuletzt aktualisierte Zeile nehmen.
       const { data, error } = await supabase
         .from('dlt_planzahlen')
         .select('*')
         .eq('year', selectedYear)
-        .single();
+        .order('updated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      if (error && error.code !== 'PGRST116') {
+      if (error) {
         console.error('DLT Planzahlen load error:', error);
         setPlanzahlen(null);
       } else {
@@ -503,6 +663,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     plannableUserIds
   );
 
+  const paymarginCohortKeys = usePaymarginImportedCohortKeys(true);
+  const payArrReportingOptions = useMemo((): PayArrReportingOptions | undefined => {
+    if (paymarginCohortKeys === undefined) return undefined;
+    return { paymarginImportedCohortKeys: paymarginCohortKeys };
+  }, [paymarginCohortKeys]);
+
   const planTargets = useMemo(() => {
     if (!planzahlen) return null;
     const pad = (arr: number[] = []) => Array.from({ length: 12 }, (_, i) => arr[i] ?? 0);
@@ -512,9 +678,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const terminalSales = pad(planzahlen.business_terminal_sales);
     const tipping = pad(planzahlen.business_tipping);
     const goLivesTarget = inbound.map((v, i) => v + outbound[i] + partnerships[i]);
-    const subsTarget = goLivesTarget.map((v) => v * (planzahlen.avg_subs_bill || 0) * 12);
+    const avgSubs = planzahlen.avg_subs_bill ?? DEFAULT_SETTINGS.avg_subs_bill;
+    const avgPayTerminal = planzahlen.avg_pay_bill_terminal ?? DEFAULT_SETTINGS.avg_pay_bill;
+    const avgPayTipping = planzahlen.avg_pay_bill_tipping ?? DEFAULT_SETTINGS.avg_pay_bill_tipping;
+    const subsTarget = goLivesTarget.map((v) => v * avgSubs * 12);
     const payTarget = terminalSales.map((v, i) =>
-      (v * (planzahlen.avg_pay_bill_terminal || 0) * 12) + (tipping[i] * (planzahlen.avg_pay_bill_tipping || 0) * 12)
+      v * avgPayTerminal * 12 + tipping[i] * avgPayTipping * 12
     );
     return { goLivesTarget, subsTarget, payTarget };
   }, [planzahlen]);
@@ -522,7 +691,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   // Aggregation über combined (vom Hook bereits aggregiert) oder über Einzeluser
   const monthlyData = useMemo(() => {
     if (combined?.settings && combined?.goLives?.length >= 0) {
-      const summary = calculateYearSummary(combined.goLives, combined.settings);
+      const summary = calculateYearSummary(combined.goLives, combined.settings, payArrReportingOptions);
       let cumSubsARR = 0;
       let cumSubsTarget = 0;
       let cumPayARR = 0;
@@ -582,7 +751,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       const settings = multiSettings.get(uid);
       const goLives = multiGoLives.get(uid) ?? [];
       if (!settings) return;
-      const summary = calculateYearSummary(goLives, settings);
+      const summary = calculateYearSummary(goLives, settings, payArrReportingOptions);
       summary.monthly_results.forEach((result, idx) => {
         data[idx].subsARR += result.subs_actual;
         data[idx].subsTarget += result.subs_target;
@@ -615,13 +784,37 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     });
 
     return data;
-  }, [combined, multiSettings, multiGoLives, goLiveReceiverIds, planTargets]);
+  }, [combined, multiSettings, multiGoLives, goLiveReceiverIds, planTargets, payArrReportingOptions]);
 
-  // Forecast data: 1) Ist-Monate, 2) Weighted Pipeline (+70 Tage), 3) lineare Heuristik als Fallback
+  // Forecast data: 1) Ist-Monate, 2) Weighted Pipeline (+70 Tage), 3) YTD-Conversion-Forecast als Fallback
   const forecastData = useMemo(() => {
     if (monthlyData.length === 0) return [];
 
+    // Stage-spezifische Restlaufzeit bis Go-Live (heuristisch aus aktueller Journey-Analyse).
+    // Ziel: Weighted Pipeline nicht im aktuellen Stage-Monat buchen, sondern im wahrscheinlichen Go-Live-Monat.
+    const stageToGoLiveOffsetDays: Record<PipelineStageKey, number> = {
+      sql: 70,
+      not_converted_new: 60,
+      working: 52,
+      converted: 44,
+      demo_booked: 36,
+      demo_completed: 30,
+      sent_quote: 26,
+      close_won: 26,
+      close_lost: 0,
+      signups: 0,
+      go_live: 0,
+    };
+    const getProjectedGoLiveDate = (sourceDate: Date, stageKey: PipelineStageKey) => {
+      const projected = new Date(sourceDate);
+      projected.setDate(projected.getDate() + (stageToGoLiveOffsetDays[stageKey] ?? 0));
+      return projected;
+    };
+
     const now = new Date();
+    const nowTs = now.getTime();
+    const forecastWindowStart = new Date(now);
+    forecastWindowStart.setHours(0, 0, 0, 0);
     const pipelineEnd = new Date(now);
     pipelineEnd.setDate(pipelineEnd.getDate() + 70);
     pipelineEnd.setHours(23, 59, 59, 999);
@@ -630,13 +823,15 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     salespipeEvents.forEach((row) => {
       const stageKey = normalizeSalespipeStage(row.stage);
       if (!stageKey || !ACTIVE_PIPELINE_STAGES.includes(stageKey)) return;
-      const filterDate = row.created_date || row.close_date;
+      // Für die Forecast-Zuordnung zählt primär der erwartete Abschlussmonat.
+      const filterDate = row.close_date || row.created_date;
       if (!filterDate) return;
-      const d = new Date(filterDate);
-      if (Number.isNaN(d.getTime())) return;
-      if (d < now || d > pipelineEnd) return;
-      if (d.getFullYear() !== selectedYear) return;
-      const monthIdx = d.getMonth();
+      const sourceDate = new Date(filterDate);
+      if (Number.isNaN(sourceDate.getTime())) return;
+      const projectedGoLiveDate = getProjectedGoLiveDate(sourceDate, stageKey);
+      if (projectedGoLiveDate < forecastWindowStart || projectedGoLiveDate > pipelineEnd) return;
+      if (projectedGoLiveDate.getFullYear() !== selectedYear) return;
+      const monthIdx = projectedGoLiveDate.getMonth();
       if (monthIdx < 0 || monthIdx > 11) return;
       const arr = Number(row.estimated_arr) || 0;
       const probabilityRaw = Number(row.probability);
@@ -646,18 +841,93 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       pipelineWeightedByMonth[monthIdx] += arr * probability;
     });
     leadsEvents.forEach((row) => {
-      const stageKey = normalizeLeadsStage(row.lead_status, row.lead_sub_status, row.demo_or_quote);
+      const stageKey = normalizeLeadsStage(
+        row.lead_status,
+        row.lead_sub_status,
+        row.demo_or_quote,
+        row.lead_id,
+        row.opportunity_id,
+        row.opportunity_account
+      );
       if (!stageKey || !ACTIVE_PIPELINE_STAGES.includes(stageKey)) return;
       const filterDate = row.conversion_date || row.created_date;
       if (!filterDate) return;
-      const d = new Date(filterDate);
-      if (Number.isNaN(d.getTime())) return;
-      if (d < now || d > pipelineEnd) return;
-      if (d.getFullYear() !== selectedYear) return;
-      const monthIdx = d.getMonth();
+      const sourceDate = new Date(filterDate);
+      if (Number.isNaN(sourceDate.getTime())) return;
+      const projectedGoLiveDate = getProjectedGoLiveDate(sourceDate, stageKey);
+      if (projectedGoLiveDate < forecastWindowStart || projectedGoLiveDate > pipelineEnd) return;
+      if (projectedGoLiveDate.getFullYear() !== selectedYear) return;
+      const monthIdx = projectedGoLiveDate.getMonth();
       if (monthIdx < 0 || monthIdx > 11) return;
       const arr = Number(row.opportunity_amount) || 0;
       pipelineWeightedByMonth[monthIdx] += arr * getDefaultProbability(stageKey);
+    });
+
+    const goLiveArrToDateByMonth = Array.from({ length: 12 }, () => 0);
+    const goLiveArrFutureByMonth = Array.from({ length: 12 }, () => 0);
+    const allGoLivesForForecast: GoLive[] =
+      combined?.goLives ?? Array.from(multiGoLives?.values() ?? []).flat();
+    allGoLivesForForecast.forEach((gl) => {
+      if (!gl?.go_live_date) return;
+      const goLiveDate = new Date(gl.go_live_date);
+      if (Number.isNaN(goLiveDate.getTime())) return;
+      if (goLiveDate.getFullYear() !== selectedYear) return;
+      const monthIdx = goLiveDate.getMonth();
+      if (monthIdx < 0 || monthIdx > 11) return;
+      const settingsForGoLive = multiSettings?.get(gl.user_id) ?? combined?.settings;
+      if (!settingsForGoLive) return;
+      const payArr = Number(getEffectivePayArrForReporting(gl, settingsForGoLive, payArrReportingOptions)) || 0;
+      const totalArr = (Number(gl.subs_arr) || 0) + payArr;
+      if (!Number.isFinite(totalArr) || totalArr <= 0) return;
+      if (goLiveDate.getTime() <= nowTs) {
+        goLiveArrToDateByMonth[monthIdx] += totalArr;
+      } else {
+        goLiveArrFutureByMonth[monthIdx] += totalArr;
+      }
+    });
+
+    const notBookedArrByMonth = Array.from({ length: 12 }, () => 0);
+    const closeWonArrByOak = new Map<number, number>();
+    const anyArrByOak = new Map<number, number>();
+    salespipeEvents.forEach((row) => {
+      if (row.oak_id === null) return;
+      const oak = row.oak_id;
+      const arr = Number(row.estimated_arr) || 0;
+      if (arr <= 0) return;
+      anyArrByOak.set(oak, Math.max(anyArrByOak.get(oak) || 0, arr));
+      const stageKey = normalizeSalespipeStage(row.stage);
+      if (stageKey === 'close_won') {
+        closeWonArrByOak.set(oak, Math.max(closeWonArrByOak.get(oak) || 0, arr));
+      }
+    });
+
+    const notBookedByOak = new Map<number, SignupsEventRow>();
+    signupsEvents.forEach((row) => {
+      if (row.oak_id === null) return;
+      const stage = String(row.customer_info_stage || '').trim().toLowerCase().replace(/[-_]+/g, ' ');
+      if (stage !== 'not booked') return;
+      const current = notBookedByOak.get(row.oak_id);
+      if (!current) {
+        notBookedByOak.set(row.oak_id, row);
+        return;
+      }
+      const currentTs = new Date(current.signup_date || current.go_live_date || '1970-01-01').getTime();
+      const nextTs = new Date(row.signup_date || row.go_live_date || '1970-01-01').getTime();
+      if (nextTs >= currentTs) notBookedByOak.set(row.oak_id, row);
+    });
+
+    notBookedByOak.forEach((row, oak) => {
+      const mappedArr = closeWonArrByOak.get(oak) ?? anyArrByOak.get(oak) ?? 0;
+      if (mappedArr <= 0) return;
+      const goLiveDateRaw = row.go_live_date ? new Date(row.go_live_date) : null;
+      const hasFutureGoLive = goLiveDateRaw && !Number.isNaN(goLiveDateRaw.getTime()) && goLiveDateRaw > now;
+      const projectedDate = hasFutureGoLive
+        ? (goLiveDateRaw as Date)
+        : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 60);
+      if (projectedDate.getFullYear() !== selectedYear) return;
+      const monthIdx = projectedDate.getMonth();
+      if (monthIdx < 0 || monthIdx > 11) return;
+      notBookedArrByMonth[monthIdx] += mappedArr;
     });
 
     const plannedChurnByMonth = (() => {
@@ -680,6 +950,189 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       const idx = d.getMonth();
       if (idx < 0 || idx > 11) return;
       actualChurnByMonth[idx] += Number(event.total_arr_lost) || 0;
+    });
+
+    const lookerRowsForYear = lookerLeadsMetrics.filter((row) => {
+      const payload = row.payload || {};
+      const monthIdx = parsePayloadMonthIndex(
+        payload,
+        ['Lead Created Month', 'Target Month', 'Lead Created Date'],
+        selectedYear
+      );
+      return monthIdx !== null || row.csv_entry_name === 'dashboard-lead/lead_funnel.csv';
+    });
+
+    const leadFunnelRows = lookerRowsForYear.filter((row) => row.csv_entry_name === 'dashboard-lead/lead_funnel.csv');
+    const leadFunnel = leadFunnelRows.reduce(
+      (best, row) => {
+        const payload = row.payload || {};
+        const leads = readPayloadNumber(payload, ['Leads Number of Leads']) || 0;
+        if (!best || leads > best.leads) {
+          return {
+            leads,
+            demoBooked: readPayloadNumber(payload, ['Leads Number of Lead Converted to Demo Booked']) || 0,
+            demoCompleted: readPayloadNumber(payload, ['Leads Number of Lead Converted to Demo Completed']) || 0,
+            signups: readPayloadNumber(payload, ['Leads Number of Lead Converted to Signup']) || 0,
+            goLives: readPayloadNumber(payload, ['Leads Number of Lead Converted to Golive']) || 0,
+          };
+        }
+        return best;
+      },
+      null as
+        | {
+            leads: number;
+            demoBooked: number;
+            demoCompleted: number;
+            signups: number;
+            goLives: number;
+          }
+        | null
+    );
+
+    const pLeadToDemoBooked =
+      leadFunnel && leadFunnel.leads > 0 ? Math.max(0, Math.min(1, leadFunnel.demoBooked / leadFunnel.leads)) : 0;
+    const pDemoBookedToDemoCompleted =
+      leadFunnel && leadFunnel.demoBooked > 0
+        ? Math.max(0, Math.min(1, leadFunnel.demoCompleted / leadFunnel.demoBooked))
+        : 0;
+    const pDemoCompletedToSignup =
+      leadFunnel && leadFunnel.demoCompleted > 0
+        ? Math.max(0, Math.min(1, leadFunnel.signups / leadFunnel.demoCompleted))
+        : 0;
+    const pSignupToGoLive =
+      leadFunnel && leadFunnel.signups > 0 ? Math.max(0, Math.min(1, leadFunnel.goLives / leadFunnel.signups)) : 0;
+    const pLeadToGoLiveFromFunnel =
+      pLeadToDemoBooked * pDemoBookedToDemoCompleted * pDemoCompletedToSignup * pSignupToGoLive;
+    const pLeadToGoLive = Math.max(
+      0,
+      Math.min(1, leadToGoLiveForecastPercent > 0 ? leadToGoLiveForecastPercent / 100 : pLeadToGoLiveFromFunnel)
+    );
+
+    const leadCountRows = lookerRowsForYear.filter(
+      (row) => row.csv_entry_name === 'dashboard-lead/lead_count_by_month_vs_target_with_tam_fit_.csv'
+    );
+    const avgSignupRows = lookerRowsForYear.filter(
+      (row) => row.csv_entry_name === 'dashboard-lead/_avg_day_lead_to_signup_by_lead_created_month.csv'
+    );
+    const avgGoLiveRows = lookerRowsForYear.filter(
+      (row) => row.csv_entry_name === 'dashboard-lead/avg_day_lead_to_golive_by_lead_created_month.csv'
+    );
+
+    const leadCountByMonth = Array.from({ length: 12 }, () => 0);
+    const leadTargetByMonth = Array.from({ length: 12 }, () => 0);
+    const tamFitByMonth = Array.from({ length: 12 }, () => 0);
+    const avgLeadToSignupDaysByMonth = Array.from({ length: 12 }, () => 0);
+    const avgLeadToGoLiveDaysByMonth = Array.from({ length: 12 }, () => 0);
+
+    leadCountRows.forEach((row) => {
+      const payload = row.payload || {};
+      const idx = parsePayloadMonthIndex(payload, ['Target Month'], selectedYear);
+      if (idx === null) return;
+      leadCountByMonth[idx] = readPayloadNumber(payload, ['Number of Leads']) || 0;
+      leadTargetByMonth[idx] = readPayloadNumber(payload, ['Lead Target (Inboud+Partnership)', 'Lead Target']) || 0;
+      const tamFitPct = readPayloadNumber(payload, ['TAM FIT %']);
+      tamFitByMonth[idx] = tamFitPct !== null ? Math.max(0, Math.min(1, tamFitPct / 100)) : 0;
+    });
+
+    avgSignupRows.forEach((row) => {
+      const payload = row.payload || {};
+      const idx = parsePayloadMonthIndex(payload, ['Lead Created Month'], selectedYear);
+      if (idx === null) return;
+      avgLeadToSignupDaysByMonth[idx] = readPayloadNumber(payload, ['Average Lead to Signup days']) || 0;
+    });
+
+    avgGoLiveRows.forEach((row) => {
+      const payload = row.payload || {};
+      const idx = parsePayloadMonthIndex(payload, ['Lead Created Month'], selectedYear);
+      if (idx === null) return;
+      avgLeadToGoLiveDaysByMonth[idx] = readPayloadNumber(payload, ['Average Lead to Golive days']) || 0;
+    });
+
+    const ytdMonthLimit = selectedYear < currentYear ? 11 : selectedYear > currentYear ? -1 : currentMonth;
+    const ytdIndices = Array.from({ length: 12 }, (_, idx) => idx).filter((idx) => idx <= ytdMonthLimit);
+    const ytdLeadCounts = ytdIndices.map((idx) => leadCountByMonth[idx]).filter((value) => value > 0);
+    const ytdLeadAverage =
+      ytdLeadCounts.length > 0
+        ? ytdLeadCounts.reduce((sum, value) => sum + value, 0) / ytdLeadCounts.length
+        : 0;
+    const ytdTamFits = ytdIndices.map((idx) => tamFitByMonth[idx]).filter((value) => value > 0);
+    const ytdTamFitRate =
+      ytdTamFits.length > 0
+        ? ytdTamFits.reduce((sum, value) => sum + value, 0) / ytdTamFits.length
+        : 0.55;
+    const futureLeadScenarioFactor =
+      ytdLeadAverage > 0 ? Math.max(0, futureLeadVolumeScenarioMonthlyLeads) / ytdLeadAverage : 1;
+
+    const computeWeightedAverageDays = (values: number[]) => {
+      let weightedSum = 0;
+      let weightTotal = 0;
+      ytdIndices.forEach((idx) => {
+        const days = values[idx];
+        const leads = leadCountByMonth[idx];
+        if (days <= 0 || leads <= 0) return;
+        weightedSum += days * leads;
+        weightTotal += leads;
+      });
+      if (weightTotal > 0) return weightedSum / weightTotal;
+      const fallback = ytdIndices.map((idx) => values[idx]).filter((days) => days > 0);
+      return fallback.length > 0 ? fallback.reduce((sum, days) => sum + days, 0) / fallback.length : 0;
+    };
+
+    const avgLeadToSignupDaysYtd = computeWeightedAverageDays(avgLeadToSignupDaysByMonth);
+    const avgLeadToGoLiveDaysYtd = computeWeightedAverageDays(avgLeadToGoLiveDaysByMonth);
+    // Lag nutzt beide Metriken: direkter Lead->GoLive-Wert und Lead->Signup plus konservative Restzeit.
+    const effectiveLeadToGoLiveLagDays = Math.max(avgLeadToGoLiveDaysYtd, avgLeadToSignupDaysYtd + 21);
+    const leadToGoLiveLagMonths = Math.max(0, Math.round(effectiveLeadToGoLiveLagDays / 30));
+
+    let ytdGoLiveArrSum = 0;
+    let ytdGoLiveCount = 0;
+    allGoLivesForForecast.forEach((gl) => {
+      if (!gl?.go_live_date) return;
+      const goLiveDate = new Date(gl.go_live_date);
+      if (Number.isNaN(goLiveDate.getTime())) return;
+      if (goLiveDate.getFullYear() !== selectedYear) return;
+      if (goLiveDate.getTime() > nowTs) return;
+      const settingsForGoLive = multiSettings?.get(gl.user_id) ?? combined?.settings;
+      if (!settingsForGoLive) return;
+      const payArr = Number(getEffectivePayArrForReporting(gl, settingsForGoLive, payArrReportingOptions)) || 0;
+      const totalArr = (Number(gl.subs_arr) || 0) + payArr;
+      if (!Number.isFinite(totalArr) || totalArr <= 0) return;
+      ytdGoLiveArrSum += totalArr;
+      ytdGoLiveCount += 1;
+    });
+    // Fallback: wenn in go_lives keine verlässlichen Einzelzeilen für YTD vorhanden sind,
+    // Ø ARR/Go-Live aus den Monats-IST-Werten ableiten.
+    if (ytdGoLiveCount === 0) {
+      monthlyData.forEach((month, idx) => {
+        const isYtdMonth = idx <= ytdMonthLimit;
+        if (!isYtdMonth) return;
+        const goLives = Number(month.goLives) || 0;
+        if (goLives <= 0) return;
+        const totalArr = (Number(month.subsARR) || 0) + (Number(month.payARR) || 0);
+        if (totalArr <= 0) return;
+        ytdGoLiveArrSum += totalArr;
+        ytdGoLiveCount += goLives;
+      });
+    }
+    const avgArrPerGoLiveYtd = ytdGoLiveCount > 0 ? ytdGoLiveArrSum / ytdGoLiveCount : 0;
+    const conversionArrByMonth = Array.from({ length: 12 }, (_, monthIdx) => {
+      const sourceMonthIdx = monthIdx - leadToGoLiveLagMonths;
+      if (sourceMonthIdx < 0 || sourceMonthIdx > 11) return 0;
+      const actualLeads = leadCountByMonth[sourceMonthIdx];
+      const targetLeads = leadTargetByMonth[sourceMonthIdx];
+      const eligibleLeadsBase =
+        actualLeads > 0
+          ? actualLeads
+          : targetLeads > 0
+            ? targetLeads * ytdTamFitRate
+            : ytdLeadAverage;
+      const isFutureForecastMonth =
+        selectedYear > currentYear || (selectedYear === currentYear && monthIdx > currentMonth);
+      const eligibleLeads = isFutureForecastMonth ? eligibleLeadsBase * futureLeadScenarioFactor : eligibleLeadsBase;
+      if (eligibleLeads <= 0 || pLeadToGoLive <= 0 || avgArrPerGoLiveYtd <= 0) return 0;
+      const expectedGoLives = eligibleLeads * pLeadToGoLive;
+      const projectedArr = expectedGoLives * avgArrPerGoLiveYtd;
+      return Number.isFinite(projectedArr) && projectedArr > 0 ? projectedArr : 0;
     });
 
     const actualRows = monthlyData.map((month, idx) => {
@@ -712,45 +1165,84 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const payShare = shareDenominator > 0 ? avgPay / shareDenominator : 0.5;
 
     return actualRows.map((row) => {
-      const growthFactor = 1 + Math.max(0, row.idx - currentMonth) * 0.02;
       const pipelineWeighted = pipelineWeightedByMonth[row.idx] || 0;
       const plannedChurn = plannedChurnByMonth[row.idx] || 0;
+      const arrGoLivesToDate = goLiveArrToDateByMonth[row.idx] || 0;
+      const arrGoLivesFuture = goLiveArrFutureByMonth[row.idx] || 0;
+      const arrNotBookedPipeline = notBookedArrByMonth[row.idx] || 0;
+      // Forecast-Churn an den tatsaechlichen Monatswerten aus churn_events ausrichten
+      // (gleiches Raster wie in der YTD-Churn-Uebersicht).
+      const churnForForecast = actualChurnByMonth[row.idx] || 0;
+      const isFutureMonth = selectedYear > currentYear || (selectedYear === currentYear && row.idx > currentMonth);
+      const arrConversionBaseline = !row.hasActual && isFutureMonth ? (conversionArrByMonth[row.idx] || 0) : 0;
+      const primaryArrWithoutConversion =
+        arrGoLivesToDate + arrGoLivesFuture + pipelineWeighted + arrNotBookedPipeline;
+      const arrConversionTopUp = Math.max(0, arrConversionBaseline - primaryArrWithoutConversion);
 
       if (row.hasActual) {
+        const arrWeightedPipeline = pipelineWeighted;
+        const arrConversionBased = 0;
+        const grossArr =
+          arrGoLivesToDate + arrGoLivesFuture + arrWeightedPipeline + arrNotBookedPipeline + arrConversionBased;
         return {
           ...row,
           subsForecast: row.subsActual,
           payForecast: row.payActual,
-          netForecast: row.netActual,
+          netForecast: grossArr - churnForForecast,
           netTarget: row.subsTarget + row.payTarget - plannedChurn,
+          arrGoLivesToDate,
+          arrGoLivesFuture,
+          arrWeightedPipeline,
+          arrNotBookedPipeline,
+          arrConversionBased,
+          arrChurnDeduction: -churnForForecast,
           source: 'actual',
         };
       }
 
       if (pipelineWeighted > 0) {
-        const subsForecast = pipelineWeighted * subsShare;
-        const payForecast = pipelineWeighted * payShare;
-        const netForecast = subsForecast + payForecast - plannedChurn;
+        const subsForecast = (pipelineWeighted + arrConversionTopUp) * subsShare;
+        const payForecast = (pipelineWeighted + arrConversionTopUp) * payShare;
+        const arrWeightedPipeline = pipelineWeighted;
+        const arrConversionBased = arrConversionTopUp;
+        const grossArr =
+          arrGoLivesToDate + arrGoLivesFuture + arrWeightedPipeline + arrNotBookedPipeline + arrConversionBased;
         return {
           ...row,
           subsForecast,
           payForecast,
-          netForecast,
+          netForecast: grossArr - churnForForecast,
           netTarget: row.subsTarget + row.payTarget - plannedChurn,
+          arrGoLivesToDate,
+          arrGoLivesFuture,
+          arrWeightedPipeline,
+          arrNotBookedPipeline,
+          arrConversionBased,
+          arrChurnDeduction: -churnForForecast,
           source: 'pipeline',
         };
       }
 
-      const subsForecast = avgSubs * growthFactor;
-      const payForecast = avgPay * growthFactor;
-      const netForecast = subsForecast + payForecast - plannedChurn;
+      const shouldUseConversionForecast = arrConversionTopUp > 0;
+      const subsForecast = shouldUseConversionForecast ? arrConversionTopUp * subsShare : 0;
+      const payForecast = shouldUseConversionForecast ? arrConversionTopUp * payShare : 0;
+      const arrWeightedPipeline = pipelineWeighted;
+      const arrConversionBased = subsForecast + payForecast;
+      const grossArr =
+        arrGoLivesToDate + arrGoLivesFuture + arrWeightedPipeline + arrNotBookedPipeline + arrConversionBased;
       return {
         ...row,
         subsForecast,
         payForecast,
-        netForecast,
+        netForecast: grossArr - churnForForecast,
         netTarget: row.subsTarget + row.payTarget - plannedChurn,
-        source: 'heuristic',
+        arrGoLivesToDate,
+        arrGoLivesFuture,
+        arrWeightedPipeline,
+        arrNotBookedPipeline,
+        arrConversionBased,
+        arrChurnDeduction: -churnForForecast,
+        source: shouldUseConversionForecast ? 'conversion_ytd' : 'component',
       };
     });
   }, [
@@ -760,8 +1252,16 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     selectedYear,
     salespipeEvents,
     leadsEvents,
+    combined,
+    multiGoLives,
+    multiSettings,
+    signupsEvents,
+    lookerLeadsMetrics,
+    leadToGoLiveForecastPercent,
+    futureLeadVolumeScenarioMonthlyLeads,
     planzahlen,
     churnEvents,
+    payArrReportingOptions,
   ]);
 
   const forecastSummary = useMemo(
@@ -782,6 +1282,73 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     [monthlyData, forecastData]
   );
 
+  const futureLeadScenarioSummary = useMemo(() => {
+    const leadCountRows = lookerLeadsMetrics.filter(
+      (row) => row.csv_entry_name === 'dashboard-lead/lead_count_by_month_vs_target_with_tam_fit_.csv'
+    );
+    const leadCountByMonth = Array.from({ length: 12 }, () => 0);
+    const leadTargetByMonth = Array.from({ length: 12 }, () => 0);
+    const tamFitByMonth = Array.from({ length: 12 }, () => 0);
+
+    leadCountRows.forEach((row) => {
+      const payload = row.payload || {};
+      const idx = parsePayloadMonthIndex(payload, ['Target Month'], selectedYear);
+      if (idx === null) return;
+      leadCountByMonth[idx] = readPayloadNumber(payload, ['Number of Leads']) || 0;
+      leadTargetByMonth[idx] = readPayloadNumber(payload, ['Lead Target (Inboud+Partnership)', 'Lead Target']) || 0;
+      const tamFitPct = readPayloadNumber(payload, ['TAM FIT %']);
+      tamFitByMonth[idx] = tamFitPct !== null ? Math.max(0, Math.min(1, tamFitPct / 100)) : 0;
+    });
+
+    const ytdMonthLimit = selectedYear < currentYear ? 11 : selectedYear > currentYear ? -1 : currentMonth;
+    const ytdIndices = Array.from({ length: 12 }, (_, idx) => idx).filter((idx) => idx <= ytdMonthLimit);
+    const ytdLeadCounts = ytdIndices.map((idx) => leadCountByMonth[idx]).filter((value) => value > 0);
+    const ytdLeadAverage =
+      ytdLeadCounts.length > 0
+        ? ytdLeadCounts.reduce((sum, value) => sum + value, 0) / ytdLeadCounts.length
+        : 0;
+    const ytdTamFits = ytdIndices.map((idx) => tamFitByMonth[idx]).filter((value) => value > 0);
+    const ytdTamFitRate =
+      ytdTamFits.length > 0
+        ? ytdTamFits.reduce((sum, value) => sum + value, 0) / ytdTamFits.length
+        : 0.55;
+
+    const scenarioFactor =
+      ytdLeadAverage > 0 ? Math.max(0, futureLeadVolumeScenarioMonthlyLeads) / ytdLeadAverage : 1;
+    const futureMonthIndices = Array.from({ length: 12 }, (_, idx) => idx).filter((idx) =>
+      selectedYear > currentYear ? true : selectedYear < currentYear ? false : idx > currentMonth
+    );
+
+    const importedFutureLeads = futureMonthIndices.reduce((sum, idx) => sum + (leadCountByMonth[idx] || 0), 0);
+    const baselineEligibleFutureLeads = futureMonthIndices.reduce((sum, idx) => {
+      const actualLeads = leadCountByMonth[idx];
+      const targetLeads = leadTargetByMonth[idx];
+      const eligibleLeads =
+        actualLeads > 0
+          ? actualLeads
+          : targetLeads > 0
+            ? targetLeads * ytdTamFitRate
+            : ytdLeadAverage;
+      return sum + Math.max(0, eligibleLeads);
+    }, 0);
+    const scenarioEligibleFutureLeads = baselineEligibleFutureLeads * scenarioFactor;
+
+    return {
+      importedFutureLeads,
+      baselineEligibleFutureLeads,
+      scenarioEligibleFutureLeads,
+      ytdLeadAverage,
+      ytdTamFitRate,
+    };
+  }, [lookerLeadsMetrics, selectedYear, currentYear, currentMonth, futureLeadVolumeScenarioMonthlyLeads]);
+
+  useEffect(() => {
+    const defaultMonthlyLeads = futureLeadScenarioSummary.ytdLeadAverage > 0
+      ? Math.round(futureLeadScenarioSummary.ytdLeadAverage)
+      : 0;
+    setFutureLeadVolumeScenarioMonthlyLeads(defaultMonthlyLeads);
+  }, [selectedYear, futureLeadScenarioSummary.ytdLeadAverage]);
+
   const forecastAchievement = useMemo(
     () => ({
       subs: forecastTargetSummary.subs > 0 ? forecastSummary.subs / forecastTargetSummary.subs : 0,
@@ -790,6 +1357,52 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     }),
     [forecastSummary, forecastTargetSummary]
   );
+
+  const forecastTooltipRows = [
+    { key: 'arrGoLivesToDate', label: 'ARR aus Go-Lives bis heute', color: '#10B981' },
+    { key: 'arrGoLivesFuture', label: 'ARR aus Future Go-Lives', color: '#3B82F6' },
+    { key: 'arrWeightedPipeline', label: 'ARR aus Weighted Sales Pipeline', color: '#D946EF' },
+    { key: 'arrNotBookedPipeline', label: 'ARR aus Sign-ups Not Booked', color: '#FACC15' },
+    { key: 'arrConversionBased', label: 'ARR aus YTD Lead-Conversion Forecast', color: '#6B7280' },
+    { key: 'arrChurnDeduction', label: 'Churn ARR (abgezogen)', color: '#EF4444' },
+  ] as const;
+
+  const renderForecastTooltip = (params: { active?: boolean; payload?: Array<{ payload?: Record<string, unknown> }>; label?: string }) => {
+    if (!params.active || !params.label) return null;
+    const row = forecastData.find((entry) => String(entry.name) === String(params.label)) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const netForecast = Number(row.netForecast || 0);
+    const netTarget = Number(row.netTarget || 0);
+    return (
+      <div className="rounded-lg border border-gray-200 bg-white p-3 shadow-md text-xs">
+        <div className="mb-2 font-semibold text-gray-800">{`${params.label || ''} ${selectedYear}`}</div>
+        <div className="space-y-1">
+          {forecastTooltipRows.map((item) => {
+            const value = Number(row[item.key] || 0);
+            return (
+              <div key={item.key} className="flex items-center justify-between gap-3">
+                <span className="flex items-center gap-2 text-gray-700">
+                  <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: item.color }} />
+                  {item.label}
+                </span>
+                <span className="font-medium text-gray-900">{formatCurrency(value)}</span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="mt-2 border-t border-gray-200 pt-2 space-y-1">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-gray-700">Forecast NET ARR</span>
+            <span className="font-semibold text-gray-900">{formatCurrency(netForecast)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-gray-700">Goal NET ARR</span>
+            <span className="font-semibold text-gray-900">{formatCurrency(netTarget)}</span>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const allGoLives = useMemo<GoLive[]>(
     () => combined?.goLives ?? Array.from(multiGoLives?.values() ?? []).flat(),
@@ -823,29 +1436,43 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     });
   }, [monthDetailGoLives, goLiveDetailSearch, userNameById]);
 
-  // Gleiche PAY-Logik wie in calculations.ts (Reporting):
-  // 1) pay_arr (Ist), 2) pay_arr_target (Forecast), 3) Terminal-Default aus Settings (avg_pay_bill * 12)
+  // Gleiche PAY-Logik wie getEffectivePayArrForReporting (pro Zeile passende AE-Settings)
   const getEffectiveGoLivePayArr = (gl: GoLive): number => {
-    if (gl.pay_arr !== null && gl.pay_arr !== undefined) return gl.pay_arr;
-    if (gl.pay_arr_target !== null && gl.pay_arr_target !== undefined) return gl.pay_arr_target;
-    if (!gl.has_terminal) return 0;
-    const userSettings = multiSettings?.get(gl.user_id);
-    const fallbackAvgPayBill = userSettings?.avg_pay_bill ?? combined?.settings?.avg_pay_bill ?? 0;
-    return fallbackAvgPayBill * 12;
+    const userSettings = multiSettings?.get(gl.user_id) ?? combined?.settings;
+    if (!userSettings) return 0;
+    return getEffectivePayArrForReporting(gl, userSettings, payArrReportingOptions);
   };
 
   useEffect(() => {
     if (!selectedMonthDetail) return;
     const nextInputs: Record<string, string> = {};
     monthDetailGoLives.forEach((gl) => {
-      nextInputs[gl.id] = gl.pay_arr !== null && gl.pay_arr !== undefined
-        ? String(Math.round((gl.pay_arr / 12) * 100) / 100)
-        : '';
+      if (gl.pay_arr !== null && gl.pay_arr !== undefined) {
+        nextInputs[gl.id] = String(Math.round((gl.pay_arr / 12) * 100) / 100);
+        return;
+      }
+      const cohortKey = paymarginCohortKey(gl.year, gl.month);
+      const cohortImported =
+        payArrReportingOptions?.paymarginImportedCohortKeys !== undefined &&
+        payArrReportingOptions.paymarginImportedCohortKeys.has(cohortKey);
+      if (
+        gl.has_terminal &&
+        !cohortImported &&
+        (gl.pay_arr_target === null || gl.pay_arr_target === undefined)
+      ) {
+        const userSettings = multiSettings?.get(gl.user_id);
+        const fallbackAvgPayBill = userSettings?.avg_pay_bill ?? combined?.settings?.avg_pay_bill ?? 0;
+        if (fallbackAvgPayBill > 0) {
+          nextInputs[gl.id] = String(fallbackAvgPayBill);
+          return;
+        }
+      }
+      nextInputs[gl.id] = '';
     });
     setPayIstInputsByGoLiveId(nextInputs);
     setSavingPayIstByGoLiveId({});
     setPayIstErrorByGoLiveId({});
-  }, [selectedMonthDetail, monthDetailGoLives]);
+  }, [selectedMonthDetail, monthDetailGoLives, payArrReportingOptions, multiSettings, combined?.settings]);
 
   useEffect(() => {
     setGoLiveDetailSearch('');
@@ -1272,7 +1899,14 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       }, []);
 
     const leadsRows: PipelineRow[] = yearFilteredLeadsEvents.reduce<PipelineRow[]>((acc, lead) => {
-        const stageKey = normalizeLeadsStage(lead.lead_status, lead.lead_sub_status, lead.demo_or_quote);
+        const stageKey = normalizeLeadsStage(
+          lead.lead_status,
+          lead.lead_sub_status,
+          lead.demo_or_quote,
+          lead.lead_id,
+          lead.opportunity_id,
+          lead.opportunity_account
+        );
         if (!stageKey) return acc;
         const arr = Number(lead.opportunity_amount) || 0;
         const mappedOakId = (() => {
@@ -1470,6 +2104,23 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     };
   }, [filteredSalespipeRows, journeyTrackOakSet]);
 
+  const trackedCloseLostStageStats = useMemo(() => {
+    const byKey = new Map<string, number>();
+    filteredSalespipeRows.forEach((row) => {
+      if (row.stageKey !== 'close_lost') return;
+      // Close-Lost-Einträge kommen teilweise ohne OAK-ID. Dann deduplizieren wir über Opportunity-ID.
+      const key = row.oakId !== null
+        ? `oak:${row.oakId}`
+        : (normalizeId(row.opportunityId) ? `opp:${normalizeId(row.opportunityId)}` : row.id);
+      if (!key) return;
+      byKey.set(key, Math.max(byKey.get(key) || 0, row.arr));
+    });
+    return {
+      count: byKey.size,
+      arr: Array.from(byKey.values()).reduce((sum, value) => sum + value, 0),
+    };
+  }, [filteredSalespipeRows]);
+
   const salespipeStageSummary = useMemo(() => {
     const initial = PIPELINE_STAGE_CONFIG.reduce(
       (acc, stage) => ({ ...acc, [stage.key]: { count: 0, arr: 0 } }),
@@ -1481,25 +2132,280 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     });
     // Sign-up/Go-Live folgen derselben Tracking-Logik wie die KPI-Karten oben.
     initial.close_won = trackedCloseWonStageStats;
+    initial.close_lost = trackedCloseLostStageStats;
     initial.signups = trackedSignupsStageStats;
     initial.go_live = trackedGoLiveStageStats;
+
+    // SQL soll die gesamte Lead-Basis im gewählten Zeitraum darstellen.
+    const leadRows = filteredSalespipeRows.filter((row) => row.source === 'leads');
+    const sqlCount = leadRows.length;
+    const sqlArr = leadRows.reduce((sum, row) => sum + row.arr, 0);
+    initial.sql = { count: sqlCount, arr: sqlArr };
+
+    // Nicht-konvertiert ergibt sich aus NEW/Not converted + Working.
+    const nonConvertedCount = initial.not_converted_new.count + initial.working.count;
+    const nonConvertedArr = initial.not_converted_new.arr + initial.working.arr;
+
+    // Converted wird explizit aus der Lead-Basis abgeleitet.
+    initial.converted = {
+      count: Math.max(0, sqlCount - nonConvertedCount),
+      arr: Math.max(0, sqlArr - nonConvertedArr),
+    };
+
     return initial;
-  }, [filteredSalespipeRows, trackedCloseWonStageStats, trackedSignupsStageStats, trackedGoLiveStageStats]);
+  }, [filteredSalespipeRows, trackedCloseWonStageStats, trackedCloseLostStageStats, trackedSignupsStageStats, trackedGoLiveStageStats]);
+
+  const convertedDecisionStats = useMemo(() => {
+    const convertedOpportunityIds = new Set(
+      filteredSalespipeRows
+        .filter((row) => row.source === 'leads' && row.stageKey === 'converted')
+        .map((row) => normalizeId(row.opportunityId))
+        .filter((id): id is string => id !== null)
+    );
+
+    if (convertedOpportunityIds.size === 0) {
+      return { convertedCount: 0, closeWonCount: 0, closeLostCount: 0 };
+    }
+
+    const decisionByOpportunity = new Map<string, { stage: 'close_won' | 'close_lost'; ts: number }>();
+    filteredSalespipeRows.forEach((row) => {
+      if (row.source !== 'salespipe') return;
+      if (row.stageKey !== 'close_won' && row.stageKey !== 'close_lost') return;
+      const opportunityId = normalizeId(row.opportunityId);
+      if (!opportunityId || !convertedOpportunityIds.has(opportunityId)) return;
+      const decisionDateRaw = row.closeDate || row.filterDate;
+      const ts = decisionDateRaw ? new Date(decisionDateRaw).getTime() : Number.NEGATIVE_INFINITY;
+      const current = decisionByOpportunity.get(opportunityId);
+      if (!current || ts >= current.ts) {
+        decisionByOpportunity.set(opportunityId, { stage: row.stageKey, ts });
+      }
+    });
+
+    let closeWonCount = 0;
+    let closeLostCount = 0;
+    decisionByOpportunity.forEach((value) => {
+      if (value.stage === 'close_won') closeWonCount += 1;
+      if (value.stage === 'close_lost') closeLostCount += 1;
+    });
+
+    return {
+      convertedCount: convertedOpportunityIds.size,
+      closeWonCount,
+      closeLostCount,
+    };
+  }, [filteredSalespipeRows]);
+
+  const salespipeWinRate = useMemo(() => {
+    const decided = convertedDecisionStats.closeWonCount + convertedDecisionStats.closeLostCount;
+    if (decided === 0) return null;
+    return convertedDecisionStats.closeWonCount / decided;
+  }, [convertedDecisionStats]);
+
+  const salespipeLostRate = useMemo(() => {
+    const decided = convertedDecisionStats.closeWonCount + convertedDecisionStats.closeLostCount;
+    if (decided === 0) return null;
+    return convertedDecisionStats.closeLostCount / decided;
+  }, [convertedDecisionStats]);
+
+  const convertedRate = useMemo(() => {
+    const converted = salespipeStageSummary.converted.count;
+    const notConverted = salespipeStageSummary.not_converted_new.count + salespipeStageSummary.working.count;
+    const total = converted + notConverted;
+    if (total === 0) return null;
+    return converted / total;
+  }, [salespipeStageSummary]);
+
+  const notConvertedRate = useMemo(() => {
+    const converted = salespipeStageSummary.converted.count;
+    const notConverted = salespipeStageSummary.not_converted_new.count + salespipeStageSummary.working.count;
+    const total = converted + notConverted;
+    if (total === 0) return null;
+    return notConverted / total;
+  }, [salespipeStageSummary]);
+
+  const convertedToCloseWonCycleStats = useMemo(() => {
+    const toTs = (value: string | null) => {
+      if (!value) return null;
+      const ts = new Date(value).getTime();
+      return Number.isNaN(ts) ? null : ts;
+    };
+    const msPerDay = 1000 * 60 * 60 * 24;
+    const convertedByOpportunity = new Map<string, number>();
+    const decisionByOpportunity = new Map<string, { stage: 'close_won' | 'close_lost'; ts: number }>();
+
+    filteredSalespipeRows.forEach((row) => {
+      const opportunityId = normalizeId(row.opportunityId);
+      if (!opportunityId) return;
+      if (row.source === 'leads' && row.stageKey === 'converted') {
+        const ts = toTs(row.filterDate);
+        if (ts === null) return;
+        const current = convertedByOpportunity.get(opportunityId);
+        if (current === undefined || ts < current) convertedByOpportunity.set(opportunityId, ts);
+      }
+      if (row.source === 'salespipe' && (row.stageKey === 'close_won' || row.stageKey === 'close_lost')) {
+        const ts = toTs(row.closeDate || row.filterDate);
+        if (ts === null) return;
+        const current = decisionByOpportunity.get(opportunityId);
+        if (!current || ts >= current.ts) {
+          decisionByOpportunity.set(opportunityId, { stage: row.stageKey, ts });
+        }
+      }
+    });
+
+    const dayDiffs: number[] = [];
+    decisionByOpportunity.forEach((decision, opportunityId) => {
+      if (decision.stage !== 'close_won') return;
+      const convertedTs = convertedByOpportunity.get(opportunityId);
+      if (convertedTs === undefined || decision.ts < convertedTs) return;
+      dayDiffs.push(Math.round((decision.ts - convertedTs) / msPerDay));
+    });
+
+    if (dayDiffs.length === 0) return null;
+    const sorted = [...dayDiffs].sort((a, b) => a - b);
+    const n = sorted.length;
+    const averageDays = sorted.reduce((sum, value) => sum + value, 0) / n;
+    const medianDays =
+      n % 2 === 1 ? sorted[Math.floor(n / 2)] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+
+    return {
+      averageDays,
+      medianDays,
+      samples: n,
+    };
+  }, [filteredSalespipeRows]);
+
+  const closeWonToGoLiveCycleStats = useMemo(() => {
+    const toTs = (value: string | null) => {
+      if (!value) return null;
+      const ts = new Date(value).getTime();
+      return Number.isNaN(ts) ? null : ts;
+    };
+    const msPerDay = 1000 * 60 * 60 * 24;
+    const closeWonByOak = new Map<number, number>();
+    const goLiveByOak = new Map<number, number>();
+
+    filteredSalespipeRows.forEach((row) => {
+      if (row.oakId === null) return;
+      if (row.source === 'salespipe' && row.stageKey === 'close_won') {
+        const ts = toTs(row.closeDate || row.filterDate);
+        if (ts === null) return;
+        const current = closeWonByOak.get(row.oakId);
+        if (current === undefined || ts > current) closeWonByOak.set(row.oakId, ts);
+      }
+      if (row.source === 'signups' && row.stageKey === 'go_live') {
+        const ts = toTs(row.filterDate);
+        if (ts === null) return;
+        const current = goLiveByOak.get(row.oakId);
+        if (current === undefined || ts > current) goLiveByOak.set(row.oakId, ts);
+      }
+    });
+
+    const dayDiffs: number[] = [];
+    goLiveByOak.forEach((goLiveTs, oakId) => {
+      const closeWonTs = closeWonByOak.get(oakId);
+      if (closeWonTs === undefined || goLiveTs < closeWonTs) return;
+      dayDiffs.push(Math.round((goLiveTs - closeWonTs) / msPerDay));
+    });
+
+    if (dayDiffs.length === 0) return null;
+    const sorted = [...dayDiffs].sort((a, b) => a - b);
+    const n = sorted.length;
+    const averageDays = sorted.reduce((sum, value) => sum + value, 0) / n;
+    const medianDays =
+      n % 2 === 1 ? sorted[Math.floor(n / 2)] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+
+    return {
+      averageDays,
+      medianDays,
+      samples: n,
+    };
+  }, [filteredSalespipeRows]);
+
+  useEffect(() => {
+    if (convertedRate !== null) setWhatIfConvertedRatePct(convertedRate * 100);
+  }, [convertedRate]);
+
+  useEffect(() => {
+    if (salespipeWinRate !== null) setWhatIfWinRatePct(salespipeWinRate * 100);
+  }, [salespipeWinRate]);
 
   const salespipeKpis = useMemo(() => {
-    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
+    const openRows = filteredSalespipeRows.filter((row) => OPEN_PIPELINE_KPI_STAGES.includes(row.stageKey));
     const totalPipelineArr = openRows.reduce((sum, row) => sum + row.arr, 0);
     const weightedArr = openRows.reduce((sum, row) => sum + row.weightedArr, 0);
-    const signupsCount = trackedSignupsStageStats.count;
-    const goLiveCount = trackedGoLiveStageStats.count;
+    const closeWonCount = convertedDecisionStats.closeWonCount;
     return {
       openRows: openRows.length,
       totalPipelineArr,
       weightedArr,
-      signupsCount,
-      goLiveCount,
+      closeWonCount,
     };
-  }, [filteredSalespipeRows, trackedSignupsStageStats.count, trackedGoLiveStageStats.count]);
+  }, [filteredSalespipeRows, convertedDecisionStats.closeWonCount]);
+
+  const whatIfScenario = useMemo(() => {
+    const clampRate = (value: number) => Math.max(0, Math.min(1, value));
+    const convertedBase = salespipeStageSummary.converted.count;
+    const notConvertedBase =
+      salespipeStageSummary.not_converted_new.count + salespipeStageSummary.working.count;
+    // SQL-Basis folgt der Sales-Pipe-Übersicht (Lead-Gesamtzahl im Filterzeitraum).
+    const totalSql = salespipeStageSummary.sql.count;
+
+    const convertedRateBase = totalSql > 0 ? convertedBase / totalSql : 0;
+    const winRateBase = salespipeWinRate ?? 0;
+
+    const convertedRateWhatIf = clampRate(whatIfConvertedRatePct / 100);
+    const winRateWhatIf = clampRate(whatIfWinRatePct / 100);
+
+    const convertedCountWhatIf = Math.round(totalSql * convertedRateWhatIf);
+    const notConvertedCountWhatIf = Math.max(0, totalSql - convertedCountWhatIf);
+    // Anteil entschiedener Deals an Converted aus Ist-Daten als Basis beibehalten.
+    const decidedBase = convertedDecisionStats.closeWonCount + convertedDecisionStats.closeLostCount;
+    const decidedShareBase = convertedBase > 0 ? decidedBase / convertedBase : 0;
+    const decidedCountWhatIf = Math.round(convertedCountWhatIf * decidedShareBase);
+    const closeWonCountWhatIf = Math.round(decidedCountWhatIf * winRateWhatIf);
+    const closeLostCountWhatIf = Math.max(0, decidedCountWhatIf - closeWonCountWhatIf);
+
+    const openPipelineArrPerDeal =
+      salespipeKpis.openRows > 0 ? salespipeKpis.totalPipelineArr / salespipeKpis.openRows : 0;
+    const closeWonArrPerDeal =
+      convertedDecisionStats.closeWonCount > 0
+        ? salespipeStageSummary.close_won.arr / convertedDecisionStats.closeWonCount
+        : 0;
+    const closeLostArrPerDeal =
+      convertedDecisionStats.closeLostCount > 0
+        ? salespipeStageSummary.close_lost.arr / convertedDecisionStats.closeLostCount
+        : 0;
+
+    return {
+      sqlCount: totalSql,
+      convertedCountBase: convertedBase,
+      notConvertedCountBase: notConvertedBase,
+      closeWonCountBase: convertedDecisionStats.closeWonCount,
+      closeLostCountBase: convertedDecisionStats.closeLostCount,
+      openPipelineArrBase: salespipeKpis.totalPipelineArr,
+      closeWonArrBase: salespipeStageSummary.close_won.arr,
+      closeLostArrBase: salespipeStageSummary.close_lost.arr,
+      convertedRateBase,
+      winRateBase,
+      convertedRateWhatIf,
+      winRateWhatIf,
+      convertedCountWhatIf,
+      notConvertedCountWhatIf,
+      closeWonCountWhatIf,
+      closeLostCountWhatIf,
+      openPipelineArrWhatIf: openPipelineArrPerDeal * convertedCountWhatIf,
+      closeWonArrWhatIf: closeWonArrPerDeal * closeWonCountWhatIf,
+      closeLostArrWhatIf: closeLostArrPerDeal * closeLostCountWhatIf,
+    };
+  }, [
+    salespipeStageSummary,
+    salespipeWinRate,
+    salespipeKpis,
+    convertedDecisionStats.closeWonCount,
+    convertedDecisionStats.closeLostCount,
+    whatIfConvertedRatePct,
+    whatIfWinRatePct,
+  ]);
 
   const probabilityBuckets = useMemo(() => {
     const openRows = filteredSalespipeRows.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
@@ -1579,11 +2485,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       .sort((a, b) => b.overdueDays - a.overdueDays || b.row.arr - a.row.arr);
   }, [baseFilteredSalespipeRows, overdueCloseDaysByProbability]);
 
-  const salespipeMainTableMinWidth = useMemo(
-    () => salespipeMainColWidths.reduce((sum, width) => sum + width, 0),
-    [salespipeMainColWidths]
-  );
-
   const startResizeSalespipeColumn = (index: number, event: any) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1604,10 +2505,10 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   };
 
   const resetSalespipeDateFilter = () => {
-    setSalespipeDateFromInput('');
-    setSalespipeDateToInput('');
-    setSalespipeDateFrom('');
-    setSalespipeDateTo('');
+    setSalespipeDateFromInput(defaultSalespipeYtdRange.from);
+    setSalespipeDateToInput(defaultSalespipeYtdRange.to);
+    setSalespipeDateFrom(defaultSalespipeYtdRange.from);
+    setSalespipeDateTo(defaultSalespipeYtdRange.to);
     setSalespipeRelativeDaysInput('none');
     setSalespipeRelativeDays(null);
   };
@@ -1659,7 +2560,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   }
 
   return (
-    <main className={`mx-auto px-4 py-8 ${reportType === 'salespipe' ? 'max-w-[1800px]' : 'max-w-7xl'}`}>
+    <main className="max-w-7xl mx-auto px-4 py-8">
       {/* Title & Controls */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>
@@ -1723,20 +2624,154 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           <div className="space-y-6">
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-4">NET ARR Forecast (Subs + Pay - Churn)</h3>
+              <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-gray-700 font-medium">Lead Conversion Slider (Lead -&gt; Go-Live)</span>
+                  <span className="text-gray-900 font-semibold">{leadToGoLiveForecastPercent.toFixed(1)}%</span>
+                </div>
+                <div className="mt-2 flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={4}
+                    max={30}
+                    step={0.5}
+                    value={leadToGoLiveForecastPercent}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      setLeadToGoLiveForecastPercent(Number.isFinite(next) ? next : 16);
+                    }}
+                    className="w-full accent-gray-600"
+                  />
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.5}
+                    value={leadToGoLiveForecastPercent}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      if (!Number.isFinite(next)) return;
+                      setLeadToGoLiveForecastPercent(Math.max(0, Math.min(100, next)));
+                    }}
+                    className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                  />
+                </div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Der ARR aus YTD Lead-Conversion Forecast wird mit dieser Conversion-Rate live neu projiziert.
+                </div>
+              </div>
+              <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                {(() => {
+                  const leadVolumeSliderMax = Math.max(
+                    50,
+                    Math.ceil((futureLeadScenarioSummary.ytdLeadAverage > 0 ? futureLeadScenarioSummary.ytdLeadAverage * 3 : 150) / 10) * 10
+                  );
+                  return (
+                    <>
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-gray-700 font-medium">Lead Volumen Slider (Leads pro Future-Monat)</span>
+                  <span className="text-gray-900 font-semibold">{futureLeadVolumeScenarioMonthlyLeads.toFixed(0)}</span>
+                </div>
+                <div className="mt-2 flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={0}
+                    max={leadVolumeSliderMax}
+                    step={1}
+                    value={futureLeadVolumeScenarioMonthlyLeads}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      setFutureLeadVolumeScenarioMonthlyLeads(Number.isFinite(next) ? next : 0);
+                    }}
+                    className="w-full accent-gray-600"
+                  />
+                  <input
+                    type="number"
+                    min={0}
+                    max={leadVolumeSliderMax * 2}
+                    step={1}
+                    value={futureLeadVolumeScenarioMonthlyLeads}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      if (!Number.isFinite(next)) return;
+                      setFutureLeadVolumeScenarioMonthlyLeads(Math.max(0, Math.min(leadVolumeSliderMax * 2, next)));
+                    }}
+                    className="w-20 rounded border border-gray-300 px-2 py-1 text-sm"
+                  />
+                </div>
+                <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                  <div className="rounded border border-gray-200 bg-white p-2">
+                    <div className="text-gray-500">Importierte Leads (Future Monate)</div>
+                    <div className="font-semibold text-gray-800">{futureLeadScenarioSummary.importedFutureLeads.toFixed(0)}</div>
+                  </div>
+                  <div className="rounded border border-gray-200 bg-white p-2">
+                    <div className="text-gray-500">Baseline Leads (Forecast-Basis)</div>
+                    <div className="font-semibold text-gray-800">{futureLeadScenarioSummary.baselineEligibleFutureLeads.toFixed(0)}</div>
+                  </div>
+                  <div className="rounded border border-gray-200 bg-white p-2">
+                    <div className="text-gray-500">Szenario Leads (mit Slider)</div>
+                    <div className="font-semibold text-gray-800">{futureLeadScenarioSummary.scenarioEligibleFutureLeads.toFixed(0)}</div>
+                  </div>
+                </div>
+                <div className="mt-1 text-xs text-gray-500">
+                  Standardwert basiert auf dem importierten YTD-Monatsschnitt.
+                  Hinweis: Wenn importierte Future-Leads fehlen, nutzt das Modell als Fallback Target*YTD-TAM-Fit
+                  (aktuell {(futureLeadScenarioSummary.ytdTamFitRate * 100).toFixed(1)}%) oder den YTD-Leadschnitt
+                  ({futureLeadScenarioSummary.ytdLeadAverage.toFixed(1)}).
+                </div>
+                    </>
+                  );
+                })()}
+              </div>
               <ResponsiveContainer width="100%" height={400}>
                 <ComposedChart data={forecastData}>
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="name" />
                   <YAxis tickFormatter={(val) => `${(val / 1000).toFixed(0)}k`} />
                   <Tooltip
-                    formatter={(value: number, name: string) => [formatCurrency(value), name]}
-                    labelFormatter={(label) => `${label} ${selectedYear}`}
+                    content={renderForecastTooltip}
                   />
                   <Legend />
-                  <Bar 
-                    dataKey="netActual" 
-                    name="Ist NET ARR"
-                    fill="#10B981" 
+                  <Bar
+                    dataKey="arrGoLivesToDate"
+                    stackId="arrSplit"
+                    name="ARR aus Go-Lives bis heute"
+                    fill="#10B981"
+                  />
+                  <Bar
+                    dataKey="arrGoLivesFuture"
+                    stackId="arrSplit"
+                    name="ARR aus Future Go-Lives"
+                    fill="#3B82F6"
+                  />
+                  <Bar
+                    dataKey="arrWeightedPipeline"
+                    stackId="arrSplit"
+                    name="ARR aus Weighted Sales Pipeline"
+                    fill="#D946EF"
+                    minPointSize={3}
+                  />
+                  <Bar
+                    dataKey="arrNotBookedPipeline"
+                    stackId="arrSplit"
+                    name="ARR aus Sign-ups Not Booked"
+                    fill="#FACC15"
+                    minPointSize={4}
+                    stroke="#CA8A04"
+                    strokeWidth={1}
+                  />
+                  <Bar
+                    dataKey="arrConversionBased"
+                    stackId="arrSplit"
+                    name="ARR aus YTD Lead-Conversion Forecast"
+                    fill="#6B7280"
+                    minPointSize={3}
+                  />
+                  <Bar
+                    dataKey="arrChurnDeduction"
+                    stackId="arrSplit"
+                    name="Churn ARR (abgezogen)"
+                    fill="#EF4444"
                   />
                   <Line 
                     type="monotone" 
@@ -1750,7 +2785,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                     type="monotone" 
                     dataKey="netTarget" 
                     name="Goal NET ARR"
-                    stroke="#EF4444" 
+                    stroke="#FACC15" 
                     strokeWidth={2}
                   />
                 </ComposedChart>
@@ -1778,20 +2813,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               </div>
             </div>
 
-            {/* Forecast Info */}
-            <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-6">
-              <div className="flex items-start gap-3">
-                <span className="text-2xl">🔮</span>
-                <div>
-                  <h4 className="font-semibold text-yellow-800 mb-1">Forecast-Logik (3 Stufen)</h4>
-                  <p className="text-sm text-yellow-700">
-                    1) Ist-Monate übernehmen vorhandene Werte für Subs, Pay und NET ARR. 2) Für heute bis +70 Tage wird
-                    Weighted ARR aus der New Sales Pipe in Forecast-Monate eingesteuert. 3) Nur verbleibende Monate
-                    werden per linearer Heuristik ergänzt.
-                  </p>
-                </div>
-              </div>
-            </div>
           </div>
         )}
 
@@ -1811,191 +2832,394 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 md:gap-4">
-                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Open Pipeline #</span>
-                    <p className="text-lg md:text-2xl font-bold text-indigo-700">{salespipeKpis.openRows}</p>
-                  </div>
-                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Open Pipeline ARR</span>
-                    <p className="text-lg md:text-2xl font-bold text-blue-700">{formatCurrency(salespipeKpis.totalPipelineArr)}</p>
-                  </div>
-                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Weighted ARR</span>
-                    <p className="text-lg md:text-2xl font-bold text-emerald-700">{formatCurrency(salespipeKpis.weightedArr)}</p>
-                  </div>
-                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Sign-ups</span>
-                    <p className="text-lg md:text-2xl font-bold text-cyan-700">{salespipeKpis.signupsCount}</p>
-                  </div>
-                  <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
-                    <span className="text-xs text-gray-500">Go-Live</span>
-                    <p className="text-lg md:text-2xl font-bold text-teal-700">{salespipeKpis.goLiveCount}</p>
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
-                  <div className="space-y-3">
-                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                      <input
-                        type="text"
-                        value={salespipeSearch}
-                        onChange={(e) => setSalespipeSearch(e.target.value)}
-                        placeholder="Suche nach Opportunity, Owner, OAK oder Signup..."
-                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none md:max-w-md"
-                      />
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-500">Quelle</span>
-                        <select
-                          value={salespipeSourceFilter}
-                          onChange={(e) => setSalespipeSourceFilter(e.target.value as PipelineSourceFilter)}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
-                        >
-                          <option value="all">Alle Quellen</option>
-                          <option value="salespipe2_only">Nur SalesImport2</option>
-                        </select>
+                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setSalespipeOverviewExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition"
+                  >
+                    <span className="text-sm font-semibold text-gray-700">Sales-Pipe Übersicht</span>
+                    <span className="text-sm text-gray-500">{salespipeOverviewExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
+                  </button>
+                  {salespipeOverviewExpanded && (
+                    <div className="p-4 pt-3 border-t border-gray-200 space-y-4">
+                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-2 md:gap-4">
+                        <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                          <span className="text-xs text-gray-500">Open Pipeline</span>
+                          <p className="text-lg md:text-2xl font-bold text-indigo-700">{salespipeKpis.openRows}</p>
+                        </div>
+                        <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                          <span className="text-xs text-gray-500">Open Pipeline ARR</span>
+                          <p className="text-lg md:text-2xl font-bold text-blue-700">{formatCurrency(salespipeKpis.totalPipelineArr)}</p>
+                        </div>
+                        <div className="bg-white rounded-lg shadow-sm p-3 md:p-4">
+                          <span className="text-xs text-gray-500">Weighted ARR</span>
+                          <p className="text-lg md:text-2xl font-bold text-emerald-700">{formatCurrency(salespipeKpis.weightedArr)}</p>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-gray-500">Stage</span>
-                        <select
-                          value={salespipeStageFilter}
-                          onChange={(e) => setSalespipeStageFilter(e.target.value as PipelineStageKey | 'all')}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
-                        >
-                          <option value="all">Alle</option>
-                          {PIPELINE_STAGE_CONFIG_VISIBLE.map((stage) => (
-                            <option key={stage.key} value={stage.key}>{stage.label}</option>
+
+                      <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="text-sm font-semibold text-gray-700">Probability Stages (Open Pipeline)</h4>
+                          <span className="text-xs text-gray-500">aus gemergten Daten, inkl. SalesImport2</span>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+                          {probabilityBuckets.map((bucket) => (
+                            <div key={bucket.key} className="rounded-lg border border-gray-200 p-3 bg-gray-50">
+                              <div className="text-xs font-medium text-gray-600">{bucket.label}</div>
+                              <div className="text-lg font-bold text-gray-800">{bucket.count}</div>
+                              <div className="text-xs text-gray-500">{formatCurrency(bucket.arr)}</div>
+                            </div>
                           ))}
-                        </select>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center">
-                      <span className="text-xs text-gray-500 md:w-28">Zeitraum</span>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <input
-                          type="date"
-                          value={salespipeDateFromInput}
-                          onChange={(e) => setSalespipeDateFromInput(e.target.value)}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
-                        />
-                        <span className="text-xs text-gray-500">bis</span>
-                        <input
-                          type="date"
-                          value={salespipeDateToInput}
-                          onChange={(e) => setSalespipeDateToInput(e.target.value)}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
-                        />
-                        <button
-                          type="button"
-                          onClick={applySalespipeDateFilter}
-                          className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
-                        >
-                          Anwenden
-                        </button>
-                        <button
-                          type="button"
-                          onClick={resetSalespipeDateFilter}
-                          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                        >
-                          Zurücksetzen
-                        </button>
+                      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-2">
+                        {PIPELINE_STAGE_CONFIG_VISIBLE.map((stage) => (
+                          <div key={stage.key} className={`rounded-lg border p-3 ${stage.bg}`}>
+                            <div className={`text-xs font-medium ${stage.color}`}>{stage.label}</div>
+                            <div className="text-lg font-bold text-gray-800">{salespipeStageSummary[stage.key].count}</div>
+                            <div className="text-xs text-gray-500">{formatCurrency(salespipeStageSummary[stage.key].arr)}</div>
+                          </div>
+                        ))}
+                        <div className="rounded-lg border p-3 bg-emerald-50">
+                          <div className="text-xs font-medium text-emerald-700">Winrate</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {salespipeWinRate === null ? '-' : `${(salespipeWinRate * 100).toFixed(1)}%`}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            Close Won / (Close Won + Close Lost)
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-rose-50">
+                          <div className="text-xs font-medium text-rose-700">Lost Rate</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {salespipeLostRate === null ? '-' : `${(salespipeLostRate * 100).toFixed(1)}%`}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            Close Lost / (Close Won + Close Lost)
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-fuchsia-50">
+                          <div className="text-xs font-medium text-fuchsia-700">Converted Rate</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {convertedRate === null ? '-' : `${(convertedRate * 100).toFixed(1)}%`}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            Converted / (Converted + Not converted)
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-slate-50">
+                          <div className="text-xs font-medium text-slate-700">Not converted Rate</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {notConvertedRate === null ? '-' : `${(notConvertedRate * 100).toFixed(1)}%`}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            Not converted / (Converted + Not converted)
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-violet-50 lg:col-span-2">
+                          <div className="text-xs font-medium text-violet-700">
+                            Ø Sales Cycle Length
+                          </div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {convertedToCloseWonCycleStats
+                              ? `${convertedToCloseWonCycleStats.averageDays.toFixed(1)} Tage`
+                              : '-'}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            Converted → Close Won (Opportunity-ID), Median:{' '}
+                            {convertedToCloseWonCycleStats
+                              ? `${convertedToCloseWonCycleStats.medianDays.toFixed(1)} Tage`
+                              : '-'}
+                            {' '}| N={convertedToCloseWonCycleStats?.samples ?? 0}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-cyan-50 lg:col-span-2">
+                          <div className="text-xs font-medium text-cyan-700">
+                            Ø Close Won → Go-Live
+                          </div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {closeWonToGoLiveCycleStats
+                              ? `${closeWonToGoLiveCycleStats.averageDays.toFixed(1)} Tage`
+                              : '-'}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            OAK Match, Median:{' '}
+                            {closeWonToGoLiveCycleStats
+                              ? `${closeWonToGoLiveCycleStats.medianDays.toFixed(1)} Tage`
+                              : '-'}
+                            {' '}| N={closeWonToGoLiveCycleStats?.samples ?? 0}
+                          </div>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center">
-                      <span className="text-xs text-gray-500 md:w-28">Relativ ab heute</span>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <select
-                          value={salespipeRelativeDaysInput}
-                          onChange={(e) => setSalespipeRelativeDaysInput(e.target.value)}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
-                        >
-                          <option value="none">Kein relativer Filter</option>
-                          <option value="7">Letzte 7 Tage</option>
-                          <option value="30">Letzte 30 Tage</option>
-                          <option value="60">Letzte 60 Tage</option>
-                          <option value="90">Letzte 90 Tage</option>
-                          <option value="180">Letzte 180 Tage</option>
-                        </select>
-                        <span className="text-xs text-gray-400">mit „Anwenden“ aktivieren (optional zusätzlich zum Zeitraum)</span>
+                      <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
+                        <div className="space-y-3">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <input
+                              type="text"
+                              value={salespipeSearch}
+                              onChange={(e) => setSalespipeSearch(e.target.value)}
+                              placeholder="Suche nach Opportunity, Owner, OAK oder Signup..."
+                              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none md:max-w-md"
+                            />
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-gray-500">Quelle</span>
+                              <select
+                                value={salespipeSourceFilter}
+                                onChange={(e) => setSalespipeSourceFilter(e.target.value as PipelineSourceFilter)}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                              >
+                                <option value="all">Alle Quellen</option>
+                                <option value="salespipe2_only">Nur SalesImport2</option>
+                              </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-gray-500">Stage</span>
+                              <select
+                                value={salespipeStageFilter}
+                                onChange={(e) => setSalespipeStageFilter(e.target.value as PipelineStageKey | 'all')}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                              >
+                                <option value="all">Alle</option>
+                                {PIPELINE_STAGE_CONFIG_VISIBLE.map((stage) => (
+                                  <option key={stage.key} value={stage.key}>{stage.label}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                            <span className="text-xs text-gray-500 md:w-28">Zeitraum</span>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <input
+                                type="date"
+                                value={salespipeDateFromInput}
+                                onChange={(e) => setSalespipeDateFromInput(e.target.value)}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                              />
+                              <span className="text-xs text-gray-500">bis</span>
+                              <input
+                                type="date"
+                                value={salespipeDateToInput}
+                                onChange={(e) => setSalespipeDateToInput(e.target.value)}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                              />
+                              <button
+                                type="button"
+                                onClick={applySalespipeDateFilter}
+                                className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
+                              >
+                                Anwenden
+                              </button>
+                              <button
+                                type="button"
+                                onClick={resetSalespipeDateFilter}
+                                className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                              >
+                                Zurücksetzen
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                            <span className="text-xs text-gray-500 md:w-28">Relativ ab heute</span>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <select
+                                value={salespipeRelativeDaysInput}
+                                onChange={(e) => setSalespipeRelativeDaysInput(e.target.value)}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-sm"
+                              >
+                                <option value="none">Kein relativer Filter</option>
+                                <option value="7">Letzte 7 Tage</option>
+                                <option value="30">Letzte 30 Tage</option>
+                                <option value="60">Letzte 60 Tage</option>
+                                <option value="90">Letzte 90 Tage</option>
+                                <option value="180">Letzte 180 Tage</option>
+                              </select>
+                              <span className="text-xs text-gray-400">mit „Anwenden“ aktivieren (optional zusätzlich zum Zeitraum)</span>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                            <span className="text-xs text-gray-500 md:w-28">Schnellfilter</span>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => applySalespipeQuickPreset('today')}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                              >
+                                Heute
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => applySalespipeQuickPreset('this_week')}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                              >
+                                Diese Woche
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => applySalespipeQuickPreset('this_month')}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                              >
+                                Dieser Monat
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => applySalespipeQuickPreset('ytd')}
+                                className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                              >
+                                YTD
+                              </button>
+                            </div>
+                          </div>
+
+                          <p className="text-xs text-gray-500">
+                            Zeitraum:{' '}
+                            {salespipeDateFrom || salespipeDateTo
+                              ? `${salespipeDateFrom || '...'} bis ${salespipeDateTo || '...'}`
+                              : `gesamtes Jahr ${selectedYear}`}
+                            {' · '}
+                            Relativ:{' '}
+                            {salespipeRelativeDays !== null ? `letzte ${salespipeRelativeDays} Tage (ab heute)` : 'aus'}
+                            {' '} (Filterdatum je Stage aus Importdatum/Close Date/Signup Date)
+                          </p>
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="flex flex-col gap-2 md:flex-row md:items-center">
-                      <span className="text-xs text-gray-500 md:w-28">Schnellfilter</span>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => applySalespipeQuickPreset('today')}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                        >
-                          Heute
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => applySalespipeQuickPreset('this_week')}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                        >
-                          Diese Woche
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => applySalespipeQuickPreset('this_month')}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                        >
-                          Dieser Monat
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => applySalespipeQuickPreset('ytd')}
-                          className="rounded-lg border border-gray-300 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                        >
-                          YTD
-                        </button>
-                      </div>
                     </div>
-
-                    <p className="text-xs text-gray-500">
-                      Zeitraum:{' '}
-                      {salespipeDateFrom || salespipeDateTo
-                        ? `${salespipeDateFrom || '...'} bis ${salespipeDateTo || '...'}`
-                        : `gesamtes Jahr ${selectedYear}`}
-                      {' · '}
-                      Relativ:{' '}
-                      {salespipeRelativeDays !== null ? `letzte ${salespipeRelativeDays} Tage (ab heute)` : 'aus'}
-                      {' '} (Filterdatum je Stage aus Importdatum/Close Date/Signup Date)
-                    </p>
-                  </div>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
-                  {PIPELINE_STAGE_CONFIG_VISIBLE.map((stage) => (
-                    <div key={stage.key} className={`rounded-lg border p-3 ${stage.bg}`}>
-                      <div className={`text-xs font-medium ${stage.color}`}>{stage.label}</div>
-                      <div className="text-lg font-bold text-gray-800">{salespipeStageSummary[stage.key].count}</div>
-                      <div className="text-xs text-gray-500">{formatCurrency(salespipeStageSummary[stage.key].arr)}</div>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className="text-sm font-semibold text-gray-700">Probability Stages (Open Pipeline)</h4>
-                    <span className="text-xs text-gray-500">aus gemergten Daten, inkl. SalesImport2</span>
-                  </div>
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-                    {probabilityBuckets.map((bucket) => (
-                      <div key={bucket.key} className="rounded-lg border border-gray-200 p-3 bg-gray-50">
-                        <div className="text-xs font-medium text-gray-600">{bucket.label}</div>
-                        <div className="text-lg font-bold text-gray-800">{bucket.count}</div>
-                        <div className="text-xs text-gray-500">{formatCurrency(bucket.arr)}</div>
+                <div className="bg-white rounded-xl shadow-sm border border-indigo-200 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setSalespipeWhatIfExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-indigo-50 transition"
+                  >
+                    <span className="text-sm font-semibold text-indigo-800">What-if Szenario (Sales Pipe)</span>
+                    <span className="text-sm text-indigo-600">{salespipeWhatIfExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
+                  </button>
+                  {salespipeWhatIfExpanded && (
+                    <div className="p-4 pt-3 border-t border-indigo-200 space-y-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="rounded-lg border border-gray-200 bg-white p-3">
+                          <label className="text-xs font-medium text-gray-700 block mb-1">
+                            Converted Rate (%)
+                          </label>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={0.5}
+                            value={whatIfConvertedRatePct}
+                            onChange={(e) => setWhatIfConvertedRatePct(Number(e.target.value) || 0)}
+                            className="w-full accent-indigo-600"
+                          />
+                          <div className="text-xs text-gray-700 mt-1">
+                            Szenario: {whatIfConvertedRatePct.toFixed(1)}%
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">
+                            Basis: {(whatIfScenario.convertedRateBase * 100).toFixed(1)}% → Szenario: {(whatIfScenario.convertedRateWhatIf * 100).toFixed(1)}%
+                          </p>
+                        </div>
+                        <div className="rounded-lg border border-gray-200 bg-white p-3">
+                          <label className="text-xs font-medium text-gray-700 block mb-1">
+                            Winrate (%)
+                          </label>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={0.5}
+                            value={whatIfWinRatePct}
+                            onChange={(e) => setWhatIfWinRatePct(Number(e.target.value) || 0)}
+                            className="w-full accent-emerald-600"
+                          />
+                          <div className="text-xs text-gray-700 mt-1">
+                            Szenario: {whatIfWinRatePct.toFixed(1)}%
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">
+                            Basis: {(whatIfScenario.winRateBase * 100).toFixed(1)}% → Szenario: {(whatIfScenario.winRateWhatIf * 100).toFixed(1)}%
+                          </p>
+                        </div>
                       </div>
-                    ))}
-                  </div>
+
+                      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-2">
+                        <div className="rounded-lg border p-3 bg-blue-50">
+                          <div className="text-xs text-blue-700">SQL (fix)</div>
+                          <div className="text-lg font-bold text-gray-800">{whatIfScenario.sqlCount}</div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-fuchsia-50">
+                          <div className="text-xs text-fuchsia-700">Converted</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {whatIfScenario.convertedCountWhatIf}
+                            <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {whatIfScenario.convertedCountBase})</span>
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-slate-50">
+                          <div className="text-xs text-slate-700">Not converted</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {whatIfScenario.notConvertedCountWhatIf}
+                            <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {whatIfScenario.notConvertedCountBase})</span>
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-emerald-50">
+                          <div className="text-xs text-emerald-700">Close Won</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {whatIfScenario.closeWonCountWhatIf}
+                            <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {whatIfScenario.closeWonCountBase})</span>
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-rose-50">
+                          <div className="text-xs text-rose-700">Close Lost</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {whatIfScenario.closeLostCountWhatIf}
+                            <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {whatIfScenario.closeLostCountBase})</span>
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-indigo-50">
+                          <div className="text-xs text-indigo-700">Open Pipeline ARR</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {formatCurrency(whatIfScenario.openPipelineArrWhatIf)}
+                            <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {formatCurrency(whatIfScenario.openPipelineArrBase)})</span>
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-teal-50">
+                          <div className="text-xs text-teal-700">Close Won ARR</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {formatCurrency(whatIfScenario.closeWonArrWhatIf)}
+                            <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {formatCurrency(whatIfScenario.closeWonArrBase)})</span>
+                          </div>
+                        </div>
+                        <div className="rounded-lg border p-3 bg-orange-50">
+                          <div className="text-xs text-orange-700">Close Lost ARR</div>
+                          <div className="text-lg font-bold text-gray-800">
+                            {formatCurrency(whatIfScenario.closeLostArrWhatIf)}
+                            <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {formatCurrency(whatIfScenario.closeLostArrBase)})</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                <div style={{ overflowX: 'auto' }} className="bg-white rounded-xl shadow-sm pb-2">
+                <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                  <div
+                    ref={salespipeMainTopScrollRef}
+                    onScroll={handleTopScroll}
+                    style={{ overflowX: 'scroll', overflowY: 'hidden', height: 10, marginBottom: -1 }}
+                  >
+                    <div style={{ width: salespipeMainTableMinWidth, height: 1 }} />
+                  </div>
+                <div
+                  ref={salespipeMainBottomScrollRef}
+                  onScroll={handleBottomScroll}
+                  style={{ overflowX: 'auto' }}
+                  className="pb-2"
+                >
                   <table style={{ minWidth: salespipeMainTableMinWidth }} className="text-xs table-fixed">
                     <colgroup>
                       {salespipeMainColWidths.map((width, idx) => (
@@ -2094,6 +3318,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                       )}
                     </tbody>
                   </table>
+                </div>
                 </div>
 
                 <div style={{ overflowX: 'auto', width: '100%' }} className="bg-white rounded-xl shadow-sm border border-rose-200 pb-2">
@@ -2249,8 +3474,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               </div>
             </div>
 
-            <div className="text-xs text-gray-500 -mt-2">
-              Basis: (Summe ARR / 12) / Summe Go-Lives über die ausgewählten Monate. Daher gilt: Subs Bill + Pay Bill = All-in Bill.
+            <div className="text-xs text-gray-500 -mt-2 space-y-1">
+              <p>{t('dlt.reports.ytdBillKpiBasis')}</p>
+              <p>{t('dlt.reports.ytdBillKpiPayTargetNote')}</p>
             </div>
 
                 <div className="bg-white rounded-lg md:rounded-xl shadow-sm p-3 md:p-4 border border-gray-200">
@@ -2363,30 +3589,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                       </>
                     );
                   })()}
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setChartsExpanded((prev) => !prev)}
-                className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition"
-              >
-                <span className="text-sm font-semibold text-gray-700">Grafikbereich</span>
-                <span className="text-sm text-gray-500">{chartsExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
-              </button>
-
-              {chartsExpanded && (
-                <div className="p-4 pt-2">
-                  {/* Performance über Zeit (Subs + Pay IST/Ziel) */}
-                  <PerformanceChart monthlyResults={ytdSelectedMonthlyResult} showTargets={true} />
-
-                  {/* Pay-Entwicklung (nur Pay) */}
-                  <PayPerformanceChart monthlyResults={ytdSelectedMonthlyResult} />
-
-                  {/* Go-Lives pro Monat */}
-                  <GoLivesBarChart monthlyResults={ytdSelectedMonthlyResult} />
                 </div>
               )}
             </div>

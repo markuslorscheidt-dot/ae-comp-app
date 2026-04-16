@@ -58,10 +58,35 @@ function parseNumber(value: unknown): number | null {
   if (!raw) return null;
 
   let normalized = raw;
-  if (raw.includes('.') && raw.includes(',')) {
-    normalized = raw.replace(/\./g, '').replace(',', '.');
+
+  // Support both US (1,234.56) and DE (1.234,56) number formats.
+  if (raw.includes(',') && raw.includes('.')) {
+    const lastComma = raw.lastIndexOf(',');
+    const lastDot = raw.lastIndexOf('.');
+    if (lastDot > lastComma) {
+      // US format: comma as thousands separator, dot as decimal separator.
+      normalized = raw.replace(/,/g, '');
+    } else {
+      // DE format: dot as thousands separator, comma as decimal separator.
+      normalized = raw.replace(/\./g, '').replace(/,/g, '.');
+    }
   } else if (raw.includes(',')) {
-    normalized = raw.replace(',', '.');
+    const commaCount = (raw.match(/,/g) || []).length;
+    if (commaCount > 1) {
+      // Multiple commas are most likely thousands separators.
+      normalized = raw.replace(/,/g, '');
+    } else {
+      const [left, right = ''] = raw.split(',');
+      // Single comma with 1-2 trailing digits is likely decimal comma.
+      if (right.length > 0 && right.length <= 2) normalized = `${left}.${right}`;
+      else normalized = raw.replace(/,/g, '');
+    }
+  } else if (raw.includes('.')) {
+    const dotCount = (raw.match(/\./g) || []).length;
+    if (dotCount > 1) {
+      // Multiple dots are most likely thousands separators.
+      normalized = raw.replace(/\./g, '');
+    }
   }
 
   const n = Number(normalized);
@@ -147,7 +172,11 @@ function getDriveAuth() {
   const privateKeyRaw = process.env.GOOGLE_DRIVE_PRIVATE_KEY;
   if (!clientEmail || !privateKeyRaw) return null;
   const privateKey = privateKeyRaw.replace(/\\n/g, '\n');
-  return new google.auth.JWT(clientEmail, undefined, privateKey, DRIVE_SCOPE);
+  return new google.auth.JWT({
+    email: clientEmail,
+    key: privateKey,
+    scopes: DRIVE_SCOPE,
+  });
 }
 
 async function listZipFiles(): Promise<{ success: true; files: DriveFileMeta[] } | { success: false; status: number; error: string }> {
@@ -167,7 +196,9 @@ async function listZipFiles(): Promise<{ success: true; files: DriveFileMeta[] }
 
   const drive = google.drive({ version: 'v3', auth });
   const response = await drive.files.list({
-    q: `'${folderId}' in parents and trashed = false and mimeType = 'application/zip'`,
+    q:
+      `'${folderId}' in parents and trashed = false and (` +
+      `mimeType = 'application/zip' or mimeType = 'application/x-zip' or name contains '.zip')`,
     fields: 'files(id,name,modifiedTime,size,mimeType)',
     orderBy: 'modifiedTime desc',
     pageSize: 50,
@@ -197,13 +228,17 @@ async function downloadZip(fileId: string): Promise<Buffer> {
   return Buffer.from(response.data as ArrayBuffer);
 }
 
-async function getLatestUnprocessedZip(supabase: ReturnType<typeof createClient>) {
+async function getLatestUnprocessedZip(supabase: ReturnType<typeof createClient>, force = false) {
   const listResult = await listZipFiles();
   if (!listResult.success) return listResult;
 
   const driveFiles = listResult.files;
   if (driveFiles.length === 0) {
     return { success: false as const, status: 404, error: 'Keine ZIP-Dateien im Drive-Ordner gefunden.' };
+  }
+
+  if (force) {
+    return { success: true as const, file: driveFiles[0] };
   }
 
   const fileIds = driveFiles.map((f) => f.id);
@@ -245,8 +280,11 @@ function parseCsvText(csvText: string): Record<string, unknown>[] {
   return (parsed.data || []).map((row) => normalizeRowKeys(row as Record<string, unknown>));
 }
 
-export async function extractDriveZipData(supabase: ReturnType<typeof createClient>): Promise<ExtractResult> {
-  const latest = await getLatestUnprocessedZip(supabase);
+export async function extractDriveZipData(
+  supabase: ReturnType<typeof createClient>,
+  options?: { force?: boolean }
+): Promise<ExtractResult> {
+  const latest = await getLatestUnprocessedZip(supabase, Boolean(options?.force));
   if (!latest.success) {
     return { success: false, status: latest.status, error: latest.error };
   }
@@ -640,13 +678,13 @@ export async function getChurnDriveAutoImportState() {
   };
 }
 
-export async function runDryRun() {
+export async function runDryRun(options?: { force?: boolean }) {
   const supabase = getServerSupabase();
   if (!supabase) {
     return { success: false as const, status: 500, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' };
   }
 
-  const extracted = await extractDriveZipData(supabase);
+  const extracted = await extractDriveZipData(supabase, options);
   if (!extracted.success) {
     return { success: false as const, status: extracted.status, error: extracted.error };
   }
@@ -664,7 +702,9 @@ export async function runDryRun() {
   };
 }
 
-export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }) {
+export async function runCommitImport(
+  context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean; force?: boolean }
+) {
   const supabase = getServerSupabase();
   if (!supabase) {
     return {
@@ -677,7 +717,7 @@ export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; a
   const triggeredBy: ImportTrigger = context?.triggeredBy || 'manual';
   const autoImportEnabled = context?.autoImportEnabled ?? false;
 
-  const extracted = await extractDriveZipData(supabase);
+  const extracted = await extractDriveZipData(supabase, { force: Boolean(context?.force) });
   if (!extracted.success) {
     const status: ImportStatus = extracted.status === 200 ? 'skipped' : 'failed';
     await persistImportRun({

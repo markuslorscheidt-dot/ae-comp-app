@@ -144,7 +144,11 @@ function getDriveAuth() {
   const privateKeyRaw = process.env.GOOGLE_DRIVE_PRIVATE_KEY;
   if (!clientEmail || !privateKeyRaw) return null;
   const privateKey = privateKeyRaw.replace(/\\n/g, '\n');
-  return new google.auth.JWT(clientEmail, undefined, privateKey, DRIVE_SCOPE);
+  return new google.auth.JWT({
+    email: clientEmail,
+    key: privateKey,
+    scopes: DRIVE_SCOPE,
+  });
 }
 
 async function listSignupsCsvFiles(): Promise<

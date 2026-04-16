@@ -67,7 +67,7 @@ function GlobalAdminWrapper({ user, onBack, onSignOut }: { user: User; onBack: (
 }
 
 function AppContent() {
-  const { user, loading, signIn, signUp, signOut } = useAuth();
+  const { user, loading, signIn, signUp, signOut, requestOnboardingAccess } = useAuth();
   const [selectedArea, setSelectedArea] = useState<BusinessArea | null>(null);
   const [showAdmin, setShowAdmin] = useState(false);
 
@@ -85,7 +85,7 @@ function AppContent() {
 
   // Not logged in - show Auth Form
   if (!user) {
-    return <AuthForm onSignIn={signIn} onSignUp={signUp} />;
+    return <AuthForm onSignIn={signIn} onSignUp={signUp} onRequestOnboarding={requestOnboardingAccess} />;
   }
 
   // Show Admin Panel (from Area Selector)

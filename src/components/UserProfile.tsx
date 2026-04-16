@@ -8,7 +8,8 @@ import {
   formatCurrency, 
   formatPercent,
   getAchievementColor,
-  calculateYTDSummary
+  calculateYTDSummary,
+  type PayArrReportingOptions
 } from '@/lib/calculations';
 import { calculateBadges, EarnedBadge, RARITY_COLORS } from '@/lib/badges';
 
@@ -21,6 +22,7 @@ interface UserProfileProps {
   onBack: () => void;
   onSave?: (updatedUser: Partial<User>) => Promise<void>;
   canEdit: boolean;
+  payArrReportingOptions?: PayArrReportingOptions;
 }
 
 const REGIONS = [
@@ -42,7 +44,8 @@ export default function UserProfile({
   allUsers,
   onBack,
   onSave,
-  canEdit
+  canEdit,
+  payArrReportingOptions
 }: UserProfileProps) {
   const { t } = useLanguage();
   const [isEditing, setIsEditing] = useState(false);
@@ -87,8 +90,9 @@ export default function UserProfile({
   // YTD Performance berechnen
   const ytdSummary = useMemo(() => {
     if (!settings || goLives.length === 0) return null;
-    return calculateYTDSummary(goLives, settings);
-  }, [goLives, settings]);
+    const currentMonth = new Date().getMonth() + 1;
+    return calculateYTDSummary(goLives, settings, currentMonth, payArrReportingOptions);
+  }, [goLives, settings, payArrReportingOptions]);
 
   // Badges berechnen
   const badges = useMemo(() => {

@@ -3,8 +3,8 @@
 import { useState, useMemo } from 'react';
 import { User, isPlannable, UserRole } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
-import { useAllUsers, useMultiUserData } from '@/lib/hooks';
-import { calculateYearSummary, formatCurrency, formatPercent } from '@/lib/calculations';
+import { useAllUsers, useMultiUserData, usePaymarginImportedCohortKeys } from '@/lib/hooks';
+import { calculateYearSummary, formatCurrency, formatPercent, type PayArrReportingOptions } from '@/lib/calculations';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 
 interface DLTTeamPerformanceProps {
@@ -38,7 +38,23 @@ export default function DLTTeamPerformance({ user }: DLTTeamPerformanceProps) {
   
   // Load multi-user data
   const userIds = useMemo(() => plannableUsers.map(u => u.id), [plannableUsers]);
-  const { data: multiUserData, loading: dataLoading } = useMultiUserData(userIds, selectedYear);
+  const { settings: multiSettings, goLives: multiGoLives, loading: dataLoading } = useMultiUserData(userIds, selectedYear);
+
+  const paymarginCohortKeys = usePaymarginImportedCohortKeys(true);
+  const payArrReportingOptions = useMemo((): PayArrReportingOptions | undefined => {
+    if (paymarginCohortKeys === undefined) return undefined;
+    return { paymarginImportedCohortKeys: paymarginCohortKeys };
+  }, [paymarginCohortKeys]);
+
+  const multiUserData = useMemo(
+    () =>
+      userIds.map((id) => ({
+        userId: id,
+        settings: multiSettings.get(id),
+        goLives: multiGoLives.get(id) || [],
+      })),
+    [userIds, multiSettings, multiGoLives]
+  );
 
   // Calculate performance data for each user
   const performanceData = useMemo(() => {
@@ -50,7 +66,7 @@ export default function DLTTeamPerformance({ user }: DLTTeamPerformanceProps) {
         return null;
       }
 
-      const summary = calculateYearSummary(goLives, settings);
+      const summary = calculateYearSummary(goLives, settings, payArrReportingOptions);
       
       return {
         id: userId,
@@ -71,7 +87,7 @@ export default function DLTTeamPerformance({ user }: DLTTeamPerformanceProps) {
         terminals: summary.total_terminals
       };
     }).filter(Boolean) as NonNullable<typeof performanceData[number]>[];
-  }, [multiUserData, plannableUsers]);
+  }, [multiUserData, plannableUsers, payArrReportingOptions]);
 
   // Sorted performance data
   const sortedData = useMemo(() => {

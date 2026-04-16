@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { User, BusinessArea, BUSINESS_AREA_LABELS, isPlannable } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
-import { useAllUsers, useMultiUserData } from '@/lib/hooks';
-import { calculateYearSummary, formatCurrency, formatPercent } from '@/lib/calculations';
+import { useAllUsers, useMultiUserData, usePaymarginImportedCohortKeys } from '@/lib/hooks';
+import { calculateYearSummary, formatCurrency, formatPercent, type PayArrReportingOptions } from '@/lib/calculations';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell } from 'recharts';
 
 interface DLTLeadershipDashboardProps {
@@ -37,7 +37,23 @@ export default function DLTLeadershipDashboard({ user }: DLTLeadershipDashboardP
   
   // Load multi-user data
   const userIds = useMemo(() => plannableUsers.map(u => u.id), [plannableUsers]);
-  const { data: multiUserData, loading: dataLoading } = useMultiUserData(userIds, selectedYear);
+  const { settings: multiSettings, goLives: multiGoLives, loading: dataLoading } = useMultiUserData(userIds, selectedYear);
+
+  const paymarginCohortKeys = usePaymarginImportedCohortKeys(true);
+  const payArrReportingOptions = useMemo((): PayArrReportingOptions | undefined => {
+    if (paymarginCohortKeys === undefined) return undefined;
+    return { paymarginImportedCohortKeys: paymarginCohortKeys };
+  }, [paymarginCohortKeys]);
+
+  const multiUserData = useMemo(
+    () =>
+      userIds.map((id) => ({
+        userId: id,
+        settings: multiSettings.get(id),
+        goLives: multiGoLives.get(id) || [],
+      })),
+    [userIds, multiSettings, multiGoLives]
+  );
 
   // Calculate aggregated KPIs
   const kpis = useMemo(() => {
@@ -68,7 +84,7 @@ export default function DLTLeadershipDashboard({ user }: DLTLeadershipDashboardP
     multiUserData.forEach(({ settings, goLives }) => {
       if (!settings) return;
       
-      const summary = calculateYearSummary(goLives, settings);
+      const summary = calculateYearSummary(goLives, settings, payArrReportingOptions);
       
       totalGoLives += summary.total_go_lives;
       totalGoLivesTarget += summary.total_go_lives_target;
@@ -95,7 +111,7 @@ export default function DLTLeadershipDashboard({ user }: DLTLeadershipDashboardP
       activeAEs: activeCount,
       avgAchievement: activeCount > 0 ? achievementSum / activeCount : 0
     };
-  }, [multiUserData]);
+  }, [multiUserData, payArrReportingOptions]);
 
   // Monthly trend data
   const monthlyTrend = useMemo(() => {
@@ -113,7 +129,7 @@ export default function DLTLeadershipDashboard({ user }: DLTLeadershipDashboardP
     multiUserData.forEach(({ settings, goLives }) => {
       if (!settings) return;
       
-      const summary = calculateYearSummary(goLives, settings);
+      const summary = calculateYearSummary(goLives, settings, payArrReportingOptions);
       
       summary.monthly_results.forEach((result, idx) => {
         monthlyData[idx].subsARR += result.subs_actual;
@@ -124,7 +140,7 @@ export default function DLTLeadershipDashboard({ user }: DLTLeadershipDashboardP
     });
 
     return monthlyData;
-  }, [multiUserData]);
+  }, [multiUserData, payArrReportingOptions]);
 
   // KPI Card Component
   const KPICard = ({ 

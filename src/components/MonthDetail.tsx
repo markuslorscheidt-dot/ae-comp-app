@@ -5,7 +5,7 @@ import { AESettings, GoLive, User, canReceiveGoLives, getDefaultCommissionReleva
 import { Partner, SubscriptionPackage } from '@/lib/golive-types';
 import { loadPartners, loadSubscriptionPackages } from '@/lib/golive-import-hooks';
 import { useLanguage } from '@/lib/LanguageContext';
-import { calculateMonthlyResult, formatCurrency, formatPercent, getAchievementColor } from '@/lib/calculations';
+import { calculateMonthlyResult, formatCurrency, formatPercent, getAchievementColor, type PayArrReportingOptions } from '@/lib/calculations';
 import DebugPanel from './DebugPanel';
 
 interface MonthDetailProps {
@@ -21,6 +21,7 @@ interface MonthDetailProps {
   canEnterPayARR?: boolean;
   canAddGoLives?: boolean;
   canEditGoLives?: boolean;
+  payArrReportingOptions?: PayArrReportingOptions;
 }
 
 export default function MonthDetail({ 
@@ -35,10 +36,11 @@ export default function MonthDetail({
   onAddGoLive,
   canEnterPayARR = false,
   canAddGoLives = true,
-  canEditGoLives = true
+  canEditGoLives = true,
+  payArrReportingOptions
 }: MonthDetailProps) {
   const { t } = useLanguage();
-  const result = calculateMonthlyResult(month, goLives, settings);
+  const result = calculateMonthlyResult(month, goLives, settings, payArrReportingOptions);
   
   // Edit Modal State
   const [editingGoLive, setEditingGoLive] = useState<GoLive | null>(null);

@@ -7,6 +7,7 @@
 -- - Manuelle Writes auf go_lives (INSERT/UPDATE/DELETE) zentral sperren/freigeben
 -- - Standard ist gesperrt (enabled = true)
 -- - Service-Role (z. B. Batch-Import API) darf weiterhin schreiben
+-- - Ausnahme UPDATE: reine Anpassung von pay_arr (+ updated_at) bleibt erlaubt (Pay-Ist-Reporting)
 -- ============================================================================
 
 BEGIN;
@@ -58,6 +59,14 @@ BEGIN
   WHERE key = 'go_live_manual_write_locked';
 
   IF COALESCE(manual_locked, true) THEN
+    -- Nur pay_arr / updated_at geaendert: erlauben (manuelles Pay Ist trotz Import-Sperre)
+    IF TG_OP = 'UPDATE' THEN
+      IF (to_jsonb(NEW) - 'pay_arr' - 'updated_at')
+         IS NOT DISTINCT FROM (to_jsonb(OLD) - 'pay_arr' - 'updated_at') THEN
+        RETURN NEW;
+      END IF;
+    END IF;
+
     RAISE EXCEPTION
       USING MESSAGE = 'MANUAL_GO_LIVE_WRITE_LOCKED',
             HINT = 'Manuelle Go-Live-Erfassung ist aktuell schreibgeschuetzt.';

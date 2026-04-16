@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
 import { runCommitImport, runDryRun } from './shared';
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const result = await runDryRun();
+    const url = new URL(request.url);
+    const forceRaw = (url.searchParams.get('force') || '').toLowerCase();
+    const force = forceRaw === '1' || forceRaw === 'true' || forceRaw === 'yes';
+    const result = await runDryRun({ force });
     if (!result.success) {
       return NextResponse.json(result, { status: result.status || 500 });
     }
@@ -16,9 +19,12 @@ export async function GET() {
   }
 }
 
-export async function POST() {
+export async function POST(request: Request) {
   try {
-    const result = await runCommitImport();
+    const url = new URL(request.url);
+    const forceRaw = (url.searchParams.get('force') || '').toLowerCase();
+    const force = forceRaw === '1' || forceRaw === 'true' || forceRaw === 'yes';
+    const result = await runCommitImport({ force });
     if (!result.success) {
       return NextResponse.json(result, { status: result.status || 500 });
     }

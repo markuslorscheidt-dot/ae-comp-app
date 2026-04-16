@@ -25,17 +25,41 @@ export async function GET(request: Request) {
     return NextResponse.json({ success: false, error: 'Ungueltiger Go-Live-Monat.' }, { status: 400 });
   }
 
-  const baseQuery = supabase
-    .from('paymargin_import_runs')
-    .select('id, mode, status, source_file_name, year, go_live_month, rows_updated, created_at')
-    .eq('mode', 'commit')
-    .eq('status', 'success');
+  const selectWithNetMargin =
+    'id, mode, status, source_file_name, year, go_live_month, rows_updated, created_at, imported_oak_ids_count, avg_net_margin_monthly';
+  const selectLegacy = 'id, mode, status, source_file_name, year, go_live_month, rows_updated, created_at';
 
-  const { data: selectedCohortRuns, error: selectedError } = await baseQuery
+  let selectedCohortRuns: any[] | null = null;
+  let selectedError: any = null;
+  let useLegacySelect = false;
+
+  ({ data: selectedCohortRuns, error: selectedError } = await supabase
+    .from('paymargin_import_runs')
+    .select(selectWithNetMargin)
+    .eq('mode', 'commit')
+    .eq('status', 'success')
     .eq('year', year)
     .eq('go_live_month', goLiveMonth)
     .order('created_at', { ascending: false })
-    .limit(1);
+    .limit(1));
+
+  const selectedErrorMsg = String(selectedError?.message || '');
+  if (
+    selectedError &&
+    (selectedErrorMsg.includes('avg_net_margin_monthly') ||
+      selectedErrorMsg.includes('imported_oak_ids_count'))
+  ) {
+    useLegacySelect = true;
+    ({ data: selectedCohortRuns, error: selectedError } = await supabase
+      .from('paymargin_import_runs')
+      .select(selectLegacy)
+      .eq('mode', 'commit')
+      .eq('status', 'success')
+      .eq('year', year)
+      .eq('go_live_month', goLiveMonth)
+      .order('created_at', { ascending: false })
+      .limit(1));
+  }
 
   if (selectedError) {
     if (selectedError.message.includes('paymargin_import_runs') || selectedError.message.includes('schema cache')) {
@@ -56,7 +80,7 @@ export async function GET(request: Request) {
 
   const { data: latestRuns, error: latestError } = await supabase
     .from('paymargin_import_runs')
-    .select('id, mode, status, source_file_name, year, go_live_month, rows_updated, created_at')
+    .select(useLegacySelect ? selectLegacy : selectWithNetMargin)
     .eq('mode', 'commit')
     .eq('status', 'success')
     .order('created_at', { ascending: false })

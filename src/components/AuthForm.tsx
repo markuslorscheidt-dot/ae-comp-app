@@ -7,9 +7,10 @@ import LanguageSelector from './LanguageSelector';
 interface AuthFormProps {
   onSignIn: (email: string, password: string) => Promise<{ error: any }>;
   onSignUp: (email: string, password: string, name: string) => Promise<{ error: any }>;
+  onRequestOnboarding: (name: string, email: string) => Promise<{ error: any }>;
 }
 
-export default function AuthForm({ onSignIn, onSignUp }: AuthFormProps) {
+export default function AuthForm({ onSignIn, onSignUp, onRequestOnboarding }: AuthFormProps) {
   const { t } = useLanguage();
   const [isLogin, setIsLogin] = useState(true);
   const [email, setEmail] = useState('');
@@ -18,6 +19,7 @@ export default function AuthForm({ onSignIn, onSignUp }: AuthFormProps) {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
+  const [onboardingLoading, setOnboardingLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,7 +31,7 @@ export default function AuthForm({ onSignIn, onSignUp }: AuthFormProps) {
       if (isLogin) {
         const result = await onSignIn(email, password);
         if (result.error) {
-          setError(t('auth.loginError'));
+          setError(result.error.message || t('auth.loginError'));
         }
       } else {
         const result = await onSignUp(email, password, name);
@@ -43,6 +45,28 @@ export default function AuthForm({ onSignIn, onSignUp }: AuthFormProps) {
       setError(t('errors.generic'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleOnboardingRequest = async () => {
+    setError('');
+    setSuccess('');
+    if (!name.trim() || !email.trim()) {
+      setError('Bitte Name und E-Mail ausfüllen.');
+      return;
+    }
+    setOnboardingLoading(true);
+    try {
+      const result = await onRequestOnboarding(name.trim(), email.trim());
+      if (result.error) {
+        setError(result.error.message || 'Onboarding-Anfrage fehlgeschlagen.');
+      } else {
+        setSuccess('Wenn ein passender aktiver Benutzer existiert, wurde ein Passwort-Link per E-Mail versendet.');
+      }
+    } catch (err) {
+      setError('Onboarding-Anfrage fehlgeschlagen.');
+    } finally {
+      setOnboardingLoading(false);
     }
   };
 
@@ -129,6 +153,31 @@ export default function AuthForm({ onSignIn, onSignUp }: AuthFormProps) {
             {loading ? t('common.loading') : (isLogin ? t('auth.login') : t('auth.register'))}
           </button>
         </form>
+
+        {isLogin && (
+          <div className="mt-5 border-t pt-4">
+            <p className="text-sm text-gray-600 mb-3">
+              Erstzugang: Wenn du als User bereits angelegt bist, aber noch kein Passwort hast.
+            </p>
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                placeholder={t('auth.namePlaceholder')}
+              />
+              <button
+                type="button"
+                onClick={handleOnboardingRequest}
+                disabled={onboardingLoading}
+                className="w-full py-2 bg-gray-100 text-gray-800 rounded-lg font-medium hover:bg-gray-200 transition disabled:opacity-50"
+              >
+                {onboardingLoading ? t('common.loading') : 'Passwort-Link anfordern'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Toggle */}
         <div className="mt-6 text-center text-sm text-gray-500">

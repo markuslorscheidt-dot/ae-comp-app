@@ -26,7 +26,7 @@ import {
 // ============================================
 
 const AUTH_TIMEOUT = 8000; // 8 Sekunden Timeout
-const COMMISSION_RELEVANT_ROLES: UserRole[] = ['ae_subscription_sales', 'ae_payments'];
+const COMMISSION_RELEVANT_ROLES: string[] = ['ae_subscription_sales', 'ae_payments'];
 
 function isAbortLikeError(error: unknown): boolean {
   const message = String((error as any)?.message || '').toLowerCase();
@@ -58,6 +58,18 @@ function withTimeout<T>(promise: Promise<T>, ms: number, errorMsg: string): Prom
   });
 }
 
+function getFriendlyAuthErrorMessage(error: unknown): string {
+  const raw = String((error as any)?.message || '').trim();
+  const message = raw.toLowerCase();
+  if (message.includes('failed to fetch') || message.includes('networkerror')) {
+    return 'Netzwerkfehler beim Login. Bitte Internetverbindung, VPN oder Firewall prüfen.';
+  }
+  if (message.includes('timeout') || message.includes('aborted')) {
+    return 'Login timeout - bitte erneut versuchen';
+  }
+  return raw || 'Login fehlgeschlagen';
+}
+
 // Helper: Korrupte Session bereinigen
 async function clearCorruptSession() {
   try {
@@ -74,7 +86,7 @@ async function clearCorruptSession() {
   }
 }
 
-function isCommissionRelevantRole(role: UserRole): boolean {
+function isCommissionRelevantRole(role: string): boolean {
   return COMMISSION_RELEVANT_ROLES.includes(role);
 }
 
@@ -319,7 +331,7 @@ export function useAuth() {
       );
       return { error };
     } catch (error: any) {
-      return { error: { message: error.message } };
+      return { error: { message: getFriendlyAuthErrorMessage(error) } };
     }
   };
 
@@ -351,7 +363,24 @@ export function useAuth() {
     setUser(null);
   };
 
-  return { user, loading, signIn, signUp, signOut };
+  const requestOnboardingAccess = async (name: string, email: string) => {
+    try {
+      const response = await fetch('/api/auth/onboarding/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return { error: { message: result?.error || 'Onboarding-Anfrage fehlgeschlagen.' } };
+      }
+      return { error: null };
+    } catch (error: any) {
+      return { error: { message: error?.message || 'Onboarding-Anfrage fehlgeschlagen.' } };
+    }
+  };
+
+  return { user, loading, signIn, signUp, signOut, requestOnboardingAccess };
 }
 
 // ============================================
@@ -759,7 +788,7 @@ export function useAllUsers() {
     fetchUsers();
   }, []);
 
-  const updateUserRole = async (userId: string, newRole: UserRole, effectiveFrom?: string) => {
+  const updateUserRole = async (userId: string, newRole: string, effectiveFrom?: string) => {
     const roleChangeDate = effectiveFrom || new Date().toISOString().slice(0, 10);
 
     const { data: currentUser, error: currentUserError } = await supabase
@@ -811,7 +840,7 @@ export function useAllUsers() {
 
     if (!error) {
       setUsers(prev => prev.map(u => 
-        u.id === userId ? { ...u, role: newRole } : u
+        u.id === userId ? { ...u, role: newRole as UserRole } : u
       ));
 
       // Bereits erfasste Go-Lives ab Rollenwechsel neu als provisionsrelevant markieren
@@ -2461,6 +2490,41 @@ export async function syncSettingsFromGoogleSheet(
     notFound,
     totalDachData: parseResult.totalDach
   };
+}
+
+/**
+ * Kohorten (Jahr–Monat) mit mindestens einem erfolgreichen Paymargin-Commit-Import.
+ * undefined = nicht geladen oder deaktiviert (Reporting nutzt dann weiterhin den Planungs-Default).
+ */
+export function usePaymarginImportedCohortKeys(enabled: boolean): ReadonlySet<string> | undefined {
+  const [keys, setKeys] = useState<ReadonlySet<string> | undefined>(undefined);
+
+  useEffect(() => {
+    if (!enabled) {
+      setKeys(undefined);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/paymargin/import/cohorts');
+        const json = (await res.json()) as { success?: boolean; cohortKeys?: string[] };
+        if (cancelled) return;
+        if (!res.ok || !json.success || !Array.isArray(json.cohortKeys)) {
+          setKeys(undefined);
+          return;
+        }
+        setKeys(new Set(json.cohortKeys));
+      } catch {
+        if (!cancelled) setKeys(undefined);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+
+  return keys;
 }
 
 export function downloadBackup(backup: BackupData) {

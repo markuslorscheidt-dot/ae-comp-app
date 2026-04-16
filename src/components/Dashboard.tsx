@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { User, GoLive, AESettings, isPlannable, canReceiveGoLives, Challenge, BusinessArea, BUSINESS_AREA_LABELS } from '@/lib/types';
-import { useAllUsers, useSettingsForUser, useGoLivesForUser, useMultiUserData, updateGoLiveUniversal, deleteGoLiveUniversal, useChallenges, calculateChallengeProgress } from '@/lib/hooks';
+import { useAllUsers, useSettingsForUser, useGoLivesForUser, useMultiUserData, updateGoLiveUniversal, deleteGoLiveUniversal, useChallenges, calculateChallengeProgress, usePaymarginImportedCohortKeys } from '@/lib/hooks';
 import { useLanguage } from '@/lib/LanguageContext';
 import { useDataSource } from '@/lib/DataSourceContext';
 import { 
@@ -21,7 +21,8 @@ import {
   formatCurrency, 
   formatPercent,
   getAchievementColor,
-  getAchievementBgColor
+  getAchievementBgColor,
+  type PayArrReportingOptions
 } from '@/lib/calculations';
 import { getPermissions } from '@/lib/permissions';
 import MonthDetail from './MonthDetail';
@@ -51,6 +52,12 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
   const { t } = useLanguage();
   const { dataSource, setDataSource, isDemo, scenarioLabel } = useDataSource();
   const permissions = getPermissions(user.role);
+
+  const paymarginCohortKeys = usePaymarginImportedCohortKeys(!isDemo);
+  const payArrReportingOptions = useMemo((): PayArrReportingOptions | undefined => {
+    if (paymarginCohortKeys === undefined) return undefined;
+    return { paymarginImportedCohortKeys: paymarginCohortKeys };
+  }, [paymarginCohortKeys]);
   
   // Prüfen ob User Admin ist (für Demo-Dropdown)
   const canAccessDemo = permissions.hasAdminAccess; // Country Manager oder Line Manager
@@ -314,8 +321,8 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
     );
   }
 
-  const yearSummary = calculateYearSummary(goLives, settings);
-  const ytdSummary = calculateYTDSummary(goLives, settings, currentMonth);
+  const yearSummary = calculateYearSummary(goLives, settings, payArrReportingOptions);
+  const ytdSummary = calculateYTDSummary(goLives, settings, currentMonth, payArrReportingOptions);
 
   // Navigation Component - Responsive
   const Navigation = () => {
@@ -555,6 +562,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             onBack={() => setCurrentView('year')}
             challenges={challenges}
             isDemo={isDemo}
+            payArrReportingOptions={payArrReportingOptions}
           />
         </main>
       </div>
@@ -593,6 +601,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             onBack={() => setCurrentView('year')}
             onSave={canEditProfile ? handleSaveProfile : undefined}
             canEdit={canEditProfile}
+            payArrReportingOptions={payArrReportingOptions}
           />
         </main>
       </div>
@@ -636,6 +645,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
             canEnterPayARR={permissions.enterPayARR}
             canAddGoLives={false}
             canEditGoLives={permissions.enterGoLivesForOthers || permissions.enterOwnGoLives}
+            payArrReportingOptions={payArrReportingOptions}
           />
         </main>
       </div>
@@ -663,7 +673,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
       : { settings: singleUserSettings, goLives: singleUserGoLives };
 
     const displaySummary = showData.settings 
-      ? calculateYearSummary(showData.goLives, showData.settings)
+      ? calculateYearSummary(showData.goLives, showData.settings, payArrReportingOptions)
       : yearSummary;
 
     // Multi-Daten nötig für GESAMT, Vergleich oder Einzeluser (wenn nicht prod-Fallback)
@@ -734,6 +744,7 @@ export default function Dashboard({ user, onSignOut, selectedArea, onBackToAreaS
               users={selectableForView.filter(u => selectedViewUserIds.includes(u.id))}
               settingsMap={multiSettings}
               goLivesMap={multiGoLives}
+              payArrReportingOptions={payArrReportingOptions}
               onBack={() => setCurrentView('year')}
             />
           ) : yearViewWaitingMulti ? (
@@ -1017,10 +1028,11 @@ interface ComparisonYearOverviewProps {
   users: User[];
   settingsMap: Map<string, AESettings>;
   goLivesMap: Map<string, GoLive[]>;
+  payArrReportingOptions?: PayArrReportingOptions;
   onBack: () => void;
 }
 
-function ComparisonYearOverview({ users, settingsMap, goLivesMap, onBack }: ComparisonYearOverviewProps) {
+function ComparisonYearOverview({ users, settingsMap, goLivesMap, payArrReportingOptions, onBack }: ComparisonYearOverviewProps) {
   const { t } = useLanguage();
   const [expandedMonth, setExpandedMonth] = useState<number | null>(null);
 
@@ -1028,7 +1040,7 @@ function ComparisonYearOverview({ users, settingsMap, goLivesMap, onBack }: Comp
   const userSummaries = users.map(user => {
     const settings = settingsMap.get(user.id);
     const goLives = goLivesMap.get(user.id) || [];
-    const summary = settings ? calculateYearSummary(goLives, settings) : null;
+    const summary = settings ? calculateYearSummary(goLives, settings, payArrReportingOptions) : null;
     return { user, settings, summary };
   });
 

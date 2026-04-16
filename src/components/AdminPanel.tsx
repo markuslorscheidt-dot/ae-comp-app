@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { User, UserRole } from '@/lib/types';
-import { useAllUsers, useAllGoLives, useAllSettings, useRolePermissions, RolePermissionRecord, createBackup, restoreBackup, downloadBackup, BackupData } from '@/lib/hooks';
+import { useAllUsers, useAllGoLives, useAllSettings, useRolePermissions, RolePermissionRecord, createBackup, restoreBackup, downloadBackup, BackupData, usePaymarginImportedCohortKeys } from '@/lib/hooks';
 import { useLanguage } from '@/lib/LanguageContext';
 import { supabase } from '@/lib/supabase';
 import { getAssignableRoles, canAssignRoles, canManageUsers, getPermissions, Permissions } from '@/lib/permissions';
-import { calculateYearSummary, formatCurrency } from '@/lib/calculations';
+import { calculateYearSummary, formatCurrency, type PayArrReportingOptions } from '@/lib/calculations';
 import DebugPanel from './DebugPanel';
 
 interface AdminPanelProps {
@@ -36,6 +36,7 @@ const ALL_ROLES: UserRole[] = [
   'head_of_partnerships',
   // Expanding Business
   'head_of_expanding_revenue',
+  'line_manager_expanding_business',
   'cs_account_executive',
   'cs_account_manager',
   'cs_sdr',
@@ -60,6 +61,7 @@ const EDITABLE_ROLES: Record<UserRole, UserRole[]> = {
   line_manager_new_business: ['ae_subscription_sales', 'ae_payments', 'sonstiges'],
   // Andere Manager können ihre Bereiche verwalten
   head_of_expanding_revenue: ['cs_account_executive', 'cs_account_manager', 'cs_sdr'],
+  line_manager_expanding_business: ['cs_account_executive', 'cs_account_manager', 'cs_sdr'],
   head_of_marketing: ['marketing_specialist', 'marketing_executive', 'demand_generation_specialist'],
   // Nicht-Manager können keine Rollen editieren
   ae_subscription_sales: [],
@@ -77,6 +79,11 @@ const EDITABLE_ROLES: Record<UserRole, UserRole[]> = {
 
 export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
   const { t } = useLanguage();
+  const paymarginCohortKeys = usePaymarginImportedCohortKeys(true);
+  const payArrReportingOptions = useMemo((): PayArrReportingOptions | undefined => {
+    if (paymarginCohortKeys === undefined) return undefined;
+    return { paymarginImportedCohortKeys: paymarginCohortKeys };
+  }, [paymarginCohortKeys]);
   const [view, setView] = useState<AdminView>('users');
   const { users, loading: usersLoading, updateUserRole, deleteUser, refetch: refetchUsers } = useAllUsers();
   const { goLives, loading: goLivesLoading } = useAllGoLives();
@@ -322,13 +329,14 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
     u.role === 'ae_subscription_sales' || 
     u.role === 'ae_payments' || 
     u.role === 'line_manager_new_business' ||
+    u.role === 'line_manager_expanding_business' ||
     u.role === 'cs_account_executive' ||
     u.role === 'cs_account_manager'
   ).map(user => {
     const userSettings = allSettings.find(s => s.user_id === user.id);
     const userGoLives = goLives.filter(gl => gl.user_id === user.id);
     if (!userSettings) return { user, goLivesCount: 0, subsActual: 0, payActual: 0, totalProvision: 0 };
-    const summary = calculateYearSummary(userGoLives, userSettings);
+    const summary = calculateYearSummary(userGoLives, userSettings, payArrReportingOptions);
     return { user, goLivesCount: summary.total_go_lives, subsActual: summary.total_subs_actual, payActual: summary.total_pay_actual, totalProvision: summary.total_provision };
   });
 
@@ -340,7 +348,7 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
     // Directors/Heads
     if (role === 'commercial_director' || role === 'head_of_expanding_revenue' || role === 'head_of_marketing' || role === 'head_of_partnerships') return 'bg-blue-100 text-blue-700';
     // Line Managers
-    if (role === 'line_manager_new_business') return 'bg-sky-100 text-sky-700';
+    if (role === 'line_manager_new_business' || role === 'line_manager_expanding_business') return 'bg-sky-100 text-sky-700';
     // AEs
     if (role === 'ae_subscription_sales' || role === 'ae_payments' || role === 'cs_account_executive') return 'bg-green-100 text-green-700';
     // Marketing
@@ -360,6 +368,7 @@ export default function AdminPanel({ currentUser, onBack }: AdminPanelProps) {
     u.role === 'commercial_director' ||
     u.role === 'head_of_partnerships' ||
     u.role === 'head_of_expanding_revenue' ||
+    u.role === 'line_manager_expanding_business' ||
     u.role === 'head_of_marketing'
   );
 

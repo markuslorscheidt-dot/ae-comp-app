@@ -37,6 +37,7 @@ export type UserRole =
   | 'head_of_partnerships'
   // Expanding Business
   | 'head_of_expanding_revenue'
+  | 'line_manager_expanding_business'
   | 'cs_account_executive'
   | 'cs_account_manager'
   | 'cs_sdr'
@@ -62,6 +63,7 @@ export const ROLE_TO_AREA: Record<UserRole, BusinessArea[]> = {
   head_of_partnerships: ['new_business'],
   // Expanding Business
   head_of_expanding_revenue: ['expanding_business'],
+  line_manager_expanding_business: ['expanding_business'],
   cs_account_executive: ['expanding_business'],
   cs_account_manager: ['expanding_business'],
   cs_sdr: ['expanding_business'],

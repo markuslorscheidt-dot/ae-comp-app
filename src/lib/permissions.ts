@@ -17,6 +17,7 @@ export type UserRole =
   | 'head_of_partnerships'
   // Expanding Business
   | 'head_of_expanding_revenue'
+  | 'line_manager_expanding_business'
   | 'cs_account_executive'
   | 'cs_account_manager'
   | 'cs_sdr'
@@ -41,6 +42,7 @@ export const ROLE_LABELS: Record<UserRole, string> = {
   head_of_partnerships: 'Head of Partnerships',
   // Expanding Business
   head_of_expanding_revenue: 'Head of Expanding Revenue',
+  line_manager_expanding_business: 'Line Manager Expanding Business',
   cs_account_executive: 'CS Account Executive',
   cs_account_manager: 'CS Account Manager',
   cs_sdr: 'CS SDR',
@@ -66,6 +68,7 @@ export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
   head_of_partnerships: 'Head of Partnerships - Verwaltet Partner-Deals',
   // Expanding Business
   head_of_expanding_revenue: 'Leitung Expanding Business',
+  line_manager_expanding_business: 'Line Manager Expanding Business - Teamleitung im Expanding Business',
   cs_account_executive: 'Customer Success Account Executive',
   cs_account_manager: 'Customer Success Account Manager',
   cs_sdr: 'Customer Success SDR',
@@ -82,7 +85,7 @@ export const ROLE_DESCRIPTIONS: Record<UserRole, string> = {
 export const ROLES_BY_AREA: Record<BusinessArea, UserRole[]> = {
   dlt: ['dlt_member'],
   new_business: ['line_manager_new_business', 'ae_subscription_sales', 'ae_payments', 'commercial_director', 'head_of_partnerships'],
-  expanding_business: ['head_of_expanding_revenue', 'cs_account_executive', 'cs_account_manager', 'cs_sdr'],
+  expanding_business: ['head_of_expanding_revenue', 'line_manager_expanding_business', 'cs_account_executive', 'cs_account_manager', 'cs_sdr'],
   marketing: ['head_of_marketing', 'marketing_specialist', 'marketing_executive', 'demand_generation_specialist']
 };
 
@@ -115,6 +118,7 @@ export function canViewAllUsers(role: UserRole): boolean {
     || role === 'commercial_director'
     || role === 'head_of_partnerships'
     || role === 'head_of_expanding_revenue'
+    || role === 'line_manager_expanding_business'
     || role === 'head_of_marketing';
 }
 
@@ -128,6 +132,7 @@ export function canEditSettings(role: UserRole): boolean {
     || role === 'commercial_director'
     || role === 'head_of_partnerships'
     || role === 'head_of_expanding_revenue'
+    || role === 'line_manager_expanding_business'
     || role === 'head_of_marketing';
 }
 
@@ -174,6 +179,7 @@ export function canManageUsers(role: UserRole): boolean {
     || role === 'dlt_member'
     || role === 'line_manager_new_business'
     || role === 'head_of_expanding_revenue'
+    || role === 'line_manager_expanding_business'
     || role === 'head_of_marketing';
 }
 
@@ -201,6 +207,7 @@ export function canViewAllReports(role: UserRole): boolean {
     || role === 'commercial_director'
     || role === 'head_of_partnerships'
     || role === 'head_of_expanding_revenue'
+    || role === 'line_manager_expanding_business'
     || role === 'head_of_marketing';
 }
 
@@ -230,6 +237,7 @@ export function hasAdminAccess(role: UserRole): boolean {
     || role === 'commercial_director'
     || role === 'head_of_partnerships'
     || role === 'head_of_expanding_revenue'
+    || role === 'line_manager_expanding_business'
     || role === 'head_of_marketing';
 }
 
@@ -260,6 +268,7 @@ const ROLE_HIERARCHY: Record<UserRole, number> = {
   head_of_expanding_revenue: 8,
   head_of_marketing: 8,
   line_manager_new_business: 7,  // Manager-Level
+  line_manager_expanding_business: 7,
   head_of_partnerships: 7,
   cs_account_executive: 5,  // Executive-Level
   ae_subscription_sales: 5,
@@ -296,6 +305,9 @@ export function getAssignableRoles(userRole: UserRole): UserRole[] {
     return ['ae_subscription_sales', 'ae_payments', 'sonstiges'];
   }
   if (userRole === 'head_of_expanding_revenue') {
+    return ['cs_account_executive', 'cs_account_manager', 'cs_sdr'];
+  }
+  if (userRole === 'line_manager_expanding_business') {
     return ['cs_account_executive', 'cs_account_manager', 'cs_sdr'];
   }
   if (userRole === 'head_of_marketing') {

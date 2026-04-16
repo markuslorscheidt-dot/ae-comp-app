@@ -161,17 +161,32 @@ export function getTerminalRate(
     : settings.terminal_base;
 }
 
+/** Kohorten-Key für Paymargin-Import (Jahr + Go-Live-Monat der Zeile). */
+export function paymarginCohortKey(year: number, month: number): string {
+  return `${year}-${month}`;
+}
+
+export type PayArrReportingOptions = {
+  /** Wenn gesetzt: für diese Kohorten kein Planungs-Default (avg_pay_bill×12), nur pay_arr / pay_arr_target / 0 */
+  paymarginImportedCohortKeys?: ReadonlySet<string>;
+};
+
 /**
  * PAY IST für Reporting:
  * 1) Finance-Actual (pay_arr), falls vorhanden
  * 2) sonst Go-Live Forecast (pay_arr_target)
- * 3) sonst Settings-Default bei Terminal (avg_pay_bill * 12)
+ * 3) sonst Settings-Default bei Terminal (avg_pay_bill * 12) — nur wenn für die Kohorte kein Paymargin-Commit existiert
  */
-function getEffectivePayArr(gl: GoLive, settings: AESettings): number {
+export function getEffectivePayArrForReporting(gl: GoLive, settings: AESettings, options?: PayArrReportingOptions): number {
   if (gl.pay_arr !== null && gl.pay_arr !== undefined) return gl.pay_arr;
   if (gl.pay_arr_target !== null && gl.pay_arr_target !== undefined) return gl.pay_arr_target;
-  if (gl.has_terminal) return (settings.avg_pay_bill || 0) * 12;
-  return 0;
+  if (!gl.has_terminal) return 0;
+  const cohortKey = paymarginCohortKey(gl.year, gl.month);
+  const imported = options?.paymarginImportedCohortKeys;
+  if (imported !== undefined && imported.has(cohortKey)) {
+    return 0;
+  }
+  return (settings.avg_pay_bill || 0) * 12;
 }
 
 /**
@@ -187,7 +202,8 @@ function getEffectivePayArr(gl: GoLive, settings: AESettings): number {
 export function calculateMonthlyResult(
   month: number,
   goLives: GoLive[],
-  settings: AESettings
+  settings: AESettings,
+  payOptions?: PayArrReportingOptions
 ): MonthlyResult {
   const monthGoLives = goLives.filter(gl => gl.month === month);
   
@@ -202,7 +218,10 @@ export function calculateMonthlyResult(
   
   // ARR-Werte (alle Go-Lives)
   const subsActualTotal = monthGoLives.reduce((sum, gl) => sum + (gl.subs_arr || 0), 0);
-  const payActualTotal = monthGoLives.reduce((sum, gl) => sum + getEffectivePayArr(gl, settings), 0);
+  const payActualTotal = monthGoLives.reduce(
+    (sum, gl) => sum + getEffectivePayArrForReporting(gl, settings, payOptions),
+    0
+  );
   
   // Pay ARR Target (Summe der Targets bei Go-Live, alle Go-Lives)
   const payArrTargetTotal = monthGoLives.reduce((sum, gl) => sum + (gl.pay_arr_target || 0), 0);
@@ -276,7 +295,7 @@ export function calculateMonthlyResult(
   if (hasUnifiedTotalArrModel) {
     const totalTarget = settings.monthly_total_arr_targets?.[month - 1] || 0;
     const payActualEffectiveCommission = commissionGoLives.reduce(
-      (sum, gl) => sum + getEffectivePayArr(gl, settings),
+      (sum, gl) => sum + getEffectivePayArrForReporting(gl, settings, payOptions),
       0
     );
     const totalActualCommission = subsActualCommission + payActualEffectiveCommission;
@@ -366,12 +385,13 @@ export function calculateMonthlyResult(
  */
 export function calculateYearSummary(
   goLives: GoLive[],
-  settings: AESettings
+  settings: AESettings,
+  payOptions?: PayArrReportingOptions
 ): YearSummary {
   const monthlyResults: MonthlyResult[] = [];
   
   for (let month = 1; month <= 12; month++) {
-    monthlyResults.push(calculateMonthlyResult(month, goLives, settings));
+    monthlyResults.push(calculateMonthlyResult(month, goLives, settings, payOptions));
   }
   
   const totalGoLives = monthlyResults.reduce((sum, r) => sum + r.go_lives_count, 0);
@@ -422,9 +442,10 @@ export function calculateYearSummary(
 export function calculateYTDSummary(
   goLives: GoLive[],
   settings: AESettings,
-  upToMonth: number
+  upToMonth: number,
+  payOptions?: PayArrReportingOptions
 ): YearSummary {
-  const fullYear = calculateYearSummary(goLives, settings);
+  const fullYear = calculateYearSummary(goLives, settings, payOptions);
   const ytdResults = fullYear.monthly_results.slice(0, upToMonth);
   
   const totalGoLives = ytdResults.reduce((sum, r) => sum + r.go_lives_count, 0);

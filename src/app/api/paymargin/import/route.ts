@@ -55,12 +55,13 @@ async function persistPaymarginImportRun(params: {
     rowsWouldUpdate: number;
     rowsUpdated: number;
     duplicateOakRows: number;
+    importedOakIdsCount: number;
+    avgNetMarginMonthly: number | null;
   };
   reason?: string;
 }) {
   const { supabase, mode, status, sourceFileName, year, goLiveMonth, seasonalFactor, stats, reason } = params;
-
-  const { error } = await supabase.from('paymargin_import_runs').insert({
+  const payload = {
     mode,
     status,
     source_file_name: sourceFileName,
@@ -76,14 +77,46 @@ async function persistPaymarginImportRun(params: {
     rows_would_update: stats.rowsWouldUpdate,
     rows_updated: stats.rowsUpdated,
     duplicate_oak_rows: stats.duplicateOakRows,
+    imported_oak_ids_count: stats.importedOakIdsCount,
+    avg_net_margin_monthly: stats.avgNetMarginMonthly,
     reason: reason || null,
     created_at: new Date().toISOString(),
-  });
+  };
+  const { error } = await supabase.from('paymargin_import_runs').insert(payload);
 
-  if (error) {
-    // Logging darf den Import nicht scheitern lassen.
-    console.error('Paymargin Import-Run Logging fehlgeschlagen:', error.message);
+  if (!error) return;
+
+  const errMsg = String(error.message || '');
+  const missingNewColumns =
+    errMsg.includes('avg_net_margin_monthly') || errMsg.includes('imported_oak_ids_count');
+
+  if (missingNewColumns) {
+    const { error: fallbackError } = await supabase.from('paymargin_import_runs').insert({
+      mode,
+      status,
+      source_file_name: sourceFileName,
+      year,
+      go_live_month: goLiveMonth,
+      seasonal_factor: seasonalFactor,
+      rows_parsed: stats.rowsParsed,
+      rows_valid: stats.rowsValid,
+      rows_skipped_no_oak: stats.rowsSkippedNoOak,
+      rows_skipped_invalid_margin: stats.rowsSkippedInvalidMargin,
+      rows_skipped_no_match: stats.rowsSkippedNoMatch,
+      rows_matched_go_lives: stats.rowsMatchedGoLives,
+      rows_would_update: stats.rowsWouldUpdate,
+      rows_updated: stats.rowsUpdated,
+      duplicate_oak_rows: stats.duplicateOakRows,
+      reason: reason || null,
+      created_at: new Date().toISOString(),
+    });
+    if (!fallbackError) return;
+    console.error('Paymargin Import-Run Logging fehlgeschlagen:', fallbackError.message);
+    return;
   }
+
+  // Logging darf den Import nicht scheitern lassen.
+  console.error('Paymargin Import-Run Logging fehlgeschlagen:', error.message);
 }
 
 export async function POST(request: Request) {
@@ -179,6 +212,8 @@ export async function POST(request: Request) {
         rowsWouldUpdate: 0,
         rowsUpdated: 0,
         duplicateOakRows,
+        importedOakIdsCount: 0,
+        avgNetMarginMonthly: null,
       };
 
       if (!dryRun) {
@@ -233,6 +268,8 @@ export async function POST(request: Request) {
     let rowsMatchedGoLives = 0;
     let rowsWouldUpdate = 0;
     let rowsUpdated = 0;
+    let importedOakIdsCount = 0;
+    let importedNetMarginSum = 0;
 
     const preview: Array<{
       oakId: number;
@@ -249,6 +286,8 @@ export async function POST(request: Request) {
         continue;
       }
 
+      importedOakIdsCount += 1;
+      importedNetMarginSum += row.netMarginMonthly;
       rowsMatchedGoLives += matches.length;
       rowsWouldUpdate += matches.length;
       const normalizedMonthly = Math.round((row.netMarginMonthly / seasonalFactor) * 100) / 100;
@@ -276,6 +315,11 @@ export async function POST(request: Request) {
       }
     }
 
+    const avgNetMarginMonthlyRaw =
+      importedOakIdsCount > 0 ? importedNetMarginSum / importedOakIdsCount : null;
+    const avgNetMarginMonthly =
+      avgNetMarginMonthlyRaw === null ? null : Math.round(avgNetMarginMonthlyRaw * 100) / 100;
+
     const stats = {
       year,
       goLiveMonth,
@@ -288,6 +332,8 @@ export async function POST(request: Request) {
       rowsWouldUpdate,
       rowsUpdated,
       duplicateOakRows,
+      importedOakIdsCount,
+      avgNetMarginMonthly,
     };
 
     if (!dryRun) {
