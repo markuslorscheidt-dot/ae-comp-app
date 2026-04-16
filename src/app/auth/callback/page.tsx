@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 
-export default function AuthCallbackPage() {
+function AuthCallbackContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [error, setError] = useState<string | null>(null);
@@ -47,5 +47,24 @@ export default function AuthCallbackPage() {
         )}
       </div>
     </div>
+  );
+}
+
+function AuthCallbackFallback() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <div className="max-w-md w-full bg-white rounded-xl border border-gray-200 p-6 text-center">
+        <h1 className="text-lg font-semibold text-gray-900 mb-2">Anmeldung wird vorbereitet</h1>
+        <p className="text-sm text-gray-600">Bitte kurz warten...</p>
+      </div>
+    </div>
+  );
+}
+
+export default function AuthCallbackPage() {
+  return (
+    <Suspense fallback={<AuthCallbackFallback />}>
+      <AuthCallbackContent />
+    </Suspense>
   );
 }
