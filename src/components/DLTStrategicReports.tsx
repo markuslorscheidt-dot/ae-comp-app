@@ -17,6 +17,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsi
 import PDFExportButton from './PDFExportButton';
 import { useRef } from 'react';
 import { supabase } from '@/lib/supabase';
+import type { ScenarioReport, ScenarioReportInput } from '@/lib/forecastScenarioReport';
 
 /** Form für YTD-Monatsdaten (IST + Plan, wie Jahresübersicht) */
 interface YtdMonthlyRow {
@@ -143,6 +144,19 @@ type PipelineSourceFilter = 'all' | 'salespipe2_only';
 
 interface DLTStrategicReportsProps {
   user: User;
+}
+
+interface SavedForecastScenario {
+  id: string;
+  created_at: string;
+  updated_at?: string | null;
+  user_id: string;
+  year: number;
+  title: string;
+  scenario_payload: Record<string, unknown> | null;
+  report_headline?: string | null;
+  report_narrative?: string | null;
+  report_summary?: string[] | null;
 }
 
 interface DLTPlanzahlen {
@@ -368,6 +382,54 @@ function readPayloadNumber(payload: Record<string, unknown> | null | undefined, 
   return null;
 }
 
+function readPayloadString(payload: Record<string, unknown> | null | undefined, keys: string[]): string | null {
+  if (!payload) return null;
+  for (const key of keys) {
+    if (!(key in payload)) continue;
+    const value = String(payload[key] ?? '').trim();
+    if (!value) continue;
+    return value;
+  }
+  return null;
+}
+
+function parseYesNo(value: unknown): boolean | null {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (!raw) return null;
+  if (['yes', 'y', 'true', 'ja', '1'].includes(raw)) return true;
+  if (['no', 'n', 'false', 'nein', '0'].includes(raw)) return false;
+  return null;
+}
+
+function readPayloadBoolean(payload: Record<string, unknown> | null | undefined, keys: string[]): boolean | null {
+  if (!payload) return null;
+  for (const key of keys) {
+    if (!(key in payload)) continue;
+    const parsed = parseYesNo(payload[key]);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+}
+
+function pickPayloadMetric(
+  payload: Record<string, unknown> | null | undefined,
+  preferredKeys: string[],
+  options?: { excludePercent?: boolean }
+): number | null {
+  const direct = readPayloadNumber(payload, preferredKeys);
+  if (direct !== null) return direct;
+  if (!payload) return null;
+  for (const [key, value] of Object.entries(payload)) {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey.includes('month') || normalizedKey.includes('date')) continue;
+    if (options?.excludePercent && normalizedKey.includes('%')) continue;
+    const parsed = parseMetricNumber(value);
+    if (parsed === null) continue;
+    return parsed;
+  }
+  return null;
+}
+
 function parsePayloadMonthIndex(payload: Record<string, unknown> | null | undefined, keys: string[], selectedYear: number): number | null {
   if (!payload) return null;
   for (const key of keys) {
@@ -381,6 +443,17 @@ function parsePayloadMonthIndex(payload: Record<string, unknown> | null | undefi
     return idx;
   }
   return null;
+}
+
+function isScenarioReportSnapshot(value: unknown): value is ScenarioReport {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.headline === 'string' &&
+    typeof candidate.title === 'string' &&
+    Array.isArray(candidate.actions) &&
+    Array.isArray(candidate.summaryLines)
+  );
 }
 
 export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) {
@@ -402,6 +475,31 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const [reportType, setReportType] = useState<'forecast' | 'ytd' | 'salespipe'>('forecast');
   const [leadToGoLiveForecastPercent, setLeadToGoLiveForecastPercent] = useState(16);
   const [futureLeadVolumeScenarioMonthlyLeads, setFutureLeadVolumeScenarioMonthlyLeads] = useState(0);
+  const [futureChurnScenarioFactorPercent, setFutureChurnScenarioFactorPercent] = useState(100);
+  const [scenarioReport, setScenarioReport] = useState<ScenarioReport | null>(null);
+  const [scenarioReportLoading, setScenarioReportLoading] = useState(false);
+  const [scenarioReportError, setScenarioReportError] = useState<string | null>(null);
+  const [scenarioReportMeta, setScenarioReportMeta] = useState<{
+    llmRequested: boolean;
+    llmAttempted: boolean;
+    fallbackActive: boolean;
+    llmProvider: string | null;
+    llmError: string | null;
+    mode: 'rules' | 'llm' | null;
+  }>({
+    llmRequested: false,
+    llmAttempted: false,
+    fallbackActive: false,
+    llmProvider: null,
+    llmError: null,
+    mode: null,
+  });
+  const [savedScenarios, setSavedScenarios] = useState<SavedForecastScenario[]>([]);
+  const [savedScenariosLoading, setSavedScenariosLoading] = useState(false);
+  const [savedScenarioActionLoading, setSavedScenarioActionLoading] = useState(false);
+  const [savedScenarioError, setSavedScenarioError] = useState<string | null>(null);
+  const [savedScenarioConfirmation, setSavedScenarioConfirmation] = useState<string | null>(null);
+  const [deletingScenarioId, setDeletingScenarioId] = useState<string | null>(null);
   const [selectedYtdMonths, setSelectedYtdMonths] = useState<number[]>(defaultYtdMonths);
   const [selectedMonthDetail, setSelectedMonthDetail] = useState<number | null>(null);
   const [selectedChurnMonthDetail, setSelectedChurnMonthDetail] = useState<number | null>(null);
@@ -444,6 +542,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const [savingPayIstByGoLiveId, setSavingPayIstByGoLiveId] = useState<Record<string, boolean>>({});
   const [payIstErrorByGoLiveId, setPayIstErrorByGoLiveId] = useState<Record<string, string>>({});
   const exportRef = useRef<HTMLDivElement>(null);
+  const skipScenarioReportResetRef = useRef(false);
   const [salespipeMainColWidths, setSalespipeMainColWidths] = useState<number[]>([
     ...SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT,
   ]);
@@ -565,12 +664,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         supabase
           .from('looker_leads_events')
           .select('csv_entry_name, payload')
-          .in('csv_entry_name', [
-            'dashboard-lead/lead_funnel.csv',
-            'dashboard-lead/_avg_day_lead_to_signup_by_lead_created_month.csv',
-            'dashboard-lead/avg_day_lead_to_golive_by_lead_created_month.csv',
-            'dashboard-lead/lead_count_by_month_vs_target_with_tam_fit_.csv',
-          ]),
+          .like('csv_entry_name', 'dashboard-lead/%'),
       ]);
 
       if (!active) return;
@@ -952,6 +1046,8 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       actualChurnByMonth[idx] += Number(event.total_arr_lost) || 0;
     });
 
+    const futureChurnBaseByMonth = plannedChurnByMonth.map((value) => Math.max(0, value));
+
     const lookerRowsForYear = lookerLeadsMetrics.filter((row) => {
       const payload = row.payload || {};
       const monthIdx = parsePayloadMonthIndex(
@@ -1019,8 +1115,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     );
 
     const leadCountByMonth = Array.from({ length: 12 }, () => 0);
-    const leadTargetByMonth = Array.from({ length: 12 }, () => 0);
-    const tamFitByMonth = Array.from({ length: 12 }, () => 0);
     const avgLeadToSignupDaysByMonth = Array.from({ length: 12 }, () => 0);
     const avgLeadToGoLiveDaysByMonth = Array.from({ length: 12 }, () => 0);
 
@@ -1029,9 +1123,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       const idx = parsePayloadMonthIndex(payload, ['Target Month'], selectedYear);
       if (idx === null) return;
       leadCountByMonth[idx] = readPayloadNumber(payload, ['Number of Leads']) || 0;
-      leadTargetByMonth[idx] = readPayloadNumber(payload, ['Lead Target (Inboud+Partnership)', 'Lead Target']) || 0;
-      const tamFitPct = readPayloadNumber(payload, ['TAM FIT %']);
-      tamFitByMonth[idx] = tamFitPct !== null ? Math.max(0, Math.min(1, tamFitPct / 100)) : 0;
     });
 
     avgSignupRows.forEach((row) => {
@@ -1055,13 +1146,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       ytdLeadCounts.length > 0
         ? ytdLeadCounts.reduce((sum, value) => sum + value, 0) / ytdLeadCounts.length
         : 0;
-    const ytdTamFits = ytdIndices.map((idx) => tamFitByMonth[idx]).filter((value) => value > 0);
-    const ytdTamFitRate =
-      ytdTamFits.length > 0
-        ? ytdTamFits.reduce((sum, value) => sum + value, 0) / ytdTamFits.length
-        : 0.55;
-    const futureLeadScenarioFactor =
-      ytdLeadAverage > 0 ? Math.max(0, futureLeadVolumeScenarioMonthlyLeads) / ytdLeadAverage : 1;
+    const futureLeadScenarioMonthly = Math.max(0, futureLeadVolumeScenarioMonthlyLeads);
 
     const computeWeightedAverageDays = (values: number[]) => {
       let weightedSum = 0;
@@ -1118,17 +1203,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const conversionArrByMonth = Array.from({ length: 12 }, (_, monthIdx) => {
       const sourceMonthIdx = monthIdx - leadToGoLiveLagMonths;
       if (sourceMonthIdx < 0 || sourceMonthIdx > 11) return 0;
-      const actualLeads = leadCountByMonth[sourceMonthIdx];
-      const targetLeads = leadTargetByMonth[sourceMonthIdx];
-      const eligibleLeadsBase =
-        actualLeads > 0
-          ? actualLeads
-          : targetLeads > 0
-            ? targetLeads * ytdTamFitRate
-            : ytdLeadAverage;
       const isFutureForecastMonth =
         selectedYear > currentYear || (selectedYear === currentYear && monthIdx > currentMonth);
-      const eligibleLeads = isFutureForecastMonth ? eligibleLeadsBase * futureLeadScenarioFactor : eligibleLeadsBase;
+      const eligibleLeads = isFutureForecastMonth ? futureLeadScenarioMonthly : ytdLeadAverage;
       if (eligibleLeads <= 0 || pLeadToGoLive <= 0 || avgArrPerGoLiveYtd <= 0) return 0;
       const expectedGoLives = eligibleLeads * pLeadToGoLive;
       const projectedArr = expectedGoLives * avgArrPerGoLiveYtd;
@@ -1170,10 +1247,17 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       const arrGoLivesToDate = goLiveArrToDateByMonth[row.idx] || 0;
       const arrGoLivesFuture = goLiveArrFutureByMonth[row.idx] || 0;
       const arrNotBookedPipeline = notBookedArrByMonth[row.idx] || 0;
-      // Forecast-Churn an den tatsaechlichen Monatswerten aus churn_events ausrichten
-      // (gleiches Raster wie in der YTD-Churn-Uebersicht).
-      const churnForForecast = actualChurnByMonth[row.idx] || 0;
       const isFutureMonth = selectedYear > currentYear || (selectedYear === currentYear && row.idx > currentMonth);
+      // Bereits eingebuchter Churn (aus churn_events) wird separat geführt.
+      const bookedChurnAbs = Math.max(0, actualChurnByMonth[row.idx] || 0);
+      const churnScenarioFactor = Math.max(0, futureChurnScenarioFactorPercent / 100);
+      const scenarioPlanChurnAbs = isFutureMonth ? (futureChurnBaseByMonth[row.idx] || 0) * churnScenarioFactor : 0;
+      const bookedWithinPlanAbs = isFutureMonth ? Math.min(bookedChurnAbs, scenarioPlanChurnAbs) : bookedChurnAbs;
+      const projectedWithinPlanAbs = isFutureMonth
+        ? Math.max(0, scenarioPlanChurnAbs - bookedWithinPlanAbs)
+        : 0;
+      const overPlanChurnAbs = isFutureMonth ? Math.max(0, bookedChurnAbs - scenarioPlanChurnAbs) : 0;
+      const churnForForecast = isFutureMonth ? scenarioPlanChurnAbs + overPlanChurnAbs : bookedChurnAbs;
       const arrConversionBaseline = !row.hasActual && isFutureMonth ? (conversionArrByMonth[row.idx] || 0) : 0;
       const primaryArrWithoutConversion =
         arrGoLivesToDate + arrGoLivesFuture + pipelineWeighted + arrNotBookedPipeline;
@@ -1195,6 +1279,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           arrWeightedPipeline,
           arrNotBookedPipeline,
           arrConversionBased,
+          arrChurnBookedDeduction: -bookedWithinPlanAbs,
+          arrChurnProjectedDeduction: -projectedWithinPlanAbs,
+          arrChurnOverPlanDeduction: -overPlanChurnAbs,
           arrChurnDeduction: -churnForForecast,
           source: 'actual',
         };
@@ -1218,6 +1305,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           arrWeightedPipeline,
           arrNotBookedPipeline,
           arrConversionBased,
+          arrChurnBookedDeduction: -bookedWithinPlanAbs,
+          arrChurnProjectedDeduction: -projectedWithinPlanAbs,
+          arrChurnOverPlanDeduction: -overPlanChurnAbs,
           arrChurnDeduction: -churnForForecast,
           source: 'pipeline',
         };
@@ -1241,6 +1331,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         arrWeightedPipeline,
         arrNotBookedPipeline,
         arrConversionBased,
+        arrChurnBookedDeduction: -bookedWithinPlanAbs,
+        arrChurnProjectedDeduction: -projectedWithinPlanAbs,
+        arrChurnOverPlanDeduction: -overPlanChurnAbs,
         arrChurnDeduction: -churnForForecast,
         source: shouldUseConversionForecast ? 'conversion_ytd' : 'component',
       };
@@ -1259,6 +1352,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     lookerLeadsMetrics,
     leadToGoLiveForecastPercent,
     futureLeadVolumeScenarioMonthlyLeads,
+    futureChurnScenarioFactorPercent,
     planzahlen,
     churnEvents,
     payArrReportingOptions,
@@ -1269,6 +1363,19 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       subs: forecastData.reduce((sum, row) => sum + (row.subsForecast || 0), 0),
       pay: forecastData.reduce((sum, row) => sum + (row.payForecast || 0), 0),
       net: forecastData.reduce((sum, row) => sum + (row.netForecast || 0), 0),
+      churn: forecastData.reduce((sum, row) => sum + Math.abs(Number(row.arrChurnDeduction || 0)), 0),
+      ytdBookedSubs: forecastData.reduce(
+        (sum, row) => sum + ((row.hasActual ? Number(row.subsActual || row.subsForecast || 0) : 0) || 0),
+        0
+      ),
+      ytdBookedPay: forecastData.reduce(
+        (sum, row) => sum + ((row.hasActual ? Number(row.payActual || row.payForecast || 0) : 0) || 0),
+        0
+      ),
+      ytdBookedNet: forecastData.reduce(
+        (sum, row) => sum + ((row.hasActual ? Number(row.netActual || row.netForecast || 0) : 0) || 0),
+        0
+      ),
     }),
     [forecastData]
   );
@@ -1287,17 +1394,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       (row) => row.csv_entry_name === 'dashboard-lead/lead_count_by_month_vs_target_with_tam_fit_.csv'
     );
     const leadCountByMonth = Array.from({ length: 12 }, () => 0);
-    const leadTargetByMonth = Array.from({ length: 12 }, () => 0);
-    const tamFitByMonth = Array.from({ length: 12 }, () => 0);
 
     leadCountRows.forEach((row) => {
       const payload = row.payload || {};
       const idx = parsePayloadMonthIndex(payload, ['Target Month'], selectedYear);
       if (idx === null) return;
       leadCountByMonth[idx] = readPayloadNumber(payload, ['Number of Leads']) || 0;
-      leadTargetByMonth[idx] = readPayloadNumber(payload, ['Lead Target (Inboud+Partnership)', 'Lead Target']) || 0;
-      const tamFitPct = readPayloadNumber(payload, ['TAM FIT %']);
-      tamFitByMonth[idx] = tamFitPct !== null ? Math.max(0, Math.min(1, tamFitPct / 100)) : 0;
     });
 
     const ytdMonthLimit = selectedYear < currentYear ? 11 : selectedYear > currentYear ? -1 : currentMonth;
@@ -1307,38 +1409,20 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       ytdLeadCounts.length > 0
         ? ytdLeadCounts.reduce((sum, value) => sum + value, 0) / ytdLeadCounts.length
         : 0;
-    const ytdTamFits = ytdIndices.map((idx) => tamFitByMonth[idx]).filter((value) => value > 0);
-    const ytdTamFitRate =
-      ytdTamFits.length > 0
-        ? ytdTamFits.reduce((sum, value) => sum + value, 0) / ytdTamFits.length
-        : 0.55;
-
-    const scenarioFactor =
-      ytdLeadAverage > 0 ? Math.max(0, futureLeadVolumeScenarioMonthlyLeads) / ytdLeadAverage : 1;
     const futureMonthIndices = Array.from({ length: 12 }, (_, idx) => idx).filter((idx) =>
       selectedYear > currentYear ? true : selectedYear < currentYear ? false : idx > currentMonth
     );
 
     const importedFutureLeads = futureMonthIndices.reduce((sum, idx) => sum + (leadCountByMonth[idx] || 0), 0);
-    const baselineEligibleFutureLeads = futureMonthIndices.reduce((sum, idx) => {
-      const actualLeads = leadCountByMonth[idx];
-      const targetLeads = leadTargetByMonth[idx];
-      const eligibleLeads =
-        actualLeads > 0
-          ? actualLeads
-          : targetLeads > 0
-            ? targetLeads * ytdTamFitRate
-            : ytdLeadAverage;
-      return sum + Math.max(0, eligibleLeads);
-    }, 0);
-    const scenarioEligibleFutureLeads = baselineEligibleFutureLeads * scenarioFactor;
+    const baselineEligibleFutureLeads = futureMonthIndices.length * ytdLeadAverage;
+    const scenarioEligibleFutureLeads = futureMonthIndices.length * Math.max(0, futureLeadVolumeScenarioMonthlyLeads);
 
     return {
       importedFutureLeads,
       baselineEligibleFutureLeads,
       scenarioEligibleFutureLeads,
       ytdLeadAverage,
-      ytdTamFitRate,
+      futureMonthsCount: futureMonthIndices.length,
     };
   }, [lookerLeadsMetrics, selectedYear, currentYear, currentMonth, futureLeadVolumeScenarioMonthlyLeads]);
 
@@ -1349,6 +1433,80 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     setFutureLeadVolumeScenarioMonthlyLeads(defaultMonthlyLeads);
   }, [selectedYear, futureLeadScenarioSummary.ytdLeadAverage]);
 
+  const churnScenarioSummary = useMemo(() => {
+    const monthlyChurn = Array.from({ length: 12 }, () => 0);
+    churnEvents.forEach((event) => {
+      if (!event.churn_month) return;
+      const d = new Date(event.churn_month);
+      if (Number.isNaN(d.getTime()) || d.getFullYear() !== selectedYear) return;
+      const idx = d.getMonth();
+      if (idx < 0 || idx > 11) return;
+      monthlyChurn[idx] += Number(event.total_arr_lost) || 0;
+    });
+
+    const plannedChurnByMonth = (() => {
+      const churnData =
+        planzahlen?.churn_arr_data && typeof planzahlen.churn_arr_data === 'object'
+          ? (planzahlen.churn_arr_data as Record<string, unknown>)
+          : {};
+      const invoicedChurn =
+        churnData.invoiced_churn && typeof churnData.invoiced_churn === 'object'
+          ? (churnData.invoiced_churn as Record<string, unknown>)
+          : {};
+      return normalizeMonthlyPlanValues(invoicedChurn.target_arr).map((value) => Math.abs(value));
+    })();
+
+    const ytdMonthLimit = selectedYear < currentYear ? 11 : selectedYear > currentYear ? -1 : currentMonth;
+    const ytdMonths = Array.from({ length: 12 }, (_, idx) => idx).filter((idx) => idx <= ytdMonthLimit);
+    const futureMonths = Array.from({ length: 12 }, (_, idx) => idx).filter((idx) =>
+      selectedYear > currentYear ? true : selectedYear < currentYear ? false : idx > currentMonth
+    );
+
+    const planBaseByMonth = plannedChurnByMonth.map((value) => Math.max(0, value));
+    const defaultMonthlyPlanChurn = (() => {
+      const futureValues = futureMonths.map((idx) => planBaseByMonth[idx]).filter((value) => value > 0);
+      if (futureValues.length > 0) return futureValues.reduce((sum, value) => sum + value, 0) / futureValues.length;
+      const allValues = planBaseByMonth.filter((value) => value > 0);
+      return allValues.length > 0 ? allValues.reduce((sum, value) => sum + value, 0) / allValues.length : 0;
+    })();
+
+    const churnScenarioFactor = Math.max(0, futureChurnScenarioFactorPercent / 100);
+    const ytdChurnTotal = ytdMonths.reduce((sum, idx) => sum + (monthlyChurn[idx] || 0), 0);
+    const ytdMonthlyBookedAverage = ytdMonths.length > 0 ? ytdChurnTotal / ytdMonths.length : 0;
+    const futureBookedChurnTotal = futureMonths.reduce((sum, idx) => sum + (monthlyChurn[idx] || 0), 0);
+    const futurePlanBaseTotal = futureMonths.reduce((sum, idx) => sum + (planBaseByMonth[idx] || 0), 0);
+    const scenarioFuturePlanTotal = futurePlanBaseTotal * churnScenarioFactor;
+    const overPlanFutureTotal = futureMonths.reduce((sum, idx) => {
+      const booked = monthlyChurn[idx] || 0;
+      const planScenario = (planBaseByMonth[idx] || 0) * churnScenarioFactor;
+      return sum + Math.max(0, booked - planScenario);
+    }, 0);
+    const scenarioFutureChurnTotal = scenarioFuturePlanTotal + overPlanFutureTotal;
+
+    return {
+      defaultFactorPercent: 100,
+      defaultMonthlyPlanChurn,
+      futurePlanBaseTotal,
+      scenarioFuturePlanTotal,
+      overPlanFutureTotal,
+      ytdChurnTotal,
+      futureBookedChurnTotal,
+      scenarioFutureChurnTotal,
+      churnScenarioFactor,
+      ytdMonthlyBookedAverage,
+      ytdBookedFactorPercent:
+        defaultMonthlyPlanChurn > 0 ? (ytdMonthlyBookedAverage / defaultMonthlyPlanChurn) * 100 : 0,
+      futureMonthsCount: futureMonths.length,
+    };
+  }, [churnEvents, planzahlen, selectedYear, currentYear, currentMonth, futureChurnScenarioFactorPercent]);
+
+  useEffect(() => {
+    const ytdMarkerDefault = Number.isFinite(churnScenarioSummary.ytdBookedFactorPercent)
+      ? Math.max(0, Math.min(300, churnScenarioSummary.ytdBookedFactorPercent))
+      : 100;
+    setFutureChurnScenarioFactorPercent(ytdMarkerDefault);
+  }, [selectedYear, churnScenarioSummary.ytdBookedFactorPercent]);
+
   const forecastAchievement = useMemo(
     () => ({
       subs: forecastTargetSummary.subs > 0 ? forecastSummary.subs / forecastTargetSummary.subs : 0,
@@ -1358,13 +1516,669 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     [forecastSummary, forecastTargetSummary]
   );
 
+  const forecastGapSummary = useMemo(() => {
+    const churnTarget = (churnScenarioSummary.ytdChurnTotal || 0) + (churnScenarioSummary.futurePlanBaseTotal || 0);
+    return {
+      subs: (forecastTargetSummary.subs || 0) - (forecastSummary.subs || 0),
+      pay: (forecastTargetSummary.pay || 0) - (forecastSummary.pay || 0),
+      net: (forecastTargetSummary.net || 0) - (forecastSummary.net || 0),
+      churn: (forecastSummary.churn || 0) - churnTarget,
+    };
+  }, [forecastSummary, forecastTargetSummary, churnScenarioSummary]);
+
+  const formatSignedCurrency = (value: number) => `${value > 0 ? '+' : ''}${formatCurrency(value)}`;
+
+  const leadInsightsForScenario = useMemo(() => {
+    const rows = lookerLeadsMetrics.filter((row) => row.csv_entry_name.startsWith('dashboard-lead/'));
+
+    const sourceRows = rows.filter((row) => row.csv_entry_name.includes('lead_count_by_lead_source'));
+    const sourceSummary = sourceRows
+      .map((row) => {
+        const payload = row.payload || {};
+        return {
+          source:
+            readPayloadString(payload, ['Lead source (Grouping)', 'Lead source', 'Lead Source']) ||
+            readPayloadString(payload, ['Salesforce Region']) ||
+            'Unbekannt',
+          leads: readPayloadNumber(payload, ['Number of Leads', 'Leads']) || 0,
+          tamFitPercent: readPayloadNumber(payload, ['TAM FIT %', 'TAM Fit %']),
+          leadToGoLivePercent: readPayloadNumber(payload, [
+            'Lead to Golive conversion %',
+            'Lead to GoLive conversion %',
+            'Lead to golive conversion %',
+          ]),
+        };
+      })
+      .filter((row) => row.leads > 0)
+      .sort((a, b) => b.leads - a.leads)
+      .slice(0, 6);
+
+    const statusRows = rows.filter((row) => row.csv_entry_name.includes('lead_count_by_lead_status'));
+    const statusSummary = statusRows.reduce(
+      (acc, row) => {
+        const payload = row.payload || {};
+        const statusRaw = (readPayloadString(payload, ['Status', 'Lead Status']) || '').toLowerCase();
+        const count = readPayloadNumber(payload, ['Number of Leads', 'Leads']) || 0;
+        if (!statusRaw || count <= 0) return acc;
+        if (statusRaw.includes('qualified')) acc.qualified += count;
+        else if (statusRaw.includes('not converted')) acc.notConverted += count;
+        else if (statusRaw.includes('working')) acc.working += count;
+        else if (statusRaw.includes('new')) acc.newlyCreated += count;
+        return acc;
+      },
+      { qualified: 0, notConverted: 0, working: 0, newlyCreated: 0 }
+    );
+
+    const cohortRows = rows.filter((row) => row.csv_entry_name.includes('lead_created_month'));
+    const collectMetricValues = (namePart: string, preferredKeys: string[], options?: { excludePercent?: boolean }) =>
+      cohortRows
+        .filter((row) => row.csv_entry_name.toLowerCase().includes(namePart.toLowerCase()))
+        .map((row) => pickPayloadMetric(row.payload || {}, preferredKeys, options))
+        .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0);
+    const average = (values: number[]) => (values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null);
+
+    const cohortSummary = {
+      leadToDemoCompletedRateYtd: average(
+        collectMetricValues('lead_to_demo_completed_by_lead_created_month', ['Lead to Demo Completed conversion %'])
+      ),
+      leadToSignupRateYtd: average(
+        collectMetricValues('lead_to_signup_by_lead_created_month', ['Lead to Signup conversion %'])
+      ),
+      leadToGoLiveRateYtd: average(
+        collectMetricValues('lead_to_golive_by_lead_created_month', ['Lead to Golive conversion %'])
+      ),
+      avgLeadToDemoCompletedDays: average(
+        collectMetricValues('avg_day_lead_to_demo_completed_by_lead_created_month', ['Average lead to demo'], {
+          excludePercent: true,
+        })
+      ),
+      avgLeadToSignupDays: average(
+        collectMetricValues('avg_day_lead_to_signup_by_lead_created_month', ['Average lead to signup'], {
+          excludePercent: true,
+        })
+      ),
+      avgLeadToGoLiveDays: average(
+        collectMetricValues('avg_day_lead_to_golive_by_lead_created_month', ['Average lead to golive'], {
+          excludePercent: true,
+        })
+      ),
+    };
+
+    const repRows = rows.filter((row) => row.csv_entry_name.includes('sales_representative_leader_board'));
+    const repSummary = repRows
+      .map((row) => {
+        const payload = row.payload || {};
+        return {
+          rep: readPayloadString(payload, ['Assigned to', 'Lead Owner', 'Sales representative']) || 'Unbekannt',
+          leads: readPayloadNumber(payload, ['Number of Leads', 'Leads']) || 0,
+          leadToGoLivePercent: readPayloadNumber(payload, [
+            'Lead to Golive conversion %',
+            'Lead to GoLive conversion %',
+          ]),
+        };
+      })
+      .filter((row) => row.leads > 0)
+      .sort((a, b) => b.leads - a.leads)
+      .slice(0, 6);
+
+    const detailRows = rows.filter((row) => row.csv_entry_name.includes('lead_level_details'));
+    let qualifiedOrWorkingWithoutDemo = 0;
+    let notConvertedLeads = 0;
+    let validLeadKnown = 0;
+    let validLeadYes = 0;
+
+    detailRows.forEach((row) => {
+      const payload = row.payload || {};
+      const status = (readPayloadString(payload, ['Status', 'Lead Status']) || '').toLowerCase();
+      const demoBooked = readPayloadBoolean(payload, [
+        'Converted to Demo Booked (Yes / No)',
+        'Converted to Demo Booked (Yes/No)',
+      ]);
+      const validLead = readPayloadBoolean(payload, ['Valid Lead (Yes / No)', 'Valid Lead (Yes/No)']);
+      const leadCount = readPayloadNumber(payload, ['Number of Leads']) || 1;
+
+      if ((status.includes('qualified') || status.includes('working')) && demoBooked === false) {
+        qualifiedOrWorkingWithoutDemo += leadCount;
+      }
+      if (status.includes('not converted')) {
+        notConvertedLeads += leadCount;
+      }
+      if (validLead !== null) {
+        validLeadKnown += leadCount;
+        if (validLead) validLeadYes += leadCount;
+      }
+    });
+
+    const keyRisks: string[] = [];
+    if (statusSummary.notConverted > statusSummary.qualified * 0.7 && statusSummary.notConverted > 0) {
+      keyRisks.push('Hoher Anteil not converted vs. qualified deutet auf Funnel-Leak nach Qualifizierung hin.');
+    }
+    if (qualifiedOrWorkingWithoutDemo > 0) {
+      keyRisks.push('Viele qualified/working Leads ohne Demo-Booking sind kurzfristiger Risikohebel für Forecast-Lücken.');
+    }
+    if (cohortSummary.avgLeadToGoLiveDays !== null && cohortSummary.avgLeadToGoLiveDays > 45) {
+      keyRisks.push('Langer Lead->GoLive Zyklus erhöht Lag-Risiko für aktuelle Monatsziele.');
+    }
+
+    return {
+      sourceSummary,
+      statusSummary: {
+        ...statusSummary,
+        qualifiedVsNotConvertedRatio:
+          statusSummary.notConverted > 0 ? statusSummary.qualified / statusSummary.notConverted : null,
+      },
+      cohortSummary,
+      repSummary,
+      leadDetailSignals: {
+        qualifiedOrWorkingWithoutDemo,
+        notConvertedLeads,
+        validLeadSharePercent: validLeadKnown > 0 ? (validLeadYes / validLeadKnown) * 100 : null,
+        keyRisks,
+      },
+    };
+  }, [lookerLeadsMetrics]);
+
+  const forecastScenarioInput = useMemo<ScenarioReportInput>(() => {
+    const isFutureMonth = (idx: number) =>
+      selectedYear > currentYear ? true : selectedYear < currentYear ? false : idx > currentMonth;
+    const futureConversionArrTotal = forecastData.reduce((sum, row) => {
+      if (!isFutureMonth(Number(row.idx))) return sum;
+      return sum + (Number(row.arrConversionBased) || 0);
+    }, 0);
+
+    const expectedGoLivesFromLeads =
+      Math.max(0, futureLeadScenarioSummary.scenarioEligibleFutureLeads) * Math.max(0, leadToGoLiveForecastPercent / 100);
+    const avgArrPerExpectedGoLive =
+      expectedGoLivesFromLeads > 0 ? futureConversionArrTotal / expectedGoLivesFromLeads : 0;
+    const baselineLeadConversionPercent = 16;
+    const baselineLeadVolumePerFutureMonth = Math.max(0, Math.round(futureLeadScenarioSummary.ytdLeadAverage));
+    const baselineChurnFactorPercent = Math.max(0, churnScenarioSummary.defaultFactorPercent || 100);
+    const futureMonthsCount = Math.max(0, futureLeadScenarioSummary.futureMonthsCount || 0);
+    const currentConversionArr = expectedGoLivesFromLeads * avgArrPerExpectedGoLive;
+    const baselineExpectedGoLivesFromLeads =
+      futureMonthsCount * baselineLeadVolumePerFutureMonth * (baselineLeadConversionPercent / 100);
+    const baselineConversionArr = baselineExpectedGoLivesFromLeads * avgArrPerExpectedGoLive;
+    const currentFutureChurn = Math.max(0, churnScenarioSummary.scenarioFutureChurnTotal || 0);
+    const baselineFutureChurn = Math.max(0, churnScenarioSummary.futurePlanBaseTotal || 0);
+    const baselineForecastNetArrEstimate =
+      (forecastSummary.net || 0) +
+      (baselineConversionArr - currentConversionArr) -
+      (baselineFutureChurn - currentFutureChurn);
+    const baselineGapArr = (forecastTargetSummary.net || 0) - baselineForecastNetArrEstimate;
+    const scenarioGapArr = (forecastTargetSummary.net || 0) - (forecastSummary.net || 0);
+
+    const leadVolumeChangePercentVsBaseline =
+      baselineLeadVolumePerFutureMonth > 0
+        ? ((futureLeadVolumeScenarioMonthlyLeads - baselineLeadVolumePerFutureMonth) / baselineLeadVolumePerFutureMonth) *
+          100
+        : futureLeadVolumeScenarioMonthlyLeads > 0
+          ? 100
+          : 0;
+    const conversionDeltaPctPointsVsBaseline = leadToGoLiveForecastPercent - baselineLeadConversionPercent;
+    const churnFactorDeltaPctPointsVsBaseline = futureChurnScenarioFactorPercent - baselineChurnFactorPercent;
+
+    let feasibilityScore = 100;
+    const absLeadDelta = Math.abs(leadVolumeChangePercentVsBaseline);
+    const absConversionDelta = Math.abs(conversionDeltaPctPointsVsBaseline);
+    const absChurnDelta = Math.abs(churnFactorDeltaPctPointsVsBaseline);
+    if (absLeadDelta > 15) feasibilityScore -= 15;
+    if (absLeadDelta > 30) feasibilityScore -= 15;
+    if (absLeadDelta > 50) feasibilityScore -= 20;
+    if (absConversionDelta > 2) feasibilityScore -= 20;
+    if (absConversionDelta > 5) feasibilityScore -= 20;
+    if (absConversionDelta > 8) feasibilityScore -= 15;
+    if (absChurnDelta > 15) feasibilityScore -= 10;
+    if (absChurnDelta > 30) feasibilityScore -= 20;
+    if (scenarioGapArr <= 0) feasibilityScore = Math.min(100, feasibilityScore + 5);
+    feasibilityScore = Math.max(0, Math.round(feasibilityScore));
+    const feasibilityBand: 'high' | 'medium' | 'low' =
+      feasibilityScore >= 75 ? 'high' : feasibilityScore >= 50 ? 'medium' : 'low';
+
+    return {
+      year: selectedYear,
+      leadConversionPercent: leadToGoLiveForecastPercent,
+      leadVolumePerFutureMonth: futureLeadVolumeScenarioMonthlyLeads,
+      churnFactorPercent: futureChurnScenarioFactorPercent,
+      futureMonthsCount: futureLeadScenarioSummary.futureMonthsCount,
+      baselineFutureLeads: futureLeadScenarioSummary.baselineEligibleFutureLeads,
+      scenarioFutureLeads: futureLeadScenarioSummary.scenarioEligibleFutureLeads,
+      ytdAvgLeadsPerMonth: futureLeadScenarioSummary.ytdLeadAverage,
+      avgArrPerExpectedGoLive,
+      expectedGoLivesFromLeads,
+      forecastNetArr: forecastSummary.net,
+      targetNetArr: forecastTargetSummary.net,
+      forecastSubsArr: forecastSummary.subs,
+      targetSubsArr: forecastTargetSummary.subs,
+      forecastPayArr: forecastSummary.pay,
+      targetPayArr: forecastTargetSummary.pay,
+      forecastChurnArr: forecastSummary.churn,
+      ytdBookedNetArr: forecastSummary.ytdBookedNet,
+      futurePlanChurnArr: churnScenarioSummary.futurePlanBaseTotal,
+      scenarioFutureChurnArr: churnScenarioSummary.scenarioFutureChurnTotal,
+      baselineDefaults: {
+        leadConversionPercent: baselineLeadConversionPercent,
+        leadVolumePerFutureMonth: baselineLeadVolumePerFutureMonth,
+        churnFactorPercent: baselineChurnFactorPercent,
+        forecastNetArr: baselineForecastNetArrEstimate,
+        netGapArr: baselineGapArr,
+      },
+      scenarioAssessment: {
+        forecastNetArr: forecastSummary.net,
+        netGapArr: scenarioGapArr,
+        leadVolumeChangePercentVsBaseline,
+        conversionDeltaPctPointsVsBaseline,
+        churnFactorDeltaPctPointsVsBaseline,
+        feasibilityScore,
+        feasibilityBand,
+      },
+      leadInsights: leadInsightsForScenario,
+    };
+  }, [
+    selectedYear,
+    currentYear,
+    currentMonth,
+    forecastData,
+    futureLeadScenarioSummary,
+    leadToGoLiveForecastPercent,
+    futureLeadVolumeScenarioMonthlyLeads,
+    futureChurnScenarioFactorPercent,
+    forecastSummary,
+    forecastTargetSummary,
+    churnScenarioSummary,
+    leadInsightsForScenario,
+  ]);
+
+  const loadSavedScenarios = useCallback(async () => {
+    if (!user?.id) return;
+    setSavedScenariosLoading(true);
+    setSavedScenarioError(null);
+    try {
+      const response = await fetch(
+        `/api/forecast/scenarios?userId=${encodeURIComponent(String(user.id))}&year=${encodeURIComponent(
+          String(selectedYear)
+        )}`
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || 'Szenarien konnten nicht geladen werden');
+      }
+      setSavedScenarios(Array.isArray(data.scenarios) ? (data.scenarios as SavedForecastScenario[]) : []);
+    } catch (error: any) {
+      setSavedScenarioError(error?.message || 'Szenarien konnten nicht geladen werden');
+    } finally {
+      setSavedScenariosLoading(false);
+    }
+  }, [selectedYear, user?.id]);
+
+  useEffect(() => {
+    if (reportType !== 'forecast') return;
+    loadSavedScenarios();
+  }, [reportType, loadSavedScenarios]);
+
+  const saveScenarioRecord = useCallback(
+    async ({
+      title,
+      scenarioPayload,
+      reportHeadline,
+      reportNarrative,
+      reportSummary,
+    }: {
+      title: string;
+      scenarioPayload: Record<string, unknown>;
+      reportHeadline?: string | null;
+      reportNarrative?: string | null;
+      reportSummary?: string[];
+    }) => {
+      if (!user?.id) throw new Error('Benutzer nicht verfügbar');
+      const response = await fetch('/api/forecast/scenarios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          year: selectedYear,
+          title,
+          scenarioPayload,
+          reportHeadline: reportHeadline || null,
+          reportNarrative: reportNarrative || null,
+          reportSummary: reportSummary || [],
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || 'Szenario konnte nicht gespeichert werden');
+      }
+    },
+    [selectedYear, user?.id]
+  );
+
+  const buildSavedReportFallback = useCallback(
+    (saved: SavedForecastScenario): ScenarioReport => {
+      const payload = (saved.scenario_payload || {}) as Record<string, unknown>;
+      const reportSummary = Array.isArray(saved.report_summary)
+        ? saved.report_summary.map((line) => String(line)).filter(Boolean)
+        : [];
+
+      return {
+        mode: 'rules',
+        title: String(saved.report_headline || saved.title || 'Gespeicherter Report'),
+        headline: String(saved.report_headline || saved.title || 'Gespeicherter Report'),
+        status: forecastScenarioInput.targetNetArr > forecastScenarioInput.forecastNetArr ? 'gap' : 'on_track',
+        year: selectedYear,
+        netGapArr: Math.max(0, forecastScenarioInput.targetNetArr - forecastScenarioInput.forecastNetArr),
+        assumptions: {
+          futureMonthsCount: forecastScenarioInput.futureMonthsCount,
+          leadConversionPercent: Number(payload.leadToGoLiveForecastPercent || forecastScenarioInput.leadConversionPercent),
+          leadVolumePerFutureMonth: Number(
+            payload.futureLeadVolumeScenarioMonthlyLeads || forecastScenarioInput.leadVolumePerFutureMonth
+          ),
+          churnFactorPercent: Number(
+            payload.futureChurnScenarioFactorPercent || forecastScenarioInput.churnFactorPercent
+          ),
+          avgArrPerExpectedGoLive: forecastScenarioInput.avgArrPerExpectedGoLive,
+          expectedGoLivesFromLeads: forecastScenarioInput.expectedGoLivesFromLeads,
+        },
+        leverSensitivity: {
+          netArrPerAdditionalLeadPerMonth: 0,
+          netArrPerConversionPoint: 0,
+          netArrPerChurnPointReduction: 0,
+        },
+        scenarioDelta: {
+          baselineNetArr: forecastScenarioInput.baselineDefaults?.forecastNetArr || forecastScenarioInput.forecastNetArr,
+          scenarioNetArr: forecastScenarioInput.forecastNetArr,
+          deltaNetArrVsBaseline:
+            forecastScenarioInput.forecastNetArr -
+            (forecastScenarioInput.baselineDefaults?.forecastNetArr || forecastScenarioInput.forecastNetArr),
+          additionalLeadsPerMonthVsBaseline: 0,
+          additionalLeadsTotalVsBaseline: 0,
+          additionalArrFromLeadVolumeVsBaseline: 0,
+          conversionDeltaPctPointsVsBaseline: 0,
+          additionalLeadsFromConversionVsBaseline: 0,
+          additionalArrFromConversionVsBaseline: 0,
+          churnFactorDeltaPctPointsVsBaseline: 0,
+          additionalArrFromChurnDeltaVsBaseline: 0,
+        },
+        actions: [],
+        summaryLines: reportSummary,
+        narrative: saved.report_narrative || undefined,
+        generatedAtIso: saved.created_at,
+      };
+    },
+    [forecastScenarioInput, selectedYear]
+  );
+
+  const handleSaveManualScenario = useCallback(async () => {
+    if (!user?.id) return;
+    setSavedScenarioActionLoading(true);
+    setSavedScenarioError(null);
+    try {
+      const timestampLabel = new Date().toLocaleString('de-DE', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+
+      await saveScenarioRecord({
+        title: `Manuelles Szenario (${timestampLabel})`,
+        scenarioPayload: {
+          leadToGoLiveForecastPercent,
+          futureLeadVolumeScenarioMonthlyLeads,
+          futureChurnScenarioFactorPercent,
+          source: 'manual_slider_save',
+          forecastScenarioInput,
+          scenarioReportMeta,
+        },
+        reportHeadline: 'Manuelles Slider-Szenario',
+        reportNarrative: null,
+        reportSummary: [],
+      });
+
+      setSavedScenarioConfirmation('Manuelles Szenario gespeichert.');
+      setTimeout(() => setSavedScenarioConfirmation(null), 6000);
+      await loadSavedScenarios();
+    } catch (error: any) {
+      setSavedScenarioError(error?.message || 'Szenario konnte nicht gespeichert werden');
+    } finally {
+      setSavedScenarioActionLoading(false);
+    }
+  }, [
+    user?.id,
+    leadToGoLiveForecastPercent,
+    futureLeadVolumeScenarioMonthlyLeads,
+    futureChurnScenarioFactorPercent,
+    forecastScenarioInput,
+    scenarioReportMeta,
+    saveScenarioRecord,
+    loadSavedScenarios,
+  ]);
+
+  const handleSaveScenario = useCallback(async () => {
+    if (!scenarioReport || !user?.id) return;
+    setSavedScenarioActionLoading(true);
+    setSavedScenarioError(null);
+    try {
+      const leadAction = scenarioReport.actions.find((action) => action.key === 'lead_volume');
+      const conversionAction = scenarioReport.actions.find((action) => action.key === 'conversion');
+      const churnAction = scenarioReport.actions.find((action) => action.key === 'churn');
+
+      const leadDelta = Number(leadAction?.requiredDelta || 0);
+      const conversionDelta = Number(conversionAction?.requiredDelta || 0);
+      const churnDeltaReduction = Number(churnAction?.requiredDelta || 0);
+
+      const nextLeadVolume = Number.isFinite(leadDelta)
+        ? Math.max(0, futureLeadVolumeScenarioMonthlyLeads + leadDelta)
+        : futureLeadVolumeScenarioMonthlyLeads;
+      const nextConversion = Number.isFinite(conversionDelta)
+        ? Math.max(0, Math.min(100, leadToGoLiveForecastPercent + conversionDelta))
+        : leadToGoLiveForecastPercent;
+      const nextChurnFactor = Number.isFinite(churnDeltaReduction)
+        ? Math.max(0, Math.min(300, futureChurnScenarioFactorPercent - churnDeltaReduction))
+        : futureChurnScenarioFactorPercent;
+
+      const timestampLabel = new Date().toLocaleString('de-DE', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const generatedTitle = `Szenario mit dem Ziel "Forecast Summe NET ARR ${formatCurrency(
+        forecastScenarioInput.targetNetArr
+      )}", Gap ${formatCurrency(scenarioReport.netGapArr)}, Maßnahmen siehe Report.`;
+
+      await saveScenarioRecord({
+        title: generatedTitle,
+        scenarioPayload: {
+          leadToGoLiveForecastPercent: nextConversion,
+          futureLeadVolumeScenarioMonthlyLeads: nextLeadVolume,
+          futureChurnScenarioFactorPercent: nextChurnFactor,
+          source: 'report_recommendation_save',
+          sourceSliderState: {
+            leadToGoLiveForecastPercent,
+            futureLeadVolumeScenarioMonthlyLeads,
+            futureChurnScenarioFactorPercent,
+          },
+          recommendedDelta: {
+            leadVolumePerMonth: leadDelta,
+            conversionPctPoints: conversionDelta,
+            churnFactorReductionPctPoints: churnDeltaReduction,
+          },
+          forecastScenarioInput,
+          scenarioReportMeta,
+          reportSnapshot: scenarioReport,
+          savedAtLabel: timestampLabel,
+        },
+        reportHeadline: scenarioReport.headline,
+        reportNarrative: scenarioReport.narrative || null,
+        reportSummary: scenarioReport.summaryLines || [],
+      });
+
+      setFutureLeadVolumeScenarioMonthlyLeads(nextLeadVolume);
+      setLeadToGoLiveForecastPercent(nextConversion);
+      setFutureChurnScenarioFactorPercent(nextChurnFactor);
+
+      const parts: string[] = [];
+      if (Math.abs(leadDelta) >= 0.5) parts.push(`${leadDelta > 0 ? '+' : ''}${Math.round(leadDelta)} Leads/Monat`);
+      if (Math.abs(conversionDelta) >= 0.05) parts.push(`${conversionDelta > 0 ? '+' : ''}${conversionDelta.toFixed(1)}pp Conversion`);
+      if (Math.abs(churnDeltaReduction) >= 0.05)
+        parts.push(`${churnDeltaReduction > 0 ? '-' : '+'}${Math.abs(churnDeltaReduction).toFixed(1)}pp Churn`);
+      setSavedScenarioConfirmation(
+        parts.length > 0
+          ? `Szenario übernommen: ${parts.join(', ')}`
+          : 'Szenario übernommen (keine Slider-Anpassung)'
+      );
+      setTimeout(() => setSavedScenarioConfirmation(null), 6000);
+
+      await loadSavedScenarios();
+    } catch (error: any) {
+      setSavedScenarioError(error?.message || 'Szenario konnte nicht gespeichert werden');
+    } finally {
+      setSavedScenarioActionLoading(false);
+    }
+  }, [
+    scenarioReport,
+    user?.id,
+    leadToGoLiveForecastPercent,
+    futureLeadVolumeScenarioMonthlyLeads,
+    futureChurnScenarioFactorPercent,
+    forecastScenarioInput,
+    scenarioReportMeta,
+    saveScenarioRecord,
+    loadSavedScenarios,
+  ]);
+
+  const handleDeleteSavedScenario = useCallback(
+    async (saved: SavedForecastScenario) => {
+      if (!user?.id) return;
+      const isConfirmed = window.confirm(`Szenario wirklich löschen?\n\n${saved.title}`);
+      if (!isConfirmed) return;
+
+      setDeletingScenarioId(saved.id);
+      setSavedScenarioError(null);
+      try {
+        const response = await fetch('/api/forecast/scenarios', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: user.id,
+            scenarioId: saved.id,
+          }),
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data?.success) {
+          throw new Error(data?.error || 'Szenario konnte nicht gelöscht werden');
+        }
+
+        setSavedScenarioConfirmation(`Szenario gelöscht: ${saved.title}`);
+        setTimeout(() => setSavedScenarioConfirmation(null), 6000);
+        await loadSavedScenarios();
+      } catch (error: any) {
+        setSavedScenarioError(error?.message || 'Szenario konnte nicht gelöscht werden');
+      } finally {
+        setDeletingScenarioId(null);
+      }
+    },
+    [loadSavedScenarios, user?.id]
+  );
+
+  const handleApplySavedScenario = useCallback(
+    (saved: SavedForecastScenario) => {
+      skipScenarioReportResetRef.current = true;
+      const payload = (saved.scenario_payload || {}) as Record<string, unknown>;
+      const nextLeadConversion = Number(payload.leadToGoLiveForecastPercent);
+      const nextLeadVolume = Number(payload.futureLeadVolumeScenarioMonthlyLeads);
+      const nextChurnFactor = Number(payload.futureChurnScenarioFactorPercent);
+
+      if (Number.isFinite(nextLeadConversion)) setLeadToGoLiveForecastPercent(Math.max(0, Math.min(100, nextLeadConversion)));
+      if (Number.isFinite(nextLeadVolume)) setFutureLeadVolumeScenarioMonthlyLeads(Math.max(0, nextLeadVolume));
+      if (Number.isFinite(nextChurnFactor)) setFutureChurnScenarioFactorPercent(Math.max(0, Math.min(300, nextChurnFactor)));
+
+      const snapshot = payload.reportSnapshot;
+      if (isScenarioReportSnapshot(snapshot)) {
+        setScenarioReport(snapshot);
+      } else if (saved.report_headline || saved.report_narrative || (saved.report_summary || []).length > 0) {
+        setScenarioReport(buildSavedReportFallback(saved));
+      } else {
+        setScenarioReport(null);
+      }
+
+      setScenarioReportError(null);
+      setSavedScenarioConfirmation(`Szenario geladen: ${saved.title}`);
+      setTimeout(() => setSavedScenarioConfirmation(null), 6000);
+    },
+    [buildSavedReportFallback]
+  );
+
+  const handleGenerateScenarioReport = useCallback(async () => {
+    setScenarioReportLoading(true);
+    setScenarioReportError(null);
+
+    try {
+      const response = await fetch('/api/forecast/scenario-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preferLlm: true,
+          input: forecastScenarioInput,
+        }),
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.success || !data?.report) {
+        throw new Error(data?.error || 'Report konnte nicht erzeugt werden');
+      }
+      setScenarioReport(data.report as ScenarioReport);
+      setScenarioReportMeta({
+        llmRequested: Boolean(data?.llmRequested),
+        llmAttempted: Boolean(data?.llmAttempted),
+        fallbackActive: Boolean(data?.fallbackActive),
+        llmProvider: data?.llmProvider ? String(data.llmProvider) : null,
+        llmError: data?.llmError ? String(data.llmError) : null,
+        mode: data?.mode === 'llm' || data?.mode === 'rules' ? data.mode : null,
+      });
+    } catch (error: any) {
+      setScenarioReport(null);
+      setScenarioReportError(error?.message || 'Report konnte nicht erzeugt werden');
+      setScenarioReportMeta({
+        llmRequested: true,
+        llmAttempted: false,
+        fallbackActive: true,
+        llmProvider: null,
+        llmError: null,
+        mode: null,
+      });
+    } finally {
+      setScenarioReportLoading(false);
+    }
+  }, [forecastScenarioInput]);
+
+  useEffect(() => {
+    if (skipScenarioReportResetRef.current) {
+      skipScenarioReportResetRef.current = false;
+      return;
+    }
+    setScenarioReport(null);
+    setScenarioReportError(null);
+    setScenarioReportMeta({
+      llmRequested: false,
+      llmAttempted: false,
+      fallbackActive: false,
+      llmProvider: null,
+      llmError: null,
+      mode: null,
+    });
+  }, [forecastScenarioInput]);
+
   const forecastTooltipRows = [
     { key: 'arrGoLivesToDate', label: 'ARR aus Go-Lives bis heute', color: '#10B981' },
     { key: 'arrGoLivesFuture', label: 'ARR aus Future Go-Lives', color: '#3B82F6' },
     { key: 'arrWeightedPipeline', label: 'ARR aus Weighted Sales Pipeline', color: '#D946EF' },
     { key: 'arrNotBookedPipeline', label: 'ARR aus Sign-ups Not Booked', color: '#FACC15' },
     { key: 'arrConversionBased', label: 'ARR aus YTD Lead-Conversion Forecast', color: '#6B7280' },
-    { key: 'arrChurnDeduction', label: 'Churn ARR (abgezogen)', color: '#EF4444' },
+    { key: 'arrChurnBookedDeduction', label: 'Churn ARR eingebucht (abgezogen)', color: '#EF4444' },
+    { key: 'arrChurnProjectedDeduction', label: 'Churn ARR projektiert (abgezogen)', color: '#FCA5A5' },
+    { key: 'arrChurnOverPlanDeduction', label: 'Churn ARR über Plan (abgezogen)', color: '#991B1B' },
   ] as const;
 
   const renderForecastTooltip = (params: { active?: boolean; payload?: Array<{ payload?: Record<string, unknown> }>; label?: string }) => {
@@ -2666,6 +3480,13 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                     50,
                     Math.ceil((futureLeadScenarioSummary.ytdLeadAverage > 0 ? futureLeadScenarioSummary.ytdLeadAverage * 3 : 150) / 10) * 10
                   );
+                  const leadVolumeDefaultValue = Math.max(
+                    0,
+                    Math.min(leadVolumeSliderMax, Math.round(futureLeadScenarioSummary.ytdLeadAverage))
+                  );
+                  const leadVolumeDefaultPercent = leadVolumeSliderMax > 0
+                    ? (leadVolumeDefaultValue / leadVolumeSliderMax) * 100
+                    : 0;
                   return (
                     <>
                 <div className="flex items-center justify-between gap-3 text-sm">
@@ -2673,18 +3494,32 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                   <span className="text-gray-900 font-semibold">{futureLeadVolumeScenarioMonthlyLeads.toFixed(0)}</span>
                 </div>
                 <div className="mt-2 flex items-center gap-3">
-                  <input
-                    type="range"
-                    min={0}
-                    max={leadVolumeSliderMax}
-                    step={1}
-                    value={futureLeadVolumeScenarioMonthlyLeads}
-                    onChange={(e) => {
-                      const next = Number(e.target.value);
-                      setFutureLeadVolumeScenarioMonthlyLeads(Number.isFinite(next) ? next : 0);
-                    }}
-                    className="w-full accent-gray-600"
-                  />
+                  <div className="w-full">
+                    <div className="relative">
+                      <input
+                        type="range"
+                        min={0}
+                        max={leadVolumeSliderMax}
+                        step={1}
+                        value={futureLeadVolumeScenarioMonthlyLeads}
+                        onChange={(e) => {
+                          const next = Number(e.target.value);
+                          setFutureLeadVolumeScenarioMonthlyLeads(Number.isFinite(next) ? next : 0);
+                        }}
+                        className="w-full accent-gray-600 relative z-10"
+                      />
+                      <div
+                        className="pointer-events-none absolute top-1/2 -translate-y-1/2 z-0"
+                        style={{ left: `${leadVolumeDefaultPercent}%` }}
+                        aria-hidden
+                      >
+                        <div className="h-5 border-l-2 border-indigo-500 opacity-80" />
+                      </div>
+                    </div>
+                    <div className="mt-1 text-[11px] text-indigo-700">
+                      Default-Markierung: {leadVolumeDefaultValue} Leads/Monat (YTD-Schnitt)
+                    </div>
+                  </div>
                   <input
                     type="number"
                     min={0}
@@ -2701,10 +3536,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 </div>
                 <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
                   <div className="rounded border border-gray-200 bg-white p-2">
-                    <div className="text-gray-500">Importierte Leads (Future Monate)</div>
-                    <div className="font-semibold text-gray-800">{futureLeadScenarioSummary.importedFutureLeads.toFixed(0)}</div>
-                  </div>
-                  <div className="rounded border border-gray-200 bg-white p-2">
                     <div className="text-gray-500">Baseline Leads (Forecast-Basis)</div>
                     <div className="font-semibold text-gray-800">{futureLeadScenarioSummary.baselineEligibleFutureLeads.toFixed(0)}</div>
                   </div>
@@ -2714,14 +3545,357 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                   </div>
                 </div>
                 <div className="mt-1 text-xs text-gray-500">
-                  Standardwert basiert auf dem importierten YTD-Monatsschnitt.
-                  Hinweis: Wenn importierte Future-Leads fehlen, nutzt das Modell als Fallback Target*YTD-TAM-Fit
-                  (aktuell {(futureLeadScenarioSummary.ytdTamFitRate * 100).toFixed(1)}%) oder den YTD-Leadschnitt
-                  ({futureLeadScenarioSummary.ytdLeadAverage.toFixed(1)}).
+                  Standardwert basiert auf dem importierten YTD SQL-Leadschnitt.
+                  Modell: Baseline = YTD SQL-Leadschnitt ({futureLeadScenarioSummary.ytdLeadAverage.toFixed(1)}) x
+                  Future-Monate ({futureLeadScenarioSummary.futureMonthsCount}).
                 </div>
                     </>
                   );
                 })()}
+              </div>
+              <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                {(() => {
+                  const churnSliderMax = Math.max(
+                    250,
+                    Math.ceil((churnScenarioSummary.defaultFactorPercent > 0 ? churnScenarioSummary.defaultFactorPercent * 2.5 : 250) / 10) * 10
+                  );
+                  const churnYtdMarkerFactor = Math.max(
+                    0,
+                    Math.min(churnSliderMax, churnScenarioSummary.ytdBookedFactorPercent || 0)
+                  );
+                  const churnYtdMarkerPercent = churnSliderMax > 0
+                    ? (churnYtdMarkerFactor / churnSliderMax) * 100
+                    : 0;
+                  return (
+                    <>
+                      <div className="flex items-center justify-between gap-3 text-sm">
+                        <span className="text-gray-700 font-medium">Churn Slider (Faktor auf Plan+Trend)</span>
+                        <span className="text-gray-900 font-semibold">{futureChurnScenarioFactorPercent.toFixed(0)}%</span>
+                      </div>
+                      <div className="mt-2 flex items-center gap-3">
+                        <div className="w-full">
+                          <div className="relative">
+                            <input
+                              type="range"
+                              min={0}
+                              max={churnSliderMax}
+                              step={5}
+                              value={futureChurnScenarioFactorPercent}
+                              onChange={(e) => {
+                                const next = Number(e.target.value);
+                                setFutureChurnScenarioFactorPercent(Number.isFinite(next) ? next : 100);
+                              }}
+                              className="w-full accent-red-500 relative z-10"
+                            />
+                            <div
+                              className="pointer-events-none absolute top-1/2 -translate-y-1/2 z-0"
+                              style={{ left: `${churnYtdMarkerPercent}%` }}
+                              aria-hidden
+                            >
+                              <div className="h-5 border-l-2 border-indigo-500 opacity-80" />
+                            </div>
+                          </div>
+                          <div className="mt-1 text-[11px] text-indigo-700">
+                            YTD-Marker: {formatCurrency(churnScenarioSummary.ytdMonthlyBookedAverage)} / Monat
+                            ({(churnScenarioSummary.ytdBookedFactorPercent || 0).toFixed(0)}%)
+                          </div>
+                        </div>
+                        <input
+                          type="number"
+                          min={0}
+                          max={300}
+                          step={5}
+                          value={futureChurnScenarioFactorPercent}
+                          onChange={(e) => {
+                            const next = Number(e.target.value);
+                            if (!Number.isFinite(next)) return;
+                            setFutureChurnScenarioFactorPercent(Math.max(0, Math.min(300, next)));
+                          }}
+                          className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
+                        />
+                      </div>
+                      <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                        <div className="rounded border border-gray-200 bg-white p-2">
+                          <div className="text-gray-500">Default Plan-Churn (Future Ø)</div>
+                          <div className="font-semibold text-gray-800">{formatCurrency(churnScenarioSummary.defaultMonthlyPlanChurn)}</div>
+                        </div>
+                        <div className="rounded border border-gray-200 bg-white p-2">
+                          <div className="text-gray-500">Future Churn Basis (Plan)</div>
+                          <div className="font-semibold text-gray-800">{formatCurrency(churnScenarioSummary.futurePlanBaseTotal)}</div>
+                        </div>
+                        <div className="rounded border border-gray-200 bg-white p-2">
+                          <div className="text-gray-500">Szenario Churn (Future)</div>
+                          <div className="font-semibold text-gray-800">{formatCurrency(churnScenarioSummary.scenarioFutureChurnTotal)}</div>
+                        </div>
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        Plan-Regel: 100% = geplanter Churn. Werte über 100% erhöhen den Plan-Churn für Worst-Case-Szenarien.
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+              <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50/40 p-3">
+                <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <div className="text-xs text-emerald-900">
+                    Manuelles Szenario speichern (ohne LLM-Report) mit den aktuellen Slider-Werten.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSaveManualScenario}
+                    disabled={savedScenarioActionLoading}
+                    className="inline-flex items-center justify-center rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {savedScenarioActionLoading ? 'Speichere Szenario...' : 'Aktuelles Szenario speichern'}
+                  </button>
+                </div>
+                {savedScenarioConfirmation && (
+                  <div className="mt-2 rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                    {savedScenarioConfirmation}
+                  </div>
+                )}
+              </div>
+              <div className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50/40 p-4">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-indigo-900">Szenario Maßnahmen-Report</div>
+                    <div className="text-xs text-indigo-800">
+                      Erstellt konkrete Maßnahmen aus den aktuellen Slider-Werten (mit Fallback auf regelbasierte Logik).
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleGenerateScenarioReport}
+                    disabled={scenarioReportLoading}
+                    className="inline-flex items-center justify-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {scenarioReportLoading ? 'Report wird erstellt...' : 'Szenario-Report erstellen'}
+                  </button>
+                </div>
+
+                {scenarioReportError && (
+                  <div className="mt-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                    {scenarioReportError}
+                    {scenarioReportMeta.llmRequested && (
+                      <span className="ml-1">
+                        (LLM nicht verfügbar oder nicht konfiguriert - regelbasierter Report bleibt nutzbar.)
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {!scenarioReportError && scenarioReportMeta.fallbackActive && scenarioReportMeta.llmError && (
+                  <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    OpenAI-Diagnose: {scenarioReportMeta.llmError}
+                  </div>
+                )}
+
+                {scenarioReport && (
+                  <div className="mt-3 rounded border border-indigo-200 bg-white p-3 text-xs text-gray-700">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-gray-900">{scenarioReport.headline}</span>
+                    </div>
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
+                      <div className="rounded border border-gray-200 p-2">
+                        <div className="text-gray-500">NET Gap</div>
+                        <div className="font-semibold text-gray-900">{formatCurrency(scenarioReport.netGapArr)}</div>
+                        <div className="text-[11px] text-gray-600 mt-1">
+                          Delta ARR Prognose vs Szenario: {formatSignedCurrency(scenarioReport.scenarioDelta.deltaNetArrVsBaseline)}
+                        </div>
+                      </div>
+                      <div className="rounded border border-gray-200 p-2">
+                        <div className="text-gray-500">Wirkung +1 Lead/Monat</div>
+                        <div className="font-semibold text-gray-900">
+                          {formatCurrency(scenarioReport.leverSensitivity.netArrPerAdditionalLeadPerMonth)}
+                        </div>
+                        <div className="text-[11px] text-gray-600 mt-1">
+                          Mehr-Leads Szenario: {scenarioReport.scenarioDelta.additionalLeadsPerMonthVsBaseline.toFixed(1)} / Monat (
+                          {scenarioReport.scenarioDelta.additionalLeadsTotalVsBaseline.toFixed(1)} gesamt)
+                        </div>
+                        <div className="text-[11px] text-gray-600">
+                          ARR aus Mehr-Leads: {formatSignedCurrency(scenarioReport.scenarioDelta.additionalArrFromLeadVolumeVsBaseline)}
+                        </div>
+                      </div>
+                      <div className="rounded border border-gray-200 p-2">
+                        <div className="text-gray-500">Wirkung +1pp Conversion</div>
+                        <div className="font-semibold text-gray-900">
+                          {formatCurrency(scenarioReport.leverSensitivity.netArrPerConversionPoint)}
+                        </div>
+                        <div className="text-[11px] text-gray-600 mt-1">
+                          Conversion-Delta: {scenarioReport.scenarioDelta.conversionDeltaPctPointsVsBaseline.toFixed(1)}pp, Mehr-Leads:
+                          {' '}{scenarioReport.scenarioDelta.additionalLeadsFromConversionVsBaseline.toFixed(1)}
+                        </div>
+                        <div className="text-[11px] text-gray-600">
+                          ARR aus Conversion-Delta: {formatSignedCurrency(scenarioReport.scenarioDelta.additionalArrFromConversionVsBaseline)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      {scenarioReport.summaryLines.map((line, index) => (
+                        <div key={`${line}-${index}`}>- {line}</div>
+                      ))}
+                    </div>
+                    {scenarioReport.narrative && (
+                      <div className="mt-2 rounded border border-indigo-100 bg-indigo-50/50 p-2 whitespace-pre-wrap text-[12px] text-gray-700">
+                        {scenarioReport.narrative}
+                      </div>
+                    )}
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      {scenarioReport.actions.slice(0, 4).map((action) => (
+                        <div key={action.key} className="rounded border border-gray-200 p-2">
+                          <div className="font-medium text-gray-900">{action.title}</div>
+                          <div>
+                            Ziel-Beitrag: {action.requiredDelta.toFixed(2)} {action.unit}
+                          </div>
+                          <div>
+                            Wirkung/Einheit: {formatCurrency(action.impactPerUnitNetArr)}
+                          </div>
+                          <div className="text-gray-500">{action.details}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex items-center justify-end gap-3">
+                      {savedScenarioConfirmation && (
+                        <div className="rounded-md bg-emerald-50 border border-emerald-300 px-3 py-1.5 text-xs font-medium text-emerald-800 animate-fade-in">
+                          {savedScenarioConfirmation}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleSaveScenario}
+                        disabled={savedScenarioActionLoading}
+                        className="inline-flex items-center justify-center rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {savedScenarioActionLoading ? 'Speichere Szenario...' : 'In ein Szenario übernehmen'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="mt-3 rounded border border-indigo-200 bg-white p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-gray-800">Gespeicherte Szenarien</div>
+                    {savedScenariosLoading && <div className="text-xs text-gray-500">Lade...</div>}
+                  </div>
+                  {savedScenarioError && (
+                    <div className="mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
+                      {savedScenarioError}
+                    </div>
+                  )}
+                  {!savedScenariosLoading && savedScenarios.length === 0 && (
+                    <div className="mt-2 text-xs text-gray-500">
+                      Noch keine gespeicherten Szenarien für {selectedYear}.
+                    </div>
+                  )}
+                  {savedScenarios.length > 0 && (
+                    <div className="mt-2 space-y-2">
+                      {savedScenarios.map((saved) => {
+                        const payload = saved.scenario_payload || {};
+                        const source = String(payload.source || '').trim().toLowerCase();
+                        const isManual = source === 'manual_slider_save';
+
+                        return (
+                          <div
+                            key={saved.id}
+                            className="flex flex-col gap-2 rounded border border-gray-200 bg-gray-50 p-2 md:flex-row md:items-center md:justify-between"
+                          >
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <div className="text-sm font-medium text-gray-900">{saved.title}</div>
+                                <span
+                                  className={`inline-flex items-center rounded px-2 py-0.5 text-[10px] font-semibold ${
+                                    isManual
+                                      ? 'border border-emerald-300 bg-emerald-50 text-emerald-700'
+                                      : 'border border-indigo-300 bg-indigo-50 text-indigo-700'
+                                  }`}
+                                >
+                                  {isManual ? 'Manuell' : 'Report'}
+                                </span>
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                {new Date(saved.created_at).toLocaleString('de-DE')}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => handleApplySavedScenario(saved)}
+                                className="inline-flex items-center justify-center rounded border border-indigo-300 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+                              >
+                                Szenario laden
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSavedScenario(saved)}
+                                disabled={deletingScenarioId === saved.id}
+                                className="inline-flex items-center justify-center rounded border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {deletingScenarioId === saved.id ? 'Lösche...' : 'Szenario löschen'}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="mb-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div className="bg-white rounded-lg shadow-sm p-4 border border-green-200">
+                  <div className="text-xs text-gray-500">Forecast Summe Subs ARR</div>
+                  <div className="text-xl font-bold text-green-700">{formatCurrency(forecastSummary.subs)}</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  YTD eingebucht: {formatCurrency(forecastSummary.ytdBookedSubs)}
+                </div>
+                  <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.subs)}</div>
+                  <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.subs * 100).toFixed(1)}% erreicht</div>
+                  <div className={`text-sm font-bold mt-2 ${forecastGapSummary.subs > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                    Gap: {formatSignedCurrency(forecastGapSummary.subs)}
+                  </div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4 border border-orange-200">
+                  <div className="text-xs text-gray-500">Forecast Summe Pay ARR</div>
+                  <div className="text-xl font-bold text-orange-700">{formatCurrency(forecastSummary.pay)}</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  YTD eingebucht: {formatCurrency(forecastSummary.ytdBookedPay)}
+                </div>
+                  <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.pay)}</div>
+                  <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.pay * 100).toFixed(1)}% erreicht</div>
+                  <div className={`text-sm font-bold mt-2 ${forecastGapSummary.pay > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                    Gap: {formatSignedCurrency(forecastGapSummary.pay)}
+                  </div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4 border border-red-200">
+                  <div className="text-xs text-gray-500">Forecast Churn ARR</div>
+                  <div className="text-xl font-bold text-red-700">{formatCurrency(forecastSummary.churn)}</div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    YTD eingebucht: {formatCurrency(churnScenarioSummary.ytdChurnTotal)}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Future Basis (Plan): {formatCurrency(churnScenarioSummary.futurePlanBaseTotal)}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Future Szenario: {formatCurrency(churnScenarioSummary.scenarioFutureChurnTotal)} ({(churnScenarioSummary.churnScenarioFactor * 100).toFixed(0)}%)
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Über Plan (eingebucht): {formatCurrency(churnScenarioSummary.overPlanFutureTotal)}
+                  </div>
+                  <div className={`text-sm font-bold mt-2 ${forecastGapSummary.churn > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                    Gap: {formatSignedCurrency(forecastGapSummary.churn)}
+                  </div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4 border border-blue-200">
+                  <div className="text-xs text-gray-500">Forecast Summe NET ARR</div>
+                  <div className="text-xl font-bold text-blue-700">{formatCurrency(forecastSummary.net)}</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  YTD eingebucht: {formatCurrency(forecastSummary.ytdBookedNet)}
+                </div>
+                  <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.net)}</div>
+                  <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.net * 100).toFixed(1)}% erreicht</div>
+                  <div className={`text-sm font-bold mt-2 ${forecastGapSummary.net > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                    Gap: {formatSignedCurrency(forecastGapSummary.net)}
+                  </div>
+                </div>
               </div>
               <ResponsiveContainer width="100%" height={400}>
                 <ComposedChart data={forecastData}>
@@ -2768,10 +3942,26 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                     minPointSize={3}
                   />
                   <Bar
-                    dataKey="arrChurnDeduction"
+                    dataKey="arrChurnBookedDeduction"
                     stackId="arrSplit"
-                    name="Churn ARR (abgezogen)"
+                    name="Churn ARR eingebucht (abgezogen)"
                     fill="#EF4444"
+                  />
+                  <Bar
+                    dataKey="arrChurnProjectedDeduction"
+                    stackId="arrSplit"
+                    name="Churn ARR projiziert (abgezogen)"
+                    fill="#EF4444"
+                    fillOpacity={0.35}
+                    stroke="#EF4444"
+                    strokeOpacity={0.6}
+                    strokeWidth={1}
+                  />
+                  <Bar
+                    dataKey="arrChurnOverPlanDeduction"
+                    stackId="arrSplit"
+                    name="Churn ARR über Plan (abgezogen)"
+                    fill="#991B1B"
                   />
                   <Line 
                     type="monotone" 
@@ -2790,27 +3980,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                   />
                 </ComposedChart>
               </ResponsiveContainer>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="bg-white rounded-lg shadow-sm p-4 border border-green-200">
-                <div className="text-xs text-gray-500">Forecast Summe Subs ARR</div>
-                <div className="text-xl font-bold text-green-700">{formatCurrency(forecastSummary.subs)}</div>
-                <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.subs)}</div>
-                <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.subs * 100).toFixed(1)}% erreicht</div>
-              </div>
-              <div className="bg-white rounded-lg shadow-sm p-4 border border-orange-200">
-                <div className="text-xs text-gray-500">Forecast Summe Pay ARR</div>
-                <div className="text-xl font-bold text-orange-700">{formatCurrency(forecastSummary.pay)}</div>
-                <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.pay)}</div>
-                <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.pay * 100).toFixed(1)}% erreicht</div>
-              </div>
-              <div className="bg-white rounded-lg shadow-sm p-4 border border-blue-200">
-                <div className="text-xs text-gray-500">Forecast Summe NET ARR</div>
-                <div className="text-xl font-bold text-blue-700">{formatCurrency(forecastSummary.net)}</div>
-                <div className="text-xs text-gray-500 mt-1">Target: {formatCurrency(forecastTargetSummary.net)}</div>
-                <div className="text-xs text-gray-500 mt-1">{(forecastAchievement.net * 100).toFixed(1)}% erreicht</div>
-              </div>
             </div>
 
           </div>
