@@ -309,9 +309,11 @@ CREATE INDEX IF NOT EXISTS idx_golives_opportunity ON go_lives(opportunity_id);
 -- Competitors: Alle können lesen, nur Admins können schreiben
 ALTER TABLE competitors ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "competitors_read_all" ON competitors;
 CREATE POLICY "competitors_read_all" ON competitors
   FOR SELECT USING (true);
 
+DROP POLICY IF EXISTS "competitors_write_admin" ON competitors;
 CREATE POLICY "competitors_write_admin" ON competitors
   FOR ALL USING (
     EXISTS (
@@ -324,9 +326,11 @@ CREATE POLICY "competitors_write_admin" ON competitors
 -- Lost Reasons: Alle können lesen, nur Admins können schreiben
 ALTER TABLE lost_reasons ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "lost_reasons_read_all" ON lost_reasons;
 CREATE POLICY "lost_reasons_read_all" ON lost_reasons
   FOR SELECT USING (true);
 
+DROP POLICY IF EXISTS "lost_reasons_write_admin" ON lost_reasons;
 CREATE POLICY "lost_reasons_write_admin" ON lost_reasons
   FOR ALL USING (
     EXISTS (
@@ -339,6 +343,7 @@ CREATE POLICY "lost_reasons_write_admin" ON lost_reasons
 -- Leads: AE sieht eigene, Manager sieht alle
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "leads_own" ON leads;
 CREATE POLICY "leads_own" ON leads
   FOR ALL USING (
     user_id = auth.uid() OR
@@ -352,6 +357,7 @@ CREATE POLICY "leads_own" ON leads
 -- Opportunities: AE sieht eigene, Manager sieht alle
 ALTER TABLE opportunities ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "opportunities_own" ON opportunities;
 CREATE POLICY "opportunities_own" ON opportunities
   FOR ALL USING (
     user_id = auth.uid() OR
@@ -365,6 +371,7 @@ CREATE POLICY "opportunities_own" ON opportunities
 -- Opportunity Stage History: Gleiche Regeln wie Opportunities
 ALTER TABLE opportunity_stage_history ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "opp_history_access" ON opportunity_stage_history;
 CREATE POLICY "opp_history_access" ON opportunity_stage_history
   FOR ALL USING (
     EXISTS (
@@ -384,6 +391,7 @@ CREATE POLICY "opp_history_access" ON opportunity_stage_history
 -- Pipeline Settings: Jeder kann eigene lesen/schreiben, globale nur lesen
 ALTER TABLE pipeline_settings ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "pipeline_settings_own" ON pipeline_settings;
 CREATE POLICY "pipeline_settings_own" ON pipeline_settings
   FOR ALL USING (
     user_id = auth.uid() OR 
@@ -398,6 +406,7 @@ CREATE POLICY "pipeline_settings_own" ON pipeline_settings
 -- Pipeline Activities: Gleiche Regeln wie Opportunities
 ALTER TABLE pipeline_activities ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "activities_access" ON pipeline_activities;
 CREATE POLICY "activities_access" ON pipeline_activities
   FOR ALL USING (
     user_id = auth.uid() OR
@@ -411,12 +420,14 @@ CREATE POLICY "activities_access" ON pipeline_activities
 -- Notifications: Nur eigene
 ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "notifications_own" ON notifications;
 CREATE POLICY "notifications_own" ON notifications
   FOR ALL USING (user_id = auth.uid());
 
 -- Notification Settings: Nur eigene
 ALTER TABLE notification_settings ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "notification_settings_own" ON notification_settings;
 CREATE POLICY "notification_settings_own" ON notification_settings
   FOR ALL USING (user_id = auth.uid());
 

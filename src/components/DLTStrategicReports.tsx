@@ -3,7 +3,14 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { User, GoLive, isPlannable, canReceiveGoLives, MONTH_NAMES, DEFAULT_SETTINGS } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
-import { useAllUsers, useMultiUserData, usePaymarginImportedCohortKeys } from '@/lib/hooks';
+import {
+  useAllUsers,
+  useMultiUserData,
+  usePaymarginImportedCohortKeys,
+  useUpDownsellsMonthly,
+  useSmsMonthly,
+  usePhorestPayMonthly,
+} from '@/lib/hooks';
 import {
   calculateYearSummary,
   formatCurrency,
@@ -18,6 +25,7 @@ import PDFExportButton from './PDFExportButton';
 import { useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { ScenarioReport, ScenarioReportInput } from '@/lib/forecastScenarioReport';
+import { exportToPDFBlob, formatPDFFilename } from '@/lib/pdf-export';
 
 /** Form für YTD-Monatsdaten (IST + Plan, wie Jahresübersicht) */
 interface YtdMonthlyRow {
@@ -55,6 +63,18 @@ interface MonthlyChurnRow {
   nonScheduledArrLost: number;
   totalCount: number;
   totalArrLost: number;
+}
+
+/** Entspricht „Total ARR Lost“ in Churn pro Monat: total_arr_lost, sonst Subs + Pay. */
+function effectiveTotalArrLost(event: ChurnEventRow): number {
+  const raw = event.total_arr_lost;
+  if (raw !== null && raw !== undefined && raw !== '') {
+    const t = Number(raw);
+    if (Number.isFinite(t) && Math.abs(t) > 0.005) return Math.abs(t);
+  }
+  const subs = Math.abs(Number(event.subs_revenue_lost) || 0);
+  const pay = Math.abs(Number(event.pay_revenue_lost) || 0);
+  return subs + pay;
 }
 
 interface SalespipeEventRow {
@@ -159,6 +179,21 @@ interface SavedForecastScenario {
   report_summary?: string[] | null;
 }
 
+interface ForecastEnterpriseDeal {
+  id: string;
+  user_id: string;
+  year: number;
+  target_month: number;
+  expected_go_lives: number;
+  arr_per_go_live: number;
+  oak_id: number | null;
+  account_name: string | null;
+  is_active: boolean;
+  notes?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
 interface DLTPlanzahlen {
   year: number;
   region: string;
@@ -172,6 +207,14 @@ interface DLTPlanzahlen {
   avg_pay_bill_tipping: number;
   churn_arr_data?: unknown;
   new_clients_data?: unknown;
+  expanding_arr_data?: {
+    nrr_basis?: {
+      arr_basis_dec?: number;
+      arr_basis_jan_end?: number;
+      sms_mrr_basis_dec?: number;
+      pay_basis_dec?: number;
+    };
+  };
 }
 
 interface SalesCyclePlanRules {
@@ -262,9 +305,29 @@ const ACTIVE_PIPELINE_STAGES: PipelineStageKey[] = [
   'sent_quote',
 ];
 const OPEN_PIPELINE_KPI_STAGES: PipelineStageKey[] = ['demo_booked', 'demo_completed', 'sent_quote'];
+const PROBABILITY_BUCKET_DEFS = [
+  { key: 'p10', label: '10%', min: 0.1, max: 0.2 },
+  { key: 'p20', label: '20%', min: 0.2, max: 0.35 },
+  { key: 'p35', label: '35%', min: 0.35, max: 0.5 },
+  { key: 'p50', label: '50%', min: 0.5, max: 0.7 },
+  { key: 'p70', label: '70%', min: 0.7, max: 0.9 },
+  { key: 'p90', label: '90%+', min: 0.9, max: 1.01 },
+] as const;
+const FORECAST_WEIGHTED_ACV_PER_OPPORTUNITY = 3288;
+// Tage von Probability-Stage bis Close Won (empirisch) + Close Won bis Go-Live (Ø 23.8d → 24d)
+const PROBABILITY_TO_DAYS_TO_CLOSE_WON: Array<{ minProbability: number; days: number }> = [
+  { minProbability: 0.9, days: 7 },
+  { minProbability: 0.7, days: 14 },
+  { minProbability: 0.5, days: 21 },
+  { minProbability: 0.35, days: 28 },
+  { minProbability: 0.2, days: 35 },
+  { minProbability: 0, days: 42 },
+];
+const CLOSE_WON_TO_GO_LIVE_DAYS = 24;
+const EXCLUDED_ACCOUNT_NAMES_FOR_WEIGHTING = ['ryf gmbh'];
 
-const SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT = [280, 110, 120, 130, 90, 90, 110, 140, 120, 120, 130];
-const SALESPIPE_MAIN_COLUMN_MIN_WIDTH = [180, 90, 100, 100, 70, 70, 90, 110, 100, 100, 110];
+const SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT = [80, 280, 110, 75, 120, 130, 90, 90, 110, 140, 120, 120, 130];
+const SALESPIPE_MAIN_COLUMN_MIN_WIDTH = [70, 180, 90, 70, 100, 100, 70, 70, 90, 110, 100, 110, 110];
 
 function normalizeSalespipeStage(stage: string | null): PipelineStageKey | null {
   const normalized = String(stage || '').toLowerCase().trim().replace(/[-\s]+/g, '_');
@@ -330,9 +393,35 @@ function getDefaultProbability(stage: PipelineStageKey): number {
   return 0;
 }
 
+function getWeightedArrFromOpportunity(
+  stage: PipelineStageKey,
+  probabilityRaw: number | null | undefined,
+  opportunityId: string | null | undefined
+): number {
+  const normalizedOpportunityId = normalizeId(opportunityId);
+  if (!normalizedOpportunityId) return 0;
+
+  const hasExplicitProbability =
+    probabilityRaw !== null &&
+    probabilityRaw !== undefined &&
+    String(probabilityRaw).trim() !== '';
+  const probability = hasExplicitProbability && Number.isFinite(Number(probabilityRaw))
+    ? (Number(probabilityRaw) > 1 ? Number(probabilityRaw) / 100 : Number(probabilityRaw))
+    : getDefaultProbability(stage);
+  const clampedProbability = Math.max(0, Math.min(1, probability));
+
+  return FORECAST_WEIGHTED_ACV_PER_OPPORTUNITY * clampedProbability;
+}
+
 function normalizeId(value: string | null | undefined): string | null {
   const normalized = String(value || '').trim().toLowerCase();
   return normalized || null;
+}
+
+function isExcludedAccountName(value: string | null | undefined): boolean {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return EXCLUDED_ACCOUNT_NAMES_FOR_WEIGHTING.some((blocked) => normalized.includes(blocked));
 }
 
 function buildSalesforceOpportunityUrl(opportunityId: string | null | undefined): string | null {
@@ -354,6 +443,16 @@ function calculateDaysBetween(startDate: string | null, endDate: string | null):
   const end = new Date(endDate);
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
   return Math.floor((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+function calculateDaysUntil(endDate: string | null): number | null {
+  if (!endDate) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(endDate);
+  end.setHours(0, 0, 0, 0);
+  if (Number.isNaN(end.getTime())) return null;
+  return Math.floor((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 }
 
 function formatDateForInput(date: Date): string {
@@ -456,11 +555,61 @@ function isScenarioReportSnapshot(value: unknown): value is ScenarioReport {
   );
 }
 
+function parseScenarioNarrativeSections(narrative: string | null | undefined) {
+  const text = String(narrative || '').replace(/\r/g, '').trim();
+  if (!text) {
+    return {
+      executiveSummary: '',
+      ctaLines: [] as string[],
+      elevatorPitch: '',
+      hebeleffekt: '',
+    };
+  }
+
+  const headingRegex =
+    /(?:^|\n)\s*(?:##\s*)?(Executive Summary|Hebelwirkung|CTA|Call to Action|Call to Actions|Elevator Pitch)\s*:?\s*(?:\n|$)/gi;
+  const sections: Record<string, string> = {};
+  const matches: Array<{ key: string; start: number; end: number }> = [];
+
+  let match: RegExpExecArray | null;
+  while ((match = headingRegex.exec(text)) !== null) {
+    matches.push({ key: String(match[1] || '').toLowerCase(), start: match.index, end: headingRegex.lastIndex });
+  }
+
+  for (let idx = 0; idx < matches.length; idx += 1) {
+    const current = matches[idx];
+    const next = matches[idx + 1];
+    const content = text.slice(current.end, next ? next.start : text.length).trim();
+    sections[current.key] = content;
+  }
+
+  const ctaRaw = sections.cta || sections['call to action'] || sections['call to actions'] || '';
+  const ctaLines = ctaRaw
+    ? ctaRaw
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+    : [];
+
+  return {
+    executiveSummary: sections['executive summary'] || text,
+    hebeleffekt: sections.hebelwirkung || '',
+    ctaLines,
+    elevatorPitch: sections['elevator pitch'] || '',
+  };
+}
+
 export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) {
   const { t } = useLanguage();
   const currentYear = new Date().getFullYear();
   const currentMonth = new Date().getMonth();
   const [selectedYear, setSelectedYear] = useState(currentYear);
+
+  // ========== EXPANDING ARR: Import-Daten ==========
+  const { data: upDownsellsData } = useUpDownsellsMonthly(selectedYear);
+  const { data: smsData } = useSmsMonthly(selectedYear);
+  const { data: phorestPayData } = usePhorestPayMonthly(selectedYear);
+
   const defaultYtdMonths = useMemo(
     () => Array.from(
       { length: selectedYear < currentYear ? 12 : currentMonth + 1 },
@@ -472,10 +621,26 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     () => Array.from({ length: 12 }, (_, idx) => idx + 1),
     []
   );
+  const [reportCategory, setReportCategory] = useState<'new_sales_arr' | 'expanding_arr' | 'total_business_arr'>('new_sales_arr');
   const [reportType, setReportType] = useState<'forecast' | 'ytd' | 'salespipe'>('forecast');
   const [leadToGoLiveForecastPercent, setLeadToGoLiveForecastPercent] = useState(16);
   const [futureLeadVolumeScenarioMonthlyLeads, setFutureLeadVolumeScenarioMonthlyLeads] = useState(0);
   const [futureChurnScenarioFactorPercent, setFutureChurnScenarioFactorPercent] = useState(100);
+  const [forecastSettingsCollapsed, setForecastSettingsCollapsed] = useState(false);
+  const [enterpriseDealsCollapsed, setEnterpriseDealsCollapsed] = useState(false);
+  const [enterpriseForecastEnabled, setEnterpriseForecastEnabled] = useState(true);
+  const [enterpriseDeals, setEnterpriseDeals] = useState<ForecastEnterpriseDeal[]>([]);
+  const [enterpriseDealsLoading, setEnterpriseDealsLoading] = useState(false);
+  const [enterpriseDealsError, setEnterpriseDealsError] = useState<string | null>(null);
+  const [enterpriseLookupQuery, setEnterpriseLookupQuery] = useState('');
+  const [enterpriseDealExpectedGoLivesInput, setEnterpriseDealExpectedGoLivesInput] = useState(1);
+  const [enterpriseDealArrPerGoLiveInput, setEnterpriseDealArrPerGoLiveInput] = useState(0);
+  const [enterpriseDealTargetMonthInput, setEnterpriseDealTargetMonthInput] = useState(
+    Math.max(1, Math.min(12, currentMonth + 2))
+  );
+  const [addingEnterpriseDeal, setAddingEnterpriseDeal] = useState(false);
+  const [deletingEnterpriseDealId, setDeletingEnterpriseDealId] = useState<string | null>(null);
+  const [togglingEnterpriseDealId, setTogglingEnterpriseDealId] = useState<string | null>(null);
   const [scenarioReport, setScenarioReport] = useState<ScenarioReport | null>(null);
   const [scenarioReportLoading, setScenarioReportLoading] = useState(false);
   const [scenarioReportError, setScenarioReportError] = useState<string | null>(null);
@@ -500,6 +665,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const [savedScenarioError, setSavedScenarioError] = useState<string | null>(null);
   const [savedScenarioConfirmation, setSavedScenarioConfirmation] = useState<string | null>(null);
   const [deletingScenarioId, setDeletingScenarioId] = useState<string | null>(null);
+  const [downloadingPdfScenarioId, setDownloadingPdfScenarioId] = useState<string | null>(null);
   const [selectedYtdMonths, setSelectedYtdMonths] = useState<number[]>(defaultYtdMonths);
   const [selectedMonthDetail, setSelectedMonthDetail] = useState<number | null>(null);
   const [selectedChurnMonthDetail, setSelectedChurnMonthDetail] = useState<number | null>(null);
@@ -516,6 +682,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const [salespipeSearch, setSalespipeSearch] = useState('');
   const [salespipeStageFilter, setSalespipeStageFilter] = useState<PipelineStageKey | 'all'>('all');
   const [salespipeSourceFilter, setSalespipeSourceFilter] = useState<PipelineSourceFilter>('all');
+  const [selectedProbabilityBucketKey, setSelectedProbabilityBucketKey] = useState<string | null>(null);
   const defaultSalespipeYtdRange = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -534,15 +701,23 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   const [salespipeRelativeDays, setSalespipeRelativeDays] = useState<number | null>(null);
   const [salespipeOverviewExpanded, setSalespipeOverviewExpanded] = useState(true);
   const [salespipeWhatIfExpanded, setSalespipeWhatIfExpanded] = useState(false);
+  const [salespipeDatasetExpanded, setSalespipeDatasetExpanded] = useState(true);
+  const [salespipeWhatIfDatasetExpanded, setSalespipeWhatIfDatasetExpanded] = useState(false);
+  const [overdueOpportunitiesExpanded, setOverdueOpportunitiesExpanded] = useState(true);
   const [whatIfConvertedRatePct, setWhatIfConvertedRatePct] = useState(0);
   const [whatIfWinRatePct, setWhatIfWinRatePct] = useState(0);
+  const [disabledPipelineRowKeys, setDisabledPipelineRowKeys] = useState<string[]>([]);
   const [churnEvents, setChurnEvents] = useState<ChurnEventRow[]>([]);
   const [churnLoading, setChurnLoading] = useState(true);
   const [payIstInputsByGoLiveId, setPayIstInputsByGoLiveId] = useState<Record<string, string>>({});
   const [savingPayIstByGoLiveId, setSavingPayIstByGoLiveId] = useState<Record<string, boolean>>({});
   const [payIstErrorByGoLiveId, setPayIstErrorByGoLiveId] = useState<Record<string, string>>({});
   const exportRef = useRef<HTMLDivElement>(null);
+  const scenarioReportExportRef = useRef<HTMLDivElement>(null);
   const skipScenarioReportResetRef = useRef(false);
+  const totalBusinessTopScrollRef = useRef<HTMLDivElement>(null);
+  const totalBusinessBottomScrollRef = useRef<HTMLDivElement>(null);
+  const totalBusinessScrollSyncSourceRef = useRef<'top' | 'bottom' | null>(null);
   const [salespipeMainColWidths, setSalespipeMainColWidths] = useState<number[]>([
     ...SALESPIPE_MAIN_COLUMN_WIDTHS_DEFAULT,
   ]);
@@ -576,6 +751,51 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       if (salespipeScrollSyncSourceRef.current === 'bottom') salespipeScrollSyncSourceRef.current = null;
     });
   }, []);
+
+  const handleTotalBusinessTopScroll = useCallback(() => {
+    if (totalBusinessScrollSyncSourceRef.current === 'bottom') return;
+    totalBusinessScrollSyncSourceRef.current = 'top';
+    const topEl = totalBusinessTopScrollRef.current;
+    const bottomEl = totalBusinessBottomScrollRef.current;
+    if (topEl && bottomEl) bottomEl.scrollLeft = topEl.scrollLeft;
+    requestAnimationFrame(() => {
+      if (totalBusinessScrollSyncSourceRef.current === 'top') totalBusinessScrollSyncSourceRef.current = null;
+    });
+  }, []);
+
+  const handleTotalBusinessBottomScroll = useCallback(() => {
+    if (totalBusinessScrollSyncSourceRef.current === 'top') return;
+    totalBusinessScrollSyncSourceRef.current = 'bottom';
+    const topEl = totalBusinessTopScrollRef.current;
+    const bottomEl = totalBusinessBottomScrollRef.current;
+    if (topEl && bottomEl) topEl.scrollLeft = bottomEl.scrollLeft;
+    requestAnimationFrame(() => {
+      if (totalBusinessScrollSyncSourceRef.current === 'bottom') totalBusinessScrollSyncSourceRef.current = null;
+    });
+  }, []);
+
+  const pipelineDisableStorageKey = useMemo(
+    () => `dltStrategicReports.disabledPipelineRows.${user.id}.${selectedYear}`,
+    [user.id, selectedYear]
+  );
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(pipelineDisableStorageKey);
+      if (!raw) {
+        setDisabledPipelineRowKeys([]);
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        setDisabledPipelineRowKeys([]);
+        return;
+      }
+      setDisabledPipelineRowKeys(parsed.map((entry) => String(entry)));
+    } catch {
+      setDisabledPipelineRowKeys([]);
+    }
+  }, [pipelineDisableStorageKey]);
 
   useEffect(() => {
     setSelectedYtdMonths(defaultYtdMonths);
@@ -880,61 +1100,167 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     return data;
   }, [combined, multiSettings, multiGoLives, goLiveReceiverIds, planTargets, payArrReportingOptions]);
 
-  // Forecast data: 1) Ist-Monate, 2) Weighted Pipeline (+70 Tage), 3) YTD-Conversion-Forecast als Fallback
+  const enterpriseDealArrByMonth = useMemo(() => {
+    const byMonth = Array.from({ length: 12 }, () => 0);
+    enterpriseDeals.forEach((deal) => {
+      if (!deal.is_active) return;
+      const monthIdx = Math.max(0, Math.min(11, Number(deal.target_month || 1) - 1));
+      const expectedGoLives = Math.max(0, Number(deal.expected_go_lives) || 0);
+      const arrPerGoLive = Math.max(0, Number(deal.arr_per_go_live) || 0);
+      byMonth[monthIdx] += expectedGoLives * arrPerGoLive;
+    });
+    return byMonth;
+  }, [enterpriseDeals]);
+
+  const enterpriseDealsSummary = useMemo(() => {
+    const all = enterpriseDeals.reduce(
+      (sum, deal) => sum + Math.max(0, Number(deal.expected_go_lives) || 0) * Math.max(0, Number(deal.arr_per_go_live) || 0),
+      0
+    );
+    const active = enterpriseDeals.reduce((sum, deal) => {
+      if (!deal.is_active) return sum;
+      return sum + Math.max(0, Number(deal.expected_go_lives) || 0) * Math.max(0, Number(deal.arr_per_go_live) || 0);
+    }, 0);
+    return { all, active };
+  }, [enterpriseDeals]);
+
+  const enterpriseLookupOptions = useMemo(() => {
+    const goLives: GoLive[] = combined?.goLives ?? Array.from(multiGoLives?.values() ?? []).flat();
+    const byKey = new Map<string, { label: string; oakId: number | null; accountName: string | null }>();
+    goLives.forEach((gl) => {
+      const oakId = Number.isFinite(Number(gl.oak_id)) ? Number(gl.oak_id) : null;
+      const accountName = String(gl.customer_name || '').trim() || null;
+      if (!oakId && !accountName) return;
+      const key = `${oakId ?? 'none'}::${(accountName || '').toLowerCase()}`;
+      const labelParts = [];
+      if (oakId) labelParts.push(`OAK ${oakId}`);
+      if (accountName) labelParts.push(accountName);
+      byKey.set(key, {
+        label: labelParts.join(' - '),
+        oakId,
+        accountName,
+      });
+    });
+    signupsEvents.forEach((signup) => {
+      const oakId = Number.isFinite(Number(signup.oak_id)) ? Number(signup.oak_id) : null;
+      const accountName = String(signup.account_name || '').trim() || null;
+      if (!oakId && !accountName) return;
+      const key = `${oakId ?? 'none'}::${(accountName || '').toLowerCase()}`;
+      if (byKey.has(key)) return;
+      const labelParts = [];
+      if (oakId) labelParts.push(`OAK ${oakId}`);
+      if (accountName) labelParts.push(accountName);
+      byKey.set(key, {
+        label: labelParts.join(' - '),
+        oakId,
+        accountName,
+      });
+    });
+    salespipeEvents.forEach((sales) => {
+      const oakId = Number.isFinite(Number(sales.oak_id)) ? Number(sales.oak_id) : null;
+      const opportunityName = String(sales.opportunity_name || '').trim() || null;
+      if (!oakId && !opportunityName) return;
+      const key = `${oakId ?? 'none'}::${(opportunityName || '').toLowerCase()}`;
+      if (byKey.has(key)) return;
+      const labelParts = [];
+      if (oakId) labelParts.push(`OAK ${oakId}`);
+      if (opportunityName) labelParts.push(`Opportunity: ${opportunityName}`);
+      byKey.set(key, {
+        label: labelParts.join(' - '),
+        oakId,
+        accountName: opportunityName,
+      });
+    });
+    return Array.from(byKey.values()).sort((a, b) => a.label.localeCompare(b.label, 'de'));
+  }, [combined, multiGoLives, signupsEvents, salespipeEvents]);
+
+  /** Total ARR Lost pro Monat (alle Churn-Events) — wie Spalte „Total ARR Lost“ unter Churn pro Monat. */
+  const churnTotalArrLostByMonth = useMemo(() => {
+    const m = Array.from({ length: 12 }, () => 0);
+    churnEvents.forEach((event) => {
+      if (!event.churn_month) return;
+      const d = new Date(event.churn_month);
+      if (Number.isNaN(d.getTime()) || d.getFullYear() !== selectedYear) return;
+      const idx = d.getMonth();
+      if (idx < 0 || idx > 11) return;
+      m[idx] += effectiveTotalArrLost(event);
+    });
+    return m;
+  }, [churnEvents, selectedYear]);
+
+  // Forecast data: 1) Ist-Monate, 2) Weighted Pipeline (mind. +40 Tage + Stage-Offset), 3) YTD-Conversion-Forecast als Fallback
   const forecastData = useMemo(() => {
     if (monthlyData.length === 0) return [];
 
-    // Stage-spezifische Restlaufzeit bis Go-Live (heuristisch aus aktueller Journey-Analyse).
-    // Ziel: Weighted Pipeline nicht im aktuellen Stage-Monat buchen, sondern im wahrscheinlichen Go-Live-Monat.
-    const stageToGoLiveOffsetDays: Record<PipelineStageKey, number> = {
-      sql: 70,
-      not_converted_new: 60,
-      working: 52,
-      converted: 44,
-      demo_booked: 36,
-      demo_completed: 30,
-      sent_quote: 26,
-      close_won: 26,
-      close_lost: 0,
-      signups: 0,
-      go_live: 0,
-    };
-    const getProjectedGoLiveDate = (sourceDate: Date, stageKey: PipelineStageKey) => {
-      const projected = new Date(sourceDate);
-      projected.setDate(projected.getDate() + (stageToGoLiveOffsetDays[stageKey] ?? 0));
-      return projected;
+    // Probability-basierte Go-Live-Projektion: heute + daysToCloseWon(probability) + CLOSE_WON_TO_GO_LIVE_DAYS
+    // Datenquelle: salespipeEvents (OPEN_PIPELINE_KPI_STAGES), dedupliziert nach Opportunity (beste Probability).
+    // Konsistent mit salespipeKpis.weightedArr: exakt dieselbe Datenbasis, nur zeitlich auf Monate verteilt.
+    const getDaysToCloseWon = (probability: number): number => {
+      for (const bucket of PROBABILITY_TO_DAYS_TO_CLOSE_WON) {
+        if (probability >= bucket.minProbability) return bucket.days;
+      }
+      return 42;
     };
 
     const now = new Date();
     const nowTs = now.getTime();
-    const forecastWindowStart = new Date(now);
-    forecastWindowStart.setHours(0, 0, 0, 0);
-    const pipelineEnd = new Date(now);
-    pipelineEnd.setDate(pipelineEnd.getDate() + 70);
-    pipelineEnd.setHours(23, 59, 59, 999);
 
-    const pipelineWeightedByMonth = Array.from({ length: 12 }, () => 0);
+    const pipelineWeightedByMonthAndOpportunity = Array.from({ length: 12 }, () => new Map<string, number>());
+    const upsertWeightedPipelineValue = (monthIdx: number, opportunityId: string | null | undefined, weightedArr: number) => {
+      const normalizedOpportunityId = normalizeId(opportunityId);
+      if (!normalizedOpportunityId || weightedArr <= 0) return;
+      const monthMap = pipelineWeightedByMonthAndOpportunity[monthIdx];
+      const previous = monthMap.get(normalizedOpportunityId) || 0;
+      if (weightedArr > previous) {
+        monthMap.set(normalizedOpportunityId, weightedArr);
+      }
+    };
+
+    // Forecast muss denselben Scope wie die Sales-Pipe-KPI verwenden:
+    // Open-Stages, Jahresfilter, Date-Filter, Source-Filter, Search und Opportunity-Deduplizierung.
+    type ForecastOpenRow = {
+      opportunityId: string;
+      probability: number;
+      weightedArr: number;
+      source: 'salespipe' | 'leads';
+      sourceTab: string | null;
+      filterDate: string | null;
+      stageKey: PipelineStageKey;
+      name: string | null;
+      owner: string | null;
+    };
+    const candidateRows: ForecastOpenRow[] = [];
     salespipeEvents.forEach((row) => {
+      if (isExcludedAccountName(row.opportunity_name)) return;
       const stageKey = normalizeSalespipeStage(row.stage);
-      if (!stageKey || !ACTIVE_PIPELINE_STAGES.includes(stageKey)) return;
-      // Für die Forecast-Zuordnung zählt primär der erwartete Abschlussmonat.
-      const filterDate = row.close_date || row.created_date;
-      if (!filterDate) return;
-      const sourceDate = new Date(filterDate);
-      if (Number.isNaN(sourceDate.getTime())) return;
-      const projectedGoLiveDate = getProjectedGoLiveDate(sourceDate, stageKey);
-      if (projectedGoLiveDate < forecastWindowStart || projectedGoLiveDate > pipelineEnd) return;
-      if (projectedGoLiveDate.getFullYear() !== selectedYear) return;
-      const monthIdx = projectedGoLiveDate.getMonth();
-      if (monthIdx < 0 || monthIdx > 11) return;
-      const arr = Number(row.estimated_arr) || 0;
+      if (!stageKey || !OPEN_PIPELINE_KPI_STAGES.includes(stageKey)) return;
+      const opportunityId = normalizeId(row.opportunity_id);
+      if (!opportunityId) return;
+      const createdYear = row.created_date ? new Date(row.created_date).getFullYear() : null;
+      const closeYear = row.close_date ? new Date(row.close_date).getFullYear() : null;
+      if (createdYear !== selectedYear && closeYear !== selectedYear) return;
       const probabilityRaw = Number(row.probability);
-      const probability = Number.isFinite(probabilityRaw)
+      const normalizedProbability = Number.isFinite(probabilityRaw)
         ? (probabilityRaw > 1 ? probabilityRaw / 100 : probabilityRaw)
-        : getDefaultProbability(stageKey);
-      pipelineWeightedByMonth[monthIdx] += arr * probability;
+        : Number.NaN;
+      const probability =
+        !Number.isNaN(normalizedProbability) && normalizedProbability > 0
+          ? Math.max(0, Math.min(1, normalizedProbability))
+          : getDefaultProbability(stageKey);
+      candidateRows.push({
+        opportunityId,
+        probability,
+        weightedArr: getWeightedArrFromOpportunity(stageKey, probabilityRaw, opportunityId),
+        source: 'salespipe',
+        sourceTab: row.source_tab || null,
+        filterDate: row.created_date || row.close_date || null,
+        stageKey,
+        name: row.opportunity_name || null,
+        owner: row.opportunity_owner || null,
+      });
     });
     leadsEvents.forEach((row) => {
+      if (isExcludedAccountName(row.company_account) || isExcludedAccountName(row.opportunity_account)) return;
       const stageKey = normalizeLeadsStage(
         row.lead_status,
         row.lead_sub_status,
@@ -943,19 +1269,106 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         row.opportunity_id,
         row.opportunity_account
       );
-      if (!stageKey || !ACTIVE_PIPELINE_STAGES.includes(stageKey)) return;
-      const filterDate = row.conversion_date || row.created_date;
-      if (!filterDate) return;
-      const sourceDate = new Date(filterDate);
-      if (Number.isNaN(sourceDate.getTime())) return;
-      const projectedGoLiveDate = getProjectedGoLiveDate(sourceDate, stageKey);
-      if (projectedGoLiveDate < forecastWindowStart || projectedGoLiveDate > pipelineEnd) return;
+      if (!stageKey || !OPEN_PIPELINE_KPI_STAGES.includes(stageKey)) return;
+      const opportunityId = normalizeId(row.opportunity_id);
+      if (!opportunityId) return;
+      const createdYear = row.created_date ? new Date(row.created_date).getFullYear() : null;
+      const conversionYear = row.conversion_date ? new Date(row.conversion_date).getFullYear() : null;
+      if (createdYear !== selectedYear && conversionYear !== selectedYear) return;
+      const probability = getDefaultProbability(stageKey);
+      candidateRows.push({
+        opportunityId,
+        probability,
+        weightedArr: getWeightedArrFromOpportunity(stageKey, null, opportunityId),
+        source: 'leads',
+        sourceTab: null,
+        filterDate: row.conversion_date || row.created_date || null,
+        stageKey,
+        name: row.company_account || null,
+        owner: row.lead_owner || null,
+      });
+    });
+
+    const fromDate = salespipeDateFrom ? new Date(salespipeDateFrom) : null;
+    const toDate = salespipeDateTo ? new Date(`${salespipeDateTo}T23:59:59`) : null;
+    const relativeToDate = salespipeRelativeDays !== null ? new Date() : null;
+    const relativeFromDate = salespipeRelativeDays !== null ? new Date() : null;
+    if (relativeToDate) relativeToDate.setHours(23, 59, 59, 999);
+    if (relativeFromDate) {
+      relativeFromDate.setHours(0, 0, 0, 0);
+      relativeFromDate.setDate(relativeFromDate.getDate() - Math.max(0, salespipeRelativeDays - 1));
+    }
+    const query = salespipeSearch.trim().toLowerCase();
+
+    const filteredCandidates = candidateRows.filter((row) => {
+      if (salespipeSourceFilter === 'salespipe2_only') {
+        if (row.source === 'salespipe' && row.sourceTab !== 'drive_salespipe2_csv') return false;
+      }
+      if (salespipeStageFilter !== 'all' && row.stageKey !== salespipeStageFilter) return false;
+      if (!row.filterDate) return false;
+      const relevantDate = new Date(row.filterDate);
+      if (Number.isNaN(relevantDate.getTime())) return false;
+      if (fromDate && relevantDate < fromDate) return false;
+      if (toDate && relevantDate > toDate) return false;
+      if (relativeFromDate && relevantDate < relativeFromDate) return false;
+      if (relativeToDate && relevantDate > relativeToDate) return false;
+      if (query) {
+        const searchValues = [
+          row.name || '',
+          row.owner || '',
+          row.opportunityId || '',
+          row.source,
+        ];
+        if (!searchValues.some((value) => value.toLowerCase().includes(query))) return false;
+      }
+      return true;
+    });
+
+    type BestOpportunityEntry = { probability: number; weightedArr: number; sourcePriority: number; sortTs: number };
+    const bestByOpportunity = new Map<string, BestOpportunityEntry>();
+    filteredCandidates.forEach((row) => {
+      const sourcePriority = row.source === 'salespipe' ? 2 : 1;
+      const ts = row.filterDate ? new Date(row.filterDate).getTime() : Number.NEGATIVE_INFINITY;
+      const sortTs = Number.isNaN(ts) ? Number.NEGATIVE_INFINITY : ts;
+      const current = bestByOpportunity.get(row.opportunityId);
+      if (!current) {
+        bestByOpportunity.set(row.opportunityId, {
+          probability: row.probability,
+          weightedArr: row.weightedArr,
+          sourcePriority,
+          sortTs,
+        });
+        return;
+      }
+      const shouldReplace =
+        row.probability > current.probability ||
+        (row.probability === current.probability && sourcePriority > current.sourcePriority) ||
+        (row.probability === current.probability &&
+          sourcePriority === current.sourcePriority &&
+          sortTs > current.sortTs);
+      if (shouldReplace) {
+        bestByOpportunity.set(row.opportunityId, {
+          probability: row.probability,
+          weightedArr: row.weightedArr,
+          sourcePriority,
+          sortTs,
+        });
+      }
+    });
+
+    // Projektion: heute + daysToCloseWon + CLOSE_WON_TO_GO_LIVE_DAYS → Forecast-Monat
+    bestByOpportunity.forEach(({ probability, weightedArr }, opportunityId) => {
+      const totalDays = getDaysToCloseWon(probability) + CLOSE_WON_TO_GO_LIVE_DAYS;
+      const projectedGoLiveDate = new Date(now);
+      projectedGoLiveDate.setDate(projectedGoLiveDate.getDate() + totalDays);
       if (projectedGoLiveDate.getFullYear() !== selectedYear) return;
       const monthIdx = projectedGoLiveDate.getMonth();
-      if (monthIdx < 0 || monthIdx > 11) return;
-      const arr = Number(row.opportunity_amount) || 0;
-      pipelineWeightedByMonth[monthIdx] += arr * getDefaultProbability(stageKey);
+      upsertWeightedPipelineValue(monthIdx, opportunityId, weightedArr);
     });
+
+    const pipelineWeightedByMonth = pipelineWeightedByMonthAndOpportunity.map((monthMap) =>
+      Array.from(monthMap.values()).reduce((sum, value) => sum + value, 0)
+    );
 
     const goLiveArrToDateByMonth = Array.from({ length: 12 }, () => 0);
     const goLiveArrFutureByMonth = Array.from({ length: 12 }, () => 0);
@@ -1037,16 +1450,19 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     })();
 
     const actualChurnByMonth = Array.from({ length: 12 }, () => 0);
+    const scheduledChurnByMonth = Array.from({ length: 12 }, () => 0);
     churnEvents.forEach((event) => {
       if (!event.churn_month) return;
       const d = new Date(event.churn_month);
       if (Number.isNaN(d.getTime()) || d.getFullYear() !== selectedYear) return;
       const idx = d.getMonth();
       if (idx < 0 || idx > 11) return;
-      actualChurnByMonth[idx] += Number(event.total_arr_lost) || 0;
+      const arrLost = effectiveTotalArrLost(event);
+      actualChurnByMonth[idx] += arrLost;
+      if (event.scheduled === true) {
+        scheduledChurnByMonth[idx] += arrLost;
+      }
     });
-
-    const futureChurnBaseByMonth = plannedChurnByMonth.map((value) => Math.max(0, value));
 
     const lookerRowsForYear = lookerLeadsMetrics.filter((row) => {
       const payload = row.payload || {};
@@ -1248,26 +1664,47 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       const arrGoLivesFuture = goLiveArrFutureByMonth[row.idx] || 0;
       const arrNotBookedPipeline = notBookedArrByMonth[row.idx] || 0;
       const isFutureMonth = selectedYear > currentYear || (selectedYear === currentYear && row.idx > currentMonth);
-      // Bereits eingebuchter Churn (aus churn_events) wird separat geführt.
-      const bookedChurnAbs = Math.max(0, actualChurnByMonth[row.idx] || 0);
+      // Bereits eingebuchter Churn (aus churn_events).
+      const bookedChurnAbs = Math.max(
+        0,
+        isFutureMonth ? (scheduledChurnByMonth[row.idx] || 0) : (actualChurnByMonth[row.idx] || 0)
+      );
       const churnScenarioFactor = Math.max(0, futureChurnScenarioFactorPercent / 100);
-      const scenarioPlanChurnAbs = isFutureMonth ? (futureChurnBaseByMonth[row.idx] || 0) * churnScenarioFactor : 0;
-      const bookedWithinPlanAbs = isFutureMonth ? Math.min(bookedChurnAbs, scenarioPlanChurnAbs) : bookedChurnAbs;
-      const projectedWithinPlanAbs = isFutureMonth
-        ? Math.max(0, scenarioPlanChurnAbs - bookedWithinPlanAbs)
-        : 0;
-      const overPlanChurnAbs = isFutureMonth ? Math.max(0, bookedChurnAbs - scenarioPlanChurnAbs) : 0;
-      const churnForForecast = isFutureMonth ? scenarioPlanChurnAbs + overPlanChurnAbs : bookedChurnAbs;
+      const hasScenarioOverride = Math.abs(churnScenarioFactor - 1) > 0.0001;
+      const ytdChurnForForecast = (() => {
+        const ytdMonthLimit = selectedYear < currentYear ? 11 : selectedYear > currentYear ? -1 : currentMonth;
+        const ytdMonths = Array.from({ length: ytdMonthLimit + 1 }, (_, i) => i);
+        const ytdBooked = ytdMonths.reduce((s, i) => s + (actualChurnByMonth[i] || 0), 0);
+        const ytdWithChurn = ytdMonths.filter((i) => actualChurnByMonth[i] > 0).length;
+        return ytdWithChurn > 0 ? ytdBooked / ytdWithChurn : 0;
+      })();
+      const trendChurnAbs = isFutureMonth ? ytdChurnForForecast * churnScenarioFactor : 0;
+      // Standard (100%): 1 EUR Fallback für Monate ohne scheduled Churn.
+      // Bei aktivem Slider-Szenario (> oder < 100%) wird stattdessen der Trend-Churn berücksichtigt.
+      const churnForForecast = isFutureMonth
+        ? bookedChurnAbs > 0 ? bookedChurnAbs : hasScenarioOverride ? trendChurnAbs : 1
+        : bookedChurnAbs;
+      const bookedWithinPlanAbs = bookedChurnAbs;
+      const projectedWithinPlanAbs =
+        isFutureMonth && bookedChurnAbs === 0 && hasScenarioOverride ? trendChurnAbs : 0;
+      const overPlanChurnAbs = 0;
+      const arrEnterpriseExpectation =
+        enterpriseForecastEnabled && isFutureMonth ? Number(enterpriseDealArrByMonth[row.idx] || 0) : 0;
       const arrConversionBaseline = !row.hasActual && isFutureMonth ? (conversionArrByMonth[row.idx] || 0) : 0;
       const primaryArrWithoutConversion =
-        arrGoLivesToDate + arrGoLivesFuture + pipelineWeighted + arrNotBookedPipeline;
+        arrGoLivesToDate + arrGoLivesFuture + pipelineWeighted + arrNotBookedPipeline + arrEnterpriseExpectation;
       const arrConversionTopUp = Math.max(0, arrConversionBaseline - primaryArrWithoutConversion);
 
       if (row.hasActual) {
         const arrWeightedPipeline = pipelineWeighted;
         const arrConversionBased = 0;
         const grossArr =
-          arrGoLivesToDate + arrGoLivesFuture + arrWeightedPipeline + arrNotBookedPipeline + arrConversionBased;
+          arrGoLivesToDate +
+          arrGoLivesFuture +
+          arrWeightedPipeline +
+          arrNotBookedPipeline +
+          arrConversionBased +
+          arrEnterpriseExpectation;
         return {
           ...row,
           subsForecast: row.subsActual,
@@ -1279,6 +1716,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           arrWeightedPipeline,
           arrNotBookedPipeline,
           arrConversionBased,
+          arrEnterpriseExpectation,
           arrChurnBookedDeduction: -bookedWithinPlanAbs,
           arrChurnProjectedDeduction: -projectedWithinPlanAbs,
           arrChurnOverPlanDeduction: -overPlanChurnAbs,
@@ -1293,7 +1731,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         const arrWeightedPipeline = pipelineWeighted;
         const arrConversionBased = arrConversionTopUp;
         const grossArr =
-          arrGoLivesToDate + arrGoLivesFuture + arrWeightedPipeline + arrNotBookedPipeline + arrConversionBased;
+          arrGoLivesToDate +
+          arrGoLivesFuture +
+          arrWeightedPipeline +
+          arrNotBookedPipeline +
+          arrConversionBased +
+          arrEnterpriseExpectation;
         return {
           ...row,
           subsForecast,
@@ -1305,6 +1748,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           arrWeightedPipeline,
           arrNotBookedPipeline,
           arrConversionBased,
+          arrEnterpriseExpectation,
           arrChurnBookedDeduction: -bookedWithinPlanAbs,
           arrChurnProjectedDeduction: -projectedWithinPlanAbs,
           arrChurnOverPlanDeduction: -overPlanChurnAbs,
@@ -1319,7 +1763,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       const arrWeightedPipeline = pipelineWeighted;
       const arrConversionBased = subsForecast + payForecast;
       const grossArr =
-        arrGoLivesToDate + arrGoLivesFuture + arrWeightedPipeline + arrNotBookedPipeline + arrConversionBased;
+        arrGoLivesToDate +
+        arrGoLivesFuture +
+        arrWeightedPipeline +
+        arrNotBookedPipeline +
+        arrConversionBased +
+        arrEnterpriseExpectation;
       return {
         ...row,
         subsForecast,
@@ -1331,6 +1780,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         arrWeightedPipeline,
         arrNotBookedPipeline,
         arrConversionBased,
+        arrEnterpriseExpectation,
         arrChurnBookedDeduction: -bookedWithinPlanAbs,
         arrChurnProjectedDeduction: -projectedWithinPlanAbs,
         arrChurnOverPlanDeduction: -overPlanChurnAbs,
@@ -1353,6 +1803,14 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     leadToGoLiveForecastPercent,
     futureLeadVolumeScenarioMonthlyLeads,
     futureChurnScenarioFactorPercent,
+    salespipeSearch,
+    salespipeStageFilter,
+    salespipeSourceFilter,
+    salespipeDateFrom,
+    salespipeDateTo,
+    salespipeRelativeDays,
+    enterpriseForecastEnabled,
+    enterpriseDealArrByMonth,
     planzahlen,
     churnEvents,
     payArrReportingOptions,
@@ -1363,6 +1821,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       subs: forecastData.reduce((sum, row) => sum + (row.subsForecast || 0), 0),
       pay: forecastData.reduce((sum, row) => sum + (row.payForecast || 0), 0),
       net: forecastData.reduce((sum, row) => sum + (row.netForecast || 0), 0),
+      enterprise: forecastData.reduce((sum, row) => sum + (Number(row.arrEnterpriseExpectation) || 0), 0),
       churn: forecastData.reduce((sum, row) => sum + Math.abs(Number(row.arrChurnDeduction || 0)), 0),
       ytdBookedSubs: forecastData.reduce(
         (sum, row) => sum + ((row.hasActual ? Number(row.subsActual || row.subsForecast || 0) : 0) || 0),
@@ -1441,20 +1900,8 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       if (Number.isNaN(d.getTime()) || d.getFullYear() !== selectedYear) return;
       const idx = d.getMonth();
       if (idx < 0 || idx > 11) return;
-      monthlyChurn[idx] += Number(event.total_arr_lost) || 0;
+      monthlyChurn[idx] += effectiveTotalArrLost(event);
     });
-
-    const plannedChurnByMonth = (() => {
-      const churnData =
-        planzahlen?.churn_arr_data && typeof planzahlen.churn_arr_data === 'object'
-          ? (planzahlen.churn_arr_data as Record<string, unknown>)
-          : {};
-      const invoicedChurn =
-        churnData.invoiced_churn && typeof churnData.invoiced_churn === 'object'
-          ? (churnData.invoiced_churn as Record<string, unknown>)
-          : {};
-      return normalizeMonthlyPlanValues(invoicedChurn.target_arr).map((value) => Math.abs(value));
-    })();
 
     const ytdMonthLimit = selectedYear < currentYear ? 11 : selectedYear > currentYear ? -1 : currentMonth;
     const ytdMonths = Array.from({ length: 12 }, (_, idx) => idx).filter((idx) => idx <= ytdMonthLimit);
@@ -1462,50 +1909,58 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       selectedYear > currentYear ? true : selectedYear < currentYear ? false : idx > currentMonth
     );
 
-    const planBaseByMonth = plannedChurnByMonth.map((value) => Math.max(0, value));
-    const defaultMonthlyPlanChurn = (() => {
-      const futureValues = futureMonths.map((idx) => planBaseByMonth[idx]).filter((value) => value > 0);
-      if (futureValues.length > 0) return futureValues.reduce((sum, value) => sum + value, 0) / futureValues.length;
-      const allValues = planBaseByMonth.filter((value) => value > 0);
-      return allValues.length > 0 ? allValues.reduce((sum, value) => sum + value, 0) / allValues.length : 0;
-    })();
+    // Basis: YTD-Ø monatlich eingebuchter Churn (symmetrisch zur ARR-Seite)
+    const ytdChurnTotal = ytdMonths.reduce((sum, idx) => sum + (monthlyChurn[idx] || 0), 0);
+    const ytdMonthsWithChurn = ytdMonths.filter((idx) => monthlyChurn[idx] > 0);
+    const ytdMonthlyBookedAverage = ytdMonthsWithChurn.length > 0
+      ? ytdChurnTotal / ytdMonthsWithChurn.length
+      : 0;
 
     const churnScenarioFactor = Math.max(0, futureChurnScenarioFactorPercent / 100);
-    const ytdChurnTotal = ytdMonths.reduce((sum, idx) => sum + (monthlyChurn[idx] || 0), 0);
-    const ytdMonthlyBookedAverage = ytdMonths.length > 0 ? ytdChurnTotal / ytdMonths.length : 0;
+    // Trend-Projektion: YTD-Ø × Faktor × Anzahl Zukunftsmonate
+    const trendBaseByMonth = futureMonths.map(() => ytdMonthlyBookedAverage);
     const futureBookedChurnTotal = futureMonths.reduce((sum, idx) => sum + (monthlyChurn[idx] || 0), 0);
-    const futurePlanBaseTotal = futureMonths.reduce((sum, idx) => sum + (planBaseByMonth[idx] || 0), 0);
-    const scenarioFuturePlanTotal = futurePlanBaseTotal * churnScenarioFactor;
-    const overPlanFutureTotal = futureMonths.reduce((sum, idx) => {
-      const booked = monthlyChurn[idx] || 0;
-      const planScenario = (planBaseByMonth[idx] || 0) * churnScenarioFactor;
-      return sum + Math.max(0, booked - planScenario);
-    }, 0);
-    const scenarioFutureChurnTotal = scenarioFuturePlanTotal + overPlanFutureTotal;
+    const futureTrendBaseTotal = futureMonths.length * ytdMonthlyBookedAverage;
+    const scenarioFutureChurnTotal = futureTrendBaseTotal * churnScenarioFactor;
 
     return {
       defaultFactorPercent: 100,
-      defaultMonthlyPlanChurn,
-      futurePlanBaseTotal,
-      scenarioFuturePlanTotal,
-      overPlanFutureTotal,
-      ytdChurnTotal,
-      futureBookedChurnTotal,
+      ytdMonthlyBookedAverage,
+      trendBaseByMonth,
+      futureTrendBaseTotal,
       scenarioFutureChurnTotal,
       churnScenarioFactor,
-      ytdMonthlyBookedAverage,
-      ytdBookedFactorPercent:
-        defaultMonthlyPlanChurn > 0 ? (ytdMonthlyBookedAverage / defaultMonthlyPlanChurn) * 100 : 0,
+      ytdChurnTotal,
+      futureBookedChurnTotal,
       futureMonthsCount: futureMonths.length,
+      // Abwärtskompatible Felder für bestehende UI-Referenzen
+      defaultMonthlyPlanChurn: ytdMonthlyBookedAverage,
+      futurePlanBaseTotal: futureTrendBaseTotal,
+      scenarioFuturePlanTotal: scenarioFutureChurnTotal,
+      overPlanFutureTotal: 0,
+      ytdBookedFactorPercent: 100,
     };
-  }, [churnEvents, planzahlen, selectedYear, currentYear, currentMonth, futureChurnScenarioFactorPercent]);
+  }, [churnEvents, selectedYear, currentYear, currentMonth, futureChurnScenarioFactorPercent]);
 
   useEffect(() => {
-    const ytdMarkerDefault = Number.isFinite(churnScenarioSummary.ytdBookedFactorPercent)
-      ? Math.max(0, Math.min(300, churnScenarioSummary.ytdBookedFactorPercent))
-      : 100;
-    setFutureChurnScenarioFactorPercent(ytdMarkerDefault);
-  }, [selectedYear, churnScenarioSummary.ytdBookedFactorPercent]);
+    // Default: 100% = exakt YTD-Ø Churn-Trend
+    setFutureChurnScenarioFactorPercent(100);
+  }, [selectedYear]);
+
+  const enterpriseDefaultArrPerGoLiveYtd = useMemo(() => {
+    const ytdMonthLimit = selectedYear < currentYear ? 11 : selectedYear > currentYear ? -1 : currentMonth;
+    const ytdRows = monthlyData.filter((row, idx) => idx <= ytdMonthLimit);
+    const ytdGoLives = ytdRows.reduce((sum, row) => sum + Math.max(0, Number(row.goLives) || 0), 0);
+    if (ytdGoLives <= 0) return 0;
+    const ytdArr = ytdRows.reduce((sum, row) => sum + (Number(row.subsARR) || 0) + (Number(row.payARR) || 0), 0);
+    return ytdArr > 0 ? ytdArr / ytdGoLives : 0;
+  }, [monthlyData, selectedYear, currentYear, currentMonth]);
+
+  useEffect(() => {
+    setEnterpriseDealTargetMonthInput(Math.max(1, Math.min(12, currentMonth + 2)));
+    setEnterpriseDealExpectedGoLivesInput(1);
+    setEnterpriseDealArrPerGoLiveInput(Math.max(0, Math.round(enterpriseDefaultArrPerGoLiveYtd)));
+  }, [selectedYear, currentMonth, enterpriseDefaultArrPerGoLiveYtd]);
 
   const forecastAchievement = useMemo(
     () => ({
@@ -1706,6 +2161,10 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       (baselineFutureChurn - currentFutureChurn);
     const baselineGapArr = (forecastTargetSummary.net || 0) - baselineForecastNetArrEstimate;
     const scenarioGapArr = (forecastTargetSummary.net || 0) - (forecastSummary.net || 0);
+    const forecastWeightedPipelineArr = forecastData.reduce(
+      (sum, row) => sum + (Number(row.arrWeightedPipeline) || 0),
+      0
+    );
 
     const leadVolumeChangePercentVsBaseline =
       baselineLeadVolumePerFutureMonth > 0
@@ -1735,6 +2194,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       feasibilityScore >= 75 ? 'high' : feasibilityScore >= 50 ? 'medium' : 'low';
 
     return {
+      userId: user?.id ? String(user.id) : undefined,
       year: selectedYear,
       leadConversionPercent: leadToGoLiveForecastPercent,
       leadVolumePerFutureMonth: futureLeadVolumeScenarioMonthlyLeads,
@@ -1752,6 +2212,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       forecastPayArr: forecastSummary.pay,
       targetPayArr: forecastTargetSummary.pay,
       forecastChurnArr: forecastSummary.churn,
+      forecastWeightedPipelineArr,
       ytdBookedNetArr: forecastSummary.ytdBookedNet,
       futurePlanChurnArr: churnScenarioSummary.futurePlanBaseTotal,
       scenarioFutureChurnArr: churnScenarioSummary.scenarioFutureChurnTotal,
@@ -1772,6 +2233,15 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         feasibilityBand,
       },
       leadInsights: leadInsightsForScenario,
+      tableSignals: {
+        salespipeRows: salespipeEvents.length,
+        signupsRows: signupsEvents.length,
+        leadsRows: leadsEvents.length,
+        lookerLeadsRows: lookerLeadsMetrics.length,
+        churnRows: churnEvents.length,
+        hasPlanzahlen: Boolean(planzahlen),
+        keyRiskCount: leadInsightsForScenario.leadDetailSignals?.keyRisks?.length || 0,
+      },
     };
   }, [
     selectedYear,
@@ -1786,6 +2256,13 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     forecastTargetSummary,
     churnScenarioSummary,
     leadInsightsForScenario,
+    salespipeEvents.length,
+    signupsEvents.length,
+    leadsEvents.length,
+    lookerLeadsMetrics.length,
+    churnEvents.length,
+    planzahlen,
+    user?.id,
   ]);
 
   const loadSavedScenarios = useCallback(async () => {
@@ -1814,6 +2291,33 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     if (reportType !== 'forecast') return;
     loadSavedScenarios();
   }, [reportType, loadSavedScenarios]);
+
+  const loadEnterpriseDeals = useCallback(async () => {
+    if (!user?.id) return;
+    setEnterpriseDealsLoading(true);
+    setEnterpriseDealsError(null);
+    try {
+      const response = await fetch(
+        `/api/forecast/enterprise-deals?userId=${encodeURIComponent(String(user.id))}&year=${encodeURIComponent(
+          String(selectedYear)
+        )}`
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || 'Enterprise Deals konnten nicht geladen werden');
+      }
+      setEnterpriseDeals(Array.isArray(data.deals) ? (data.deals as ForecastEnterpriseDeal[]) : []);
+    } catch (error: any) {
+      setEnterpriseDealsError(error?.message || 'Enterprise Deals konnten nicht geladen werden');
+    } finally {
+      setEnterpriseDealsLoading(false);
+    }
+  }, [selectedYear, user?.id]);
+
+  useEffect(() => {
+    if (reportType !== 'forecast') return;
+    loadEnterpriseDeals();
+  }, [reportType, loadEnterpriseDeals]);
 
   const saveScenarioRecord = useCallback(
     async ({
@@ -1925,6 +2429,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           leadToGoLiveForecastPercent,
           futureLeadVolumeScenarioMonthlyLeads,
           futureChurnScenarioFactorPercent,
+          enterpriseForecastEnabled,
+          enterpriseDealsCount: enterpriseDeals.length,
+          enterpriseActiveArr: enterpriseDealsSummary.active,
           source: 'manual_slider_save',
           forecastScenarioInput,
           scenarioReportMeta,
@@ -1947,6 +2454,9 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     leadToGoLiveForecastPercent,
     futureLeadVolumeScenarioMonthlyLeads,
     futureChurnScenarioFactorPercent,
+    enterpriseForecastEnabled,
+    enterpriseDeals.length,
+    enterpriseDealsSummary.active,
     forecastScenarioInput,
     scenarioReportMeta,
     saveScenarioRecord,
@@ -1993,11 +2503,17 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           leadToGoLiveForecastPercent: nextConversion,
           futureLeadVolumeScenarioMonthlyLeads: nextLeadVolume,
           futureChurnScenarioFactorPercent: nextChurnFactor,
+          enterpriseForecastEnabled,
+          enterpriseDealsCount: enterpriseDeals.length,
+          enterpriseActiveArr: enterpriseDealsSummary.active,
           source: 'report_recommendation_save',
           sourceSliderState: {
             leadToGoLiveForecastPercent,
             futureLeadVolumeScenarioMonthlyLeads,
             futureChurnScenarioFactorPercent,
+            enterpriseForecastEnabled,
+            enterpriseDealsCount: enterpriseDeals.length,
+            enterpriseActiveArr: enterpriseDealsSummary.active,
           },
           recommendedDelta: {
             leadVolumePerMonth: leadDelta,
@@ -2042,11 +2558,155 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     leadToGoLiveForecastPercent,
     futureLeadVolumeScenarioMonthlyLeads,
     futureChurnScenarioFactorPercent,
+    enterpriseForecastEnabled,
+    enterpriseDeals.length,
+    enterpriseDealsSummary.active,
     forecastScenarioInput,
     scenarioReportMeta,
     saveScenarioRecord,
     loadSavedScenarios,
   ]);
+
+  const handleAddEnterpriseDeal = useCallback(async () => {
+    if (!user?.id) return;
+    const query = enterpriseLookupQuery.trim();
+    if (!query) {
+      setEnterpriseDealsError('Bitte OAK ID oder Accountname auswählen.');
+      return;
+    }
+
+    const lowerQuery = query.toLowerCase();
+    const directMatch = enterpriseLookupOptions.find((option) => option.label.toLowerCase() === lowerQuery);
+    const numericOak = Number(query.replace(/[^\d]/g, ''));
+    const oakMatch =
+      Number.isFinite(numericOak) && numericOak > 0
+        ? enterpriseLookupOptions.find((option) => Number(option.oakId || 0) === numericOak)
+        : undefined;
+    const includesMatch = enterpriseLookupOptions.find((option) => option.label.toLowerCase().includes(lowerQuery));
+    const matched = directMatch || oakMatch || includesMatch;
+
+    if (!matched || (!matched.oakId && !matched.accountName)) {
+      setEnterpriseDealsError('Kein passender Datensatz gefunden. Bitte OAK ID/Account aus der Vorschlagsliste wählen.');
+      return;
+    }
+
+    const expectedGoLives = Math.max(0, Number(enterpriseDealExpectedGoLivesInput) || 0);
+    const arrPerGoLive = Math.max(0, Number(enterpriseDealArrPerGoLiveInput) || 0);
+    const targetMonth = Math.max(1, Math.min(12, Math.round(Number(enterpriseDealTargetMonthInput) || 1)));
+    if (expectedGoLives <= 0 || arrPerGoLive <= 0) {
+      setEnterpriseDealsError('Go-Lives und ARR pro Go-Live müssen größer als 0 sein.');
+      return;
+    }
+
+    setAddingEnterpriseDeal(true);
+    setEnterpriseDealsError(null);
+    try {
+      const response = await fetch('/api/forecast/enterprise-deals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.id,
+          year: selectedYear,
+          targetMonth,
+          expectedGoLives,
+          arrPerGoLive,
+          oakId: matched.oakId,
+          accountName: matched.accountName,
+          isActive: true,
+        }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data?.success) {
+        throw new Error(data?.error || 'Enterprise Deal konnte nicht gespeichert werden');
+      }
+
+      setEnterpriseLookupQuery('');
+      setEnterpriseDealExpectedGoLivesInput(1);
+      setEnterpriseDealArrPerGoLiveInput((prev) =>
+        prev > 0 ? Math.max(0, Math.round(prev)) : Math.max(0, Math.round(enterpriseDefaultArrPerGoLiveYtd))
+      );
+      setEnterpriseForecastEnabled(true);
+      await loadEnterpriseDeals();
+    } catch (error: any) {
+      setEnterpriseDealsError(error?.message || 'Enterprise Deal konnte nicht gespeichert werden');
+    } finally {
+      setAddingEnterpriseDeal(false);
+    }
+  }, [
+    enterpriseLookupQuery,
+    enterpriseLookupOptions,
+    enterpriseDealExpectedGoLivesInput,
+    enterpriseDealArrPerGoLiveInput,
+    enterpriseDealTargetMonthInput,
+    enterpriseDefaultArrPerGoLiveYtd,
+    loadEnterpriseDeals,
+    selectedYear,
+    user?.id,
+  ]);
+
+  const handleToggleEnterpriseDeal = useCallback(
+    async (deal: ForecastEnterpriseDeal) => {
+      if (!user?.id) return;
+      setTogglingEnterpriseDealId(deal.id);
+      setEnterpriseDealsError(null);
+      try {
+        const response = await fetch('/api/forecast/enterprise-deals', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: user.id,
+            dealId: deal.id,
+            isActive: !deal.is_active,
+          }),
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data?.success) {
+          throw new Error(data?.error || 'Status konnte nicht aktualisiert werden');
+        }
+        setEnterpriseDeals((prev) =>
+          prev.map((entry) => (entry.id === deal.id ? { ...entry, is_active: !deal.is_active } : entry))
+        );
+        if (!deal.is_active) {
+          setEnterpriseForecastEnabled(true);
+        }
+      } catch (error: any) {
+        setEnterpriseDealsError(error?.message || 'Status konnte nicht aktualisiert werden');
+      } finally {
+        setTogglingEnterpriseDealId(null);
+      }
+    },
+    [user?.id]
+  );
+
+  const handleDeleteEnterpriseDeal = useCallback(
+    async (deal: ForecastEnterpriseDeal) => {
+      if (!user?.id) return;
+      const confirmed = window.confirm(`Enterprise Deal wirklich löschen?\n\n${deal.account_name || deal.oak_id || deal.id}`);
+      if (!confirmed) return;
+      setDeletingEnterpriseDealId(deal.id);
+      setEnterpriseDealsError(null);
+      try {
+        const response = await fetch('/api/forecast/enterprise-deals', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: user.id,
+            dealId: deal.id,
+          }),
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || !data?.success) {
+          throw new Error(data?.error || 'Deal konnte nicht gelöscht werden');
+        }
+        setEnterpriseDeals((prev) => prev.filter((entry) => entry.id !== deal.id));
+      } catch (error: any) {
+        setEnterpriseDealsError(error?.message || 'Deal konnte nicht gelöscht werden');
+      } finally {
+        setDeletingEnterpriseDealId(null);
+      }
+    },
+    [user?.id]
+  );
 
   const handleDeleteSavedScenario = useCallback(
     async (saved: SavedForecastScenario) => {
@@ -2089,10 +2749,12 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       const nextLeadConversion = Number(payload.leadToGoLiveForecastPercent);
       const nextLeadVolume = Number(payload.futureLeadVolumeScenarioMonthlyLeads);
       const nextChurnFactor = Number(payload.futureChurnScenarioFactorPercent);
+      const nextEnterpriseEnabled = payload.enterpriseForecastEnabled;
 
       if (Number.isFinite(nextLeadConversion)) setLeadToGoLiveForecastPercent(Math.max(0, Math.min(100, nextLeadConversion)));
       if (Number.isFinite(nextLeadVolume)) setFutureLeadVolumeScenarioMonthlyLeads(Math.max(0, nextLeadVolume));
       if (Number.isFinite(nextChurnFactor)) setFutureChurnScenarioFactorPercent(Math.max(0, Math.min(300, nextChurnFactor)));
+      if (typeof nextEnterpriseEnabled === 'boolean') setEnterpriseForecastEnabled(nextEnterpriseEnabled);
 
       const snapshot = payload.reportSnapshot;
       if (isScenarioReportSnapshot(snapshot)) {
@@ -2108,6 +2770,62 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       setTimeout(() => setSavedScenarioConfirmation(null), 6000);
     },
     [buildSavedReportFallback]
+  );
+
+  const waitForScenarioReportRender = useCallback(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+  }, []);
+
+  const buildCurrentScenarioPdfBlob = useCallback(
+    async (saved: SavedForecastScenario) => {
+      const element = scenarioReportExportRef.current;
+      if (!element) throw new Error('Report-Ansicht ist nicht bereit.');
+
+      const filename = formatPDFFilename('szenario_report', saved.title || user?.name || 'report', saved.year || selectedYear);
+      const blob = await exportToPDFBlob(element, {
+        filename,
+        title: 'Szenario Maßnahmen-Report',
+        subtitle: saved.title,
+        orientation: 'portrait',
+        format: 'a4',
+        margin: 10,
+        quality: 2,
+      });
+
+      return { blob, filename };
+    },
+    [selectedYear, user?.name]
+  );
+
+  const handleDownloadSavedScenarioPdf = useCallback(
+    async (saved: SavedForecastScenario) => {
+      if (!user?.id) return;
+      setSavedScenarioError(null);
+      setDownloadingPdfScenarioId(saved.id);
+      try {
+        handleApplySavedScenario(saved);
+        await waitForScenarioReportRender();
+
+        const { blob, filename } = await buildCurrentScenarioPdfBlob(saved);
+        const downloadUrl = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(downloadUrl);
+
+        setSavedScenarioConfirmation(`PDF heruntergeladen: ${saved.title}`);
+        setTimeout(() => setSavedScenarioConfirmation(null), 6000);
+      } catch (error: any) {
+        setSavedScenarioError(error?.message || 'PDF konnte nicht geladen werden');
+      } finally {
+        setDownloadingPdfScenarioId(null);
+      }
+    },
+    [buildCurrentScenarioPdfBlob, handleApplySavedScenario, user?.id, waitForScenarioReportRender]
   );
 
   const handleGenerateScenarioReport = useCallback(async () => {
@@ -2176,6 +2894,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     { key: 'arrWeightedPipeline', label: 'ARR aus Weighted Sales Pipeline', color: '#D946EF' },
     { key: 'arrNotBookedPipeline', label: 'ARR aus Sign-ups Not Booked', color: '#FACC15' },
     { key: 'arrConversionBased', label: 'ARR aus YTD Lead-Conversion Forecast', color: '#6B7280' },
+    { key: 'arrEnterpriseExpectation', label: 'ARR aus Enterprise Erwartung', color: '#0EA5E9' },
     { key: 'arrChurnBookedDeduction', label: 'Churn ARR eingebucht (abgezogen)', color: '#EF4444' },
     { key: 'arrChurnProjectedDeduction', label: 'Churn ARR projektiert (abgezogen)', color: '#FCA5A5' },
     { key: 'arrChurnOverPlanDeduction', label: 'Churn ARR über Plan (abgezogen)', color: '#991B1B' },
@@ -2388,13 +3107,13 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           if (!event.churn_month) return false;
           const d = new Date(event.churn_month);
           if (Number.isNaN(d.getTime())) return false;
-          return d.getMonth() + 1 === month;
+          return d.getFullYear() === selectedYear && d.getMonth() + 1 === month;
         });
 
         const scheduledEvents = monthEvents.filter((event) => event.scheduled === true);
         const nonScheduledEvents = monthEvents.filter((event) => event.scheduled !== true);
-        const scheduledArrLost = scheduledEvents.reduce((sum, event) => sum + (Number(event.total_arr_lost) || 0), 0);
-        const nonScheduledArrLost = nonScheduledEvents.reduce((sum, event) => sum + (Number(event.total_arr_lost) || 0), 0);
+        const scheduledArrLost = scheduledEvents.reduce((sum, event) => sum + effectiveTotalArrLost(event), 0);
+        const nonScheduledArrLost = nonScheduledEvents.reduce((sum, event) => sum + effectiveTotalArrLost(event), 0);
 
         return {
           month,
@@ -2406,7 +3125,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           totalArrLost: scheduledArrLost + nonScheduledArrLost,
         };
       }),
-    [churnEvents]
+    [churnEvents, selectedYear]
   );
 
   const monthDetailChurnEvents = useMemo(
@@ -2417,11 +3136,11 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               if (!event.churn_month) return false;
               const d = new Date(event.churn_month);
               if (Number.isNaN(d.getTime())) return false;
-              return d.getMonth() + 1 === selectedChurnMonthDetail;
+              return d.getFullYear() === selectedYear && d.getMonth() + 1 === selectedChurnMonthDetail;
             })
-            .sort((a, b) => (Number(b.total_arr_lost) || 0) - (Number(a.total_arr_lost) || 0))
+            .sort((a, b) => effectiveTotalArrLost(b) - effectiveTotalArrLost(a))
         : [],
-    [churnEvents, selectedChurnMonthDetail]
+    [churnEvents, selectedChurnMonthDetail, selectedYear]
   );
 
   const filteredMonthDetailChurnEvents = useMemo(() => {
@@ -2445,7 +3164,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       totalCount: filteredMonthDetailChurnEvents.length,
       scheduledCount: filteredMonthDetailChurnEvents.filter((event) => event.scheduled === true).length,
       nonScheduledCount: filteredMonthDetailChurnEvents.filter((event) => event.scheduled !== true).length,
-      totalArrLost: filteredMonthDetailChurnEvents.reduce((sum, event) => sum + (Number(event.total_arr_lost) || 0), 0),
+      totalArrLost: filteredMonthDetailChurnEvents.reduce((sum, event) => sum + effectiveTotalArrLost(event), 0),
       subsArrLost: filteredMonthDetailChurnEvents.reduce((sum, event) => sum + (Number(event.subs_revenue_lost) || 0), 0),
       payArrLost: filteredMonthDetailChurnEvents.reduce((sum, event) => sum + (Number(event.pay_revenue_lost) || 0), 0),
     }),
@@ -2670,6 +3389,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
 
   const pipelineRows = useMemo(() => {
     const salesRows: PipelineRow[] = yearFilteredSalespipeEvents.reduce<PipelineRow[]>((acc, sales) => {
+        if (isExcludedAccountName(sales.opportunity_name)) return acc;
         const stageKey = normalizeSalespipeStage(sales.stage);
         if (!stageKey) return acc;
         const arr = Number(sales.estimated_arr) || 0;
@@ -2677,7 +3397,6 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         const probability = Number.isFinite(probabilityRaw)
           ? (probabilityRaw > 1 ? probabilityRaw / 100 : probabilityRaw)
           : null;
-        const probabilityForWeighting = probability ?? getDefaultProbability(stageKey);
         const mappedOakId = (() => {
           if (sales.oak_id) return sales.oak_id;
           const opportunityId = normalizeId(sales.opportunity_id);
@@ -2701,7 +3420,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           oakId: mappedOakId,
           arr,
           probability,
-          weightedArr: arr * probabilityForWeighting,
+          weightedArr: getWeightedArrFromOpportunity(stageKey, probabilityRaw, sales.opportunity_id),
           filterDate,
           closeDate: sales.close_date || null,
           leadCreatedDate: normalizeId(sales.opportunity_id)
@@ -2713,6 +3432,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       }, []);
 
     const leadsRows: PipelineRow[] = yearFilteredLeadsEvents.reduce<PipelineRow[]>((acc, lead) => {
+        if (isExcludedAccountName(lead.company_account) || isExcludedAccountName(lead.opportunity_account)) return acc;
         const stageKey = normalizeLeadsStage(
           lead.lead_status,
           lead.lead_sub_status,
@@ -2742,7 +3462,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
           oakId: mappedOakId,
           arr,
           probability: null,
-          weightedArr: arr * getDefaultProbability(stageKey),
+          weightedArr: getWeightedArrFromOpportunity(stageKey, null, lead.opportunity_id),
           filterDate: lead.conversion_date || lead.created_date,
           closeDate: null,
           leadCreatedDate: lead.created_date || null,
@@ -2801,6 +3521,65 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     return [...leadsRows, ...salesRows, ...signupRows];
   }, [yearFilteredSalespipeEvents, yearFilteredLeadsEvents, yearFilteredSignupsEvents, newestSignupByOak, arrByOak, selectedYear, opportunityToOak, leadCreatedByOpportunity]);
 
+  const pipelineRowKey = useCallback((row: PipelineRow) => {
+    const normalizedOpportunityId = normalizeId(row.opportunityId);
+    if (normalizedOpportunityId) return `opp:${normalizedOpportunityId}`;
+    return [
+      'row',
+      row.source,
+      row.stageKey,
+      normalizeId(row.leadId) || '',
+      normalizeId(row.name) || '',
+      normalizeId(row.owner) || '',
+      normalizeId(row.sourceTab) || '',
+      String(row.oakId ?? ''),
+      row.filterDate || '',
+      row.closeDate || '',
+    ].join(':');
+  }, []);
+  const pipelineRowLegacyKeys = useCallback((row: PipelineRow) => {
+    const keys: string[] = [];
+    const normalizedOpportunityId = normalizeId(row.opportunityId);
+    if (normalizedOpportunityId) keys.push(`opp:${normalizedOpportunityId}`);
+    const normalizedLeadId = normalizeId(row.leadId);
+    if (normalizedLeadId) keys.push(`lead:${normalizedLeadId}`);
+    if (row.oakId !== null && (row.stageKey === 'signups' || row.stageKey === 'go_live')) {
+      keys.push(`oak:${row.oakId}:${row.stageKey}`);
+    }
+    keys.push(`${row.source}:${row.id}`);
+    return keys;
+  }, []);
+  const disabledPipelineRowKeySet = useMemo(() => new Set(disabledPipelineRowKeys), [disabledPipelineRowKeys]);
+  const isPipelineRowDisabled = useCallback(
+    (row: PipelineRow) => {
+      const canonicalKey = pipelineRowKey(row);
+      if (disabledPipelineRowKeySet.has(canonicalKey)) return true;
+      return pipelineRowLegacyKeys(row).some((key) => disabledPipelineRowKeySet.has(key));
+    },
+    [disabledPipelineRowKeySet, pipelineRowKey, pipelineRowLegacyKeys]
+  );
+  const togglePipelineRowDisabled = useCallback(
+    (row: PipelineRow) => {
+      const rowKey = pipelineRowKey(row);
+      const legacyKeys = pipelineRowLegacyKeys(row);
+      setDisabledPipelineRowKeys((prev) => {
+        const nextSet = new Set(prev);
+        const currentlyDisabled =
+          nextSet.has(rowKey) || legacyKeys.some((key) => nextSet.has(key));
+        // Alte Schluessel immer aufraeumen, damit nur der stabile Key bleibt.
+        legacyKeys.forEach((key) => nextSet.delete(key));
+        nextSet.delete(rowKey);
+        if (!currentlyDisabled) {
+          nextSet.add(rowKey);
+        }
+        const dedupedNext = Array.from(nextSet);
+        window.localStorage.setItem(pipelineDisableStorageKey, JSON.stringify(dedupedNext));
+        return dedupedNext;
+      });
+    },
+    [pipelineRowKey, pipelineRowLegacyKeys, pipelineDisableStorageKey]
+  );
+
   const salespipeRowsInDateRange = useMemo(() => {
     const fromDate = salespipeDateFrom ? new Date(salespipeDateFrom) : null;
     const toDate = salespipeDateTo ? new Date(`${salespipeDateTo}T23:59:59`) : null;
@@ -2845,9 +3624,14 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     });
   }, [salespipeRowsInDateRange, salespipeSearch, salespipeSourceFilter]);
 
+  const baseFilteredSalespipeRowsStats = useMemo(
+    () => baseFilteredSalespipeRows.filter((row) => !isPipelineRowDisabled(row)),
+    [baseFilteredSalespipeRows, isPipelineRowDisabled]
+  );
+
   const connectedJourneyOakSet = useMemo(() => {
     const set = new Set<number>();
-    baseFilteredSalespipeRows.forEach((row) => {
+    baseFilteredSalespipeRowsStats.forEach((row) => {
       // Strikte Journey-Definition:
       // Lead-ID + Opportunity-ID + daraus gemappte OAK-ID muessen vorhanden sein.
       if (row.source !== 'leads') return;
@@ -2855,7 +3639,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       set.add(row.oakId);
     });
     return set;
-  }, [baseFilteredSalespipeRows]);
+  }, [baseFilteredSalespipeRowsStats]);
 
   const filteredSalespipeRows = useMemo(() => {
     return baseFilteredSalespipeRows.filter((row) => {
@@ -2869,9 +3653,14 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     });
   }, [baseFilteredSalespipeRows, salespipeStageFilter, connectedJourneyOakSet]);
 
+  const filteredSalespipeRowsStats = useMemo(
+    () => filteredSalespipeRows.filter((row) => !isPipelineRowDisabled(row)),
+    [filteredSalespipeRows, isPipelineRowDisabled]
+  );
+
   const journeyTrackOakSet = useMemo(() => {
-    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
-    const closeWonRows = filteredSalespipeRows.filter((row) => row.stageKey === 'close_won');
+    const openRows = filteredSalespipeRowsStats.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
+    const closeWonRows = filteredSalespipeRowsStats.filter((row) => row.stageKey === 'close_won');
     const openAndWonOakSet = new Set(
       [...openRows, ...closeWonRows]
         .map((row) => row.oakId)
@@ -2880,11 +3669,24 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     return new Set(
       Array.from(openAndWonOakSet).filter((oakId) => connectedJourneyOakSet.has(oakId))
     );
-  }, [filteredSalespipeRows, connectedJourneyOakSet]);
+  }, [filteredSalespipeRowsStats, connectedJourneyOakSet]);
+
+  // Opportunity-IDs aller Leads mit Lead-ID + Opportunity-ID im gewählten Zeitraum.
+  // Basis für die Einschränkung von Close Won/Lost auf Opportunities aus konvertierten Leads.
+  const connectedJourneyOpportunityIds = useMemo(() => {
+    const set = new Set<string>();
+    baseFilteredSalespipeRowsStats.forEach((row) => {
+      if (row.source !== 'leads') return;
+      if (!row.leadId || !row.opportunityId) return;
+      const oppId = normalizeId(row.opportunityId);
+      if (oppId) set.add(oppId);
+    });
+    return set;
+  }, [baseFilteredSalespipeRowsStats]);
 
   const trackedSignupsStageStats = useMemo(() => {
     const byOak = new Map<number, number>();
-    filteredSalespipeRows.forEach((row) => {
+    filteredSalespipeRowsStats.forEach((row) => {
       if (row.stageKey !== 'signups' || row.oakId === null || !journeyTrackOakSet.has(row.oakId)) return;
       byOak.set(row.oakId, Math.max(byOak.get(row.oakId) || 0, row.arr));
     });
@@ -2892,11 +3694,11 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       count: byOak.size,
       arr: Array.from(byOak.values()).reduce((sum, value) => sum + value, 0),
     };
-  }, [filteredSalespipeRows, journeyTrackOakSet]);
+  }, [filteredSalespipeRowsStats, journeyTrackOakSet]);
 
   const trackedGoLiveStageStats = useMemo(() => {
     const byOak = new Map<number, number>();
-    filteredSalespipeRows.forEach((row) => {
+    filteredSalespipeRowsStats.forEach((row) => {
       if (row.stageKey !== 'go_live' || row.oakId === null || !journeyTrackOakSet.has(row.oakId)) return;
       byOak.set(row.oakId, Math.max(byOak.get(row.oakId) || 0, row.arr));
     });
@@ -2904,43 +3706,44 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       count: byOak.size,
       arr: Array.from(byOak.values()).reduce((sum, value) => sum + value, 0),
     };
-  }, [filteredSalespipeRows, journeyTrackOakSet]);
+  }, [filteredSalespipeRowsStats, journeyTrackOakSet]);
 
   const trackedCloseWonStageStats = useMemo(() => {
-    const byOak = new Map<number, number>();
-    filteredSalespipeRows.forEach((row) => {
-      if (row.stageKey !== 'close_won' || row.oakId === null || !journeyTrackOakSet.has(row.oakId)) return;
-      byOak.set(row.oakId, Math.max(byOak.get(row.oakId) || 0, row.arr));
+    const byOppId = new Map<string, number>();
+    filteredSalespipeRowsStats.forEach((row) => {
+      if (row.stageKey !== 'close_won') return;
+      const oppId = normalizeId(row.opportunityId);
+      // Nur Opportunities, die aus einem konvertierten Lead im Zeitraum stammen.
+      if (!oppId || !connectedJourneyOpportunityIds.has(oppId)) return;
+      byOppId.set(oppId, Math.max(byOppId.get(oppId) || 0, row.arr));
     });
     return {
-      count: byOak.size,
-      arr: Array.from(byOak.values()).reduce((sum, value) => sum + value, 0),
+      count: byOppId.size,
+      arr: Array.from(byOppId.values()).reduce((sum, value) => sum + value, 0),
     };
-  }, [filteredSalespipeRows, journeyTrackOakSet]);
+  }, [filteredSalespipeRowsStats, connectedJourneyOpportunityIds]);
 
   const trackedCloseLostStageStats = useMemo(() => {
-    const byKey = new Map<string, number>();
-    filteredSalespipeRows.forEach((row) => {
+    const byOppId = new Map<string, number>();
+    filteredSalespipeRowsStats.forEach((row) => {
       if (row.stageKey !== 'close_lost') return;
-      // Close-Lost-Einträge kommen teilweise ohne OAK-ID. Dann deduplizieren wir über Opportunity-ID.
-      const key = row.oakId !== null
-        ? `oak:${row.oakId}`
-        : (normalizeId(row.opportunityId) ? `opp:${normalizeId(row.opportunityId)}` : row.id);
-      if (!key) return;
-      byKey.set(key, Math.max(byKey.get(key) || 0, row.arr));
+      const oppId = normalizeId(row.opportunityId);
+      // Nur Opportunities, die aus einem konvertierten Lead im Zeitraum stammen.
+      if (!oppId || !connectedJourneyOpportunityIds.has(oppId)) return;
+      byOppId.set(oppId, Math.max(byOppId.get(oppId) || 0, row.arr));
     });
     return {
-      count: byKey.size,
-      arr: Array.from(byKey.values()).reduce((sum, value) => sum + value, 0),
+      count: byOppId.size,
+      arr: Array.from(byOppId.values()).reduce((sum, value) => sum + value, 0),
     };
-  }, [filteredSalespipeRows]);
+  }, [filteredSalespipeRowsStats, connectedJourneyOpportunityIds]);
 
   const salespipeStageSummary = useMemo(() => {
     const initial = PIPELINE_STAGE_CONFIG.reduce(
       (acc, stage) => ({ ...acc, [stage.key]: { count: 0, arr: 0 } }),
       {} as Record<PipelineStageKey, { count: number; arr: number }>
     );
-    filteredSalespipeRows.forEach((row) => {
+    filteredSalespipeRowsStats.forEach((row) => {
       initial[row.stageKey].count += 1;
       initial[row.stageKey].arr += row.arr;
     });
@@ -2951,7 +3754,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     initial.go_live = trackedGoLiveStageStats;
 
     // SQL soll die gesamte Lead-Basis im gewählten Zeitraum darstellen.
-    const leadRows = filteredSalespipeRows.filter((row) => row.source === 'leads');
+    const leadRows = filteredSalespipeRowsStats.filter((row) => row.source === 'leads');
     const sqlCount = leadRows.length;
     const sqlArr = leadRows.reduce((sum, row) => sum + row.arr, 0);
     initial.sql = { count: sqlCount, arr: sqlArr };
@@ -2967,11 +3770,11 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     };
 
     return initial;
-  }, [filteredSalespipeRows, trackedCloseWonStageStats, trackedCloseLostStageStats, trackedSignupsStageStats, trackedGoLiveStageStats]);
+  }, [filteredSalespipeRowsStats, trackedCloseWonStageStats, trackedCloseLostStageStats, trackedSignupsStageStats, trackedGoLiveStageStats]);
 
   const convertedDecisionStats = useMemo(() => {
     const convertedOpportunityIds = new Set(
-      filteredSalespipeRows
+      filteredSalespipeRowsStats
         .filter((row) => row.source === 'leads' && row.stageKey === 'converted')
         .map((row) => normalizeId(row.opportunityId))
         .filter((id): id is string => id !== null)
@@ -2982,7 +3785,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     }
 
     const decisionByOpportunity = new Map<string, { stage: 'close_won' | 'close_lost'; ts: number }>();
-    filteredSalespipeRows.forEach((row) => {
+    filteredSalespipeRowsStats.forEach((row) => {
       if (row.source !== 'salespipe') return;
       if (row.stageKey !== 'close_won' && row.stageKey !== 'close_lost') return;
       const opportunityId = normalizeId(row.opportunityId);
@@ -3007,7 +3810,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       closeWonCount,
       closeLostCount,
     };
-  }, [filteredSalespipeRows]);
+  }, [filteredSalespipeRowsStats]);
 
   const salespipeWinRate = useMemo(() => {
     const decided = convertedDecisionStats.closeWonCount + convertedDecisionStats.closeLostCount;
@@ -3047,7 +3850,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const convertedByOpportunity = new Map<string, number>();
     const decisionByOpportunity = new Map<string, { stage: 'close_won' | 'close_lost'; ts: number }>();
 
-    filteredSalespipeRows.forEach((row) => {
+    filteredSalespipeRowsStats.forEach((row) => {
       const opportunityId = normalizeId(row.opportunityId);
       if (!opportunityId) return;
       if (row.source === 'leads' && row.stageKey === 'converted') {
@@ -3086,7 +3889,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       medianDays,
       samples: n,
     };
-  }, [filteredSalespipeRows]);
+  }, [filteredSalespipeRowsStats]);
 
   const closeWonToGoLiveCycleStats = useMemo(() => {
     const toTs = (value: string | null) => {
@@ -3098,7 +3901,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const closeWonByOak = new Map<number, number>();
     const goLiveByOak = new Map<number, number>();
 
-    filteredSalespipeRows.forEach((row) => {
+    filteredSalespipeRowsStats.forEach((row) => {
       if (row.oakId === null) return;
       if (row.source === 'salespipe' && row.stageKey === 'close_won') {
         const ts = toTs(row.closeDate || row.filterDate);
@@ -3133,7 +3936,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       medianDays,
       samples: n,
     };
-  }, [filteredSalespipeRows]);
+  }, [filteredSalespipeRowsStats]);
 
   useEffect(() => {
     if (convertedRate !== null) setWhatIfConvertedRatePct(convertedRate * 100);
@@ -3143,10 +3946,102 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     if (salespipeWinRate !== null) setWhatIfWinRatePct(salespipeWinRate * 100);
   }, [salespipeWinRate]);
 
+  const openPipelineOpportunityRowsStats = useMemo(() => {
+    type OpportunityRowCandidate = {
+      row: PipelineRow;
+      probability: number;
+      sourcePriority: number;
+      sortTs: number;
+    };
+
+    const byOpportunity = new Map<string, OpportunityRowCandidate>();
+    const getRowTimestamp = (row: PipelineRow) => {
+      const ts = row.filterDate ? new Date(row.filterDate).getTime() : Number.NEGATIVE_INFINITY;
+      return Number.isNaN(ts) ? Number.NEGATIVE_INFINITY : ts;
+    };
+
+    filteredSalespipeRowsStats.forEach((row) => {
+      if (!OPEN_PIPELINE_KPI_STAGES.includes(row.stageKey)) return;
+      const opportunityId = normalizeId(row.opportunityId);
+      if (!opportunityId) return;
+      if (isExcludedAccountName(row.name) || isExcludedAccountName(row.matchedSignupName)) return;
+
+      const probabilityRaw = row.probability ?? getDefaultProbability(row.stageKey);
+      const probability = Math.max(0, Math.min(1, Number(probabilityRaw) || 0));
+      const sourcePriority = row.source === 'salespipe' ? 2 : row.source === 'leads' ? 1 : 0;
+      const sortTs = getRowTimestamp(row);
+
+      const current = byOpportunity.get(opportunityId);
+      if (!current) {
+        byOpportunity.set(opportunityId, { row, probability, sourcePriority, sortTs });
+        return;
+      }
+
+      const shouldReplace =
+        probability > current.probability ||
+        (probability === current.probability && sourcePriority > current.sourcePriority) ||
+        (probability === current.probability &&
+          sourcePriority === current.sourcePriority &&
+          sortTs > current.sortTs);
+
+      if (shouldReplace) {
+        byOpportunity.set(opportunityId, { row, probability, sourcePriority, sortTs });
+      }
+    });
+
+    return Array.from(byOpportunity.values());
+  }, [filteredSalespipeRowsStats]);
+
+  const openPipelineOpportunityRowsAll = useMemo(() => {
+    type OpportunityRowCandidate = {
+      row: PipelineRow;
+      probability: number;
+      sourcePriority: number;
+      sortTs: number;
+    };
+
+    const byOpportunity = new Map<string, OpportunityRowCandidate>();
+    const getRowTimestamp = (row: PipelineRow) => {
+      const ts = row.filterDate ? new Date(row.filterDate).getTime() : Number.NEGATIVE_INFINITY;
+      return Number.isNaN(ts) ? Number.NEGATIVE_INFINITY : ts;
+    };
+
+    filteredSalespipeRows.forEach((row) => {
+      if (!OPEN_PIPELINE_KPI_STAGES.includes(row.stageKey)) return;
+      const opportunityId = normalizeId(row.opportunityId);
+      if (!opportunityId) return;
+      if (isExcludedAccountName(row.name) || isExcludedAccountName(row.matchedSignupName)) return;
+
+      const probabilityRaw = row.probability ?? getDefaultProbability(row.stageKey);
+      const probability = Math.max(0, Math.min(1, Number(probabilityRaw) || 0));
+      const sourcePriority = row.source === 'salespipe' ? 2 : row.source === 'leads' ? 1 : 0;
+      const sortTs = getRowTimestamp(row);
+
+      const current = byOpportunity.get(opportunityId);
+      if (!current) {
+        byOpportunity.set(opportunityId, { row, probability, sourcePriority, sortTs });
+        return;
+      }
+
+      const shouldReplace =
+        probability > current.probability ||
+        (probability === current.probability && sourcePriority > current.sourcePriority) ||
+        (probability === current.probability &&
+          sourcePriority === current.sourcePriority &&
+          sortTs > current.sortTs);
+
+      if (shouldReplace) {
+        byOpportunity.set(opportunityId, { row, probability, sourcePriority, sortTs });
+      }
+    });
+
+    return Array.from(byOpportunity.values());
+  }, [filteredSalespipeRows]);
+
   const salespipeKpis = useMemo(() => {
-    const openRows = filteredSalespipeRows.filter((row) => OPEN_PIPELINE_KPI_STAGES.includes(row.stageKey));
-    const totalPipelineArr = openRows.reduce((sum, row) => sum + row.arr, 0);
-    const weightedArr = openRows.reduce((sum, row) => sum + row.weightedArr, 0);
+    const openRows = openPipelineOpportunityRowsStats.filter(({ row }) => OPEN_PIPELINE_KPI_STAGES.includes(row.stageKey));
+    const totalPipelineArr = openRows.reduce((sum, item) => sum + item.row.arr, 0);
+    const weightedArr = openRows.reduce((sum, item) => sum + item.row.weightedArr, 0);
     const closeWonCount = convertedDecisionStats.closeWonCount;
     return {
       openRows: openRows.length,
@@ -3154,7 +4049,193 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       weightedArr,
       closeWonCount,
     };
-  }, [filteredSalespipeRows, convertedDecisionStats.closeWonCount]);
+  }, [openPipelineOpportunityRowsStats, convertedDecisionStats.closeWonCount]);
+
+  const totalBusinessReport = useMemo(() => {
+    const nrrBasis = planzahlen?.expanding_arr_data?.nrr_basis;
+    const arrBasisDec = Number(nrrBasis?.arr_basis_dec) || 0;
+    const beginningArrSeed = Number(nrrBasis?.arr_basis_jan_end) || 0;
+    const hasBeginningArr = beginningArrSeed > 0;
+    const pad = (values: number[] | undefined) => Array.from({ length: 12 }, (_, idx) => values?.[idx] ?? 0);
+
+    const newSalesActual = ytdMonthlyResult.map((row) => row.subs_actual + row.pay_actual);
+    const newSalesPlan = ytdMonthlyResult.map((row) => row.subs_target + row.pay_target);
+    const goLivesActual = ytdMonthlyResult.map((row) => row.go_lives_count);
+    const goLivesPlan = ytdMonthlyResult.map((row) => row.go_lives_target);
+    const churnActual = monthlyChurnData.map((row) => -row.totalArrLost);
+    const churnPlan = invoicedChurnTargetArrByMonth.map((value) => -Math.abs(value));
+
+    const janKey = `${selectedYear}-01`;
+    const janSmsMrr = smsData.find((row) => row.month === janKey)?.mrr ?? null;
+    const janPayMonthly = phorestPayData.find((row) => row.month === janKey)?.dachValue ?? null;
+    const janPayArr = janPayMonthly !== null ? janPayMonthly * 12 : null;
+
+    const expandingActual = Array.from({ length: 12 }, (_, idx) => {
+      if (idx === 0) return 0;
+      const monthKey = `${selectedYear}-${String(idx + 1).padStart(2, '0')}`;
+      const upDown = upDownsellsData.find((row) => row.month === monthKey)?.netArr ?? 0;
+      const smsMrr = smsData.find((row) => row.month === monthKey)?.mrr ?? null;
+      const smsDelta = smsMrr !== null && janSmsMrr !== null ? (smsMrr - janSmsMrr) * 12 : 0;
+      const payMonthly = phorestPayData.find((row) => row.month === monthKey)?.dachValue ?? null;
+      const payDelta = payMonthly !== null && janPayArr !== null ? payMonthly * 12 - janPayArr : 0;
+      return upDown + smsDelta + payDelta;
+    });
+    const expandingPlan = Array.from({ length: 12 }, () => 0);
+
+    const beginningActual: Array<number | null> = Array.from({ length: 12 }, () => null);
+    const endingActual: Array<number | null> = Array.from({ length: 12 }, () => null);
+    const beginningPlan: Array<number | null> = Array.from({ length: 12 }, () => null);
+    const endingPlan: Array<number | null> = Array.from({ length: 12 }, () => null);
+    if (hasBeginningArr) {
+      let runningActual = beginningArrSeed;
+      let runningPlan = beginningArrSeed;
+      beginningActual[0] = beginningArrSeed;
+      beginningPlan[0] = beginningArrSeed;
+      endingActual[0] = beginningArrSeed;
+      endingPlan[0] = beginningArrSeed;
+      for (let idx = 1; idx < 12; idx += 1) {
+        beginningActual[idx] = runningActual;
+        beginningPlan[idx] = runningPlan;
+        runningActual += newSalesActual[idx] + expandingActual[idx] + churnActual[idx];
+        runningPlan += newSalesPlan[idx] + expandingPlan[idx] + churnPlan[idx];
+        endingActual[idx] = runningActual;
+        endingPlan[idx] = runningPlan;
+      }
+    }
+
+    const beginningCustomers = Array.from({ length: 12 }, () => null as number | null);
+    const churnedCustomers = monthlyChurnData.map((row) => -row.totalCount);
+    const endingCustomers = Array.from({ length: 12 }, () => null as number | null);
+    const averageTotalBillActual = newSalesActual.map((value, idx) =>
+      goLivesActual[idx] > 0 ? value / 12 / goLivesActual[idx] : null
+    );
+    const averageTotalBillPlan = newSalesPlan.map((value, idx) =>
+      goLivesPlan[idx] > 0 ? value / 12 / goLivesPlan[idx] : null
+    );
+
+    const pipelineMonth = (row: PipelineRow) => {
+      const rawDate = row.stageKey === 'close_won' || row.stageKey === 'close_lost' ? row.closeDate || row.filterDate : row.filterDate;
+      if (!rawDate) return null;
+      const d = new Date(rawDate);
+      if (Number.isNaN(d.getTime()) || d.getFullYear() !== selectedYear) return null;
+      return d.getMonth();
+    };
+    const countPipeline = (predicate: (row: PipelineRow) => boolean) => {
+      const counts = Array.from({ length: 12 }, () => 0);
+      pipelineRows.forEach((row) => {
+        if (!predicate(row)) return;
+        const idx = pipelineMonth(row);
+        if (idx === null) return;
+        counts[idx] += 1;
+      });
+      return counts;
+    };
+    const sqlActual = countPipeline((row) => row.source === 'leads');
+    const opportunitiesActual = countPipeline((row) => row.stageKey === 'converted');
+    const closedLostActual = countPipeline((row) => row.stageKey === 'close_lost');
+    const closedWonActual = countPipeline((row) => row.stageKey === 'close_won');
+
+    const revenueActual = endingActual.map((value) => (value === null ? null : value / 12));
+    const revenuePlan = endingPlan.map((value) => (value === null ? null : value / 12));
+    const revenueGrowthActual = revenueActual.map((value, idx) => {
+      const previous = idx === 0 ? null : revenueActual[idx - 1];
+      return value !== null && previous !== null && previous > 0 ? value / previous - 1 : null;
+    });
+    const revenueGrowthPlan = revenuePlan.map((value, idx) => {
+      const previous = idx === 0 ? null : revenuePlan[idx - 1];
+      return value !== null && previous !== null && previous > 0 ? value / previous - 1 : null;
+    });
+
+    const emptyCurrency = Array.from({ length: 12 }, () => null as number | null);
+    const emptyPercent = Array.from({ length: 12 }, () => null as number | null);
+    const nrrActual = beginningActual.map((beginning, idx) =>
+      beginning && beginning > 0 ? (beginning + expandingActual[idx] + churnActual[idx]) / beginning : null
+    );
+    const grrActual = beginningActual.map((beginning, idx) =>
+      beginning && beginning > 0 ? (beginning + churnActual[idx]) / beginning : null
+    );
+    const churnRateActual = beginningActual.map((beginning, idx) =>
+      beginning && beginning > 0 ? Math.abs(churnActual[idx]) / beginning : null
+    );
+    const newClientArrGrowthActual = beginningActual.map((beginning, idx) =>
+      beginning && beginning > 0 ? newSalesActual[idx] / beginning : null
+    );
+
+    type RowFormat = 'currency' | 'number' | 'percent';
+    type ReportRow =
+      | { type: 'section'; label: string }
+      | { type: 'metric'; label: string; format: RowFormat; actual: Array<number | null>; plan: Array<number | null> };
+
+    const metric = (
+      label: string,
+      format: RowFormat,
+      actual: Array<number | null>,
+      plan: Array<number | null> = emptyCurrency
+    ): ReportRow => ({ type: 'metric', label, format, actual, plan });
+
+    const rows: ReportRow[] = [
+      { type: 'section', label: 'Total Business ARR' },
+      metric('Beginning ARR', 'currency', beginningActual, beginningPlan),
+      metric('New Sales ARR', 'currency', newSalesActual, newSalesPlan),
+      metric('Expanding ARR', 'currency', expandingActual, expandingPlan),
+      metric('Churn ARR', 'currency', churnActual, churnPlan),
+      metric('Ending ARR', 'currency', endingActual, endingPlan),
+      { type: 'section', label: 'Customer Summary' },
+      metric('Beginning Customers', 'number', beginningCustomers, beginningCustomers),
+      metric('New Customers', 'number', goLivesActual, goLivesPlan),
+      metric('Churned Customers', 'number', churnedCustomers, Array.from({ length: 12 }, () => null)),
+      metric('Ending Customers', 'number', endingCustomers, endingCustomers),
+      { type: 'section', label: 'Average Contract Value Summary' },
+      metric('Average Total Bill', 'currency', averageTotalBillActual, averageTotalBillPlan),
+      { type: 'section', label: 'New Clients Acquisition' },
+      metric('SQL', 'number', sqlActual, pad(planzahlen?.business_inbound).map((value, idx) => value + pad(planzahlen?.business_outbound)[idx])),
+      metric('Opportunities', 'number', opportunitiesActual, Array.from({ length: 12 }, () => null)),
+      metric('Closed Lost', 'number', closedLostActual, Array.from({ length: 12 }, () => null)),
+      metric('Closed Win', 'number', closedWonActual, goLivesPlan),
+      { type: 'section', label: 'Churned Customers Calculation' },
+      metric('Historical / Forecasted Churn', 'number', churnedCustomers, Array.from({ length: 12 }, () => null)),
+      metric('Churn Rate (% of total customer base)', 'percent', churnRateActual, emptyPercent),
+      { type: 'section', label: 'P&L' },
+      metric('Revenue', 'currency', revenueActual, revenuePlan),
+      metric('Revenue Growth %', 'percent', revenueGrowthActual, revenueGrowthPlan),
+      metric('COGS', 'currency', emptyCurrency, emptyCurrency),
+      metric('Gross Margin', 'currency', emptyCurrency, emptyCurrency),
+      metric('Gross Margin %', 'percent', emptyPercent, emptyPercent),
+      metric('Staff costs', 'currency', emptyCurrency, emptyCurrency),
+      metric('Staff costs %', 'percent', emptyPercent, emptyPercent),
+      metric('Operating Expenses', 'currency', emptyCurrency, emptyCurrency),
+      metric('Operating Exepenses %', 'percent', emptyPercent, emptyPercent),
+      metric('Marketing costs', 'currency', emptyCurrency, emptyCurrency),
+      metric('Marketing costs %', 'percent', emptyPercent, emptyPercent),
+      metric('Total Expenses', 'currency', emptyCurrency, emptyCurrency),
+      metric('Total expenses %', 'percent', emptyPercent, emptyPercent),
+      metric('EBITDA', 'currency', emptyCurrency, emptyCurrency),
+      metric('EBITDA Margin %', 'percent', emptyPercent, emptyPercent),
+      metric('Headoffice Recharges', 'currency', emptyCurrency, emptyCurrency),
+      metric('Headoffice Recharges %', 'percent', emptyPercent, emptyPercent),
+      metric('EBITDA after Recharges', 'currency', emptyCurrency, emptyCurrency),
+      metric('EBITDA Margin %', 'percent', emptyPercent, emptyPercent),
+      { type: 'section', label: 'SaaS metrics' },
+      metric('Rule of 40 local', 'percent', emptyPercent, emptyPercent),
+      metric('Rule of 40', 'percent', emptyPercent, emptyPercent),
+      metric('Net Retention Rate', 'percent', nrrActual, emptyPercent),
+      metric('Gross Dollar Retention (GRR)', 'percent', grrActual, emptyPercent),
+      metric('Churn Rate', 'percent', churnRateActual, emptyPercent),
+      metric('New Client ARR Grwoth', 'percent', newClientArrGrowthActual, emptyPercent),
+    ];
+
+    return { rows, hasBeginningArr, arrBasisDec, arrBasisJanEnd: beginningArrSeed };
+  }, [
+    planzahlen,
+    ytdMonthlyResult,
+    monthlyChurnData,
+    invoicedChurnTargetArrByMonth,
+    selectedYear,
+    smsData,
+    phorestPayData,
+    upDownsellsData,
+    pipelineRows,
+  ]);
 
   const whatIfScenario = useMemo(() => {
     const clampRate = (value: number) => Math.max(0, Math.min(1, value));
@@ -3178,9 +4259,10 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
     const decidedCountWhatIf = Math.round(convertedCountWhatIf * decidedShareBase);
     const closeWonCountWhatIf = Math.round(decidedCountWhatIf * winRateWhatIf);
     const closeLostCountWhatIf = Math.max(0, decidedCountWhatIf - closeWonCountWhatIf);
+    const openPipelineCountWhatIf = Math.max(0, convertedCountWhatIf - decidedCountWhatIf);
 
-    const openPipelineArrPerDeal =
-      salespipeKpis.openRows > 0 ? salespipeKpis.totalPipelineArr / salespipeKpis.openRows : 0;
+    const weightedPipelineArrPerDeal =
+      salespipeKpis.openRows > 0 ? salespipeKpis.weightedArr / salespipeKpis.openRows : 0;
     const closeWonArrPerDeal =
       convertedDecisionStats.closeWonCount > 0
         ? salespipeStageSummary.close_won.arr / convertedDecisionStats.closeWonCount
@@ -3196,7 +4278,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       notConvertedCountBase: notConvertedBase,
       closeWonCountBase: convertedDecisionStats.closeWonCount,
       closeLostCountBase: convertedDecisionStats.closeLostCount,
-      openPipelineArrBase: salespipeKpis.totalPipelineArr,
+      openPipelineArrBase: salespipeKpis.weightedArr,
       closeWonArrBase: salespipeStageSummary.close_won.arr,
       closeLostArrBase: salespipeStageSummary.close_lost.arr,
       convertedRateBase,
@@ -3207,7 +4289,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       notConvertedCountWhatIf,
       closeWonCountWhatIf,
       closeLostCountWhatIf,
-      openPipelineArrWhatIf: openPipelineArrPerDeal * convertedCountWhatIf,
+      openPipelineArrWhatIf: weightedPipelineArrPerDeal * openPipelineCountWhatIf,
       closeWonArrWhatIf: closeWonArrPerDeal * closeWonCountWhatIf,
       closeLostArrWhatIf: closeLostArrPerDeal * closeLostCountWhatIf,
     };
@@ -3222,28 +4304,28 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
   ]);
 
   const probabilityBuckets = useMemo(() => {
-    const openRows = filteredSalespipeRows.filter((row) => ACTIVE_PIPELINE_STAGES.includes(row.stageKey));
-    const bucketDefs = [
-      { key: 'p10', label: '10%', min: 0.1, max: 0.2 },
-      { key: 'p20', label: '20%', min: 0.2, max: 0.35 },
-      { key: 'p35', label: '35%', min: 0.35, max: 0.5 },
-      { key: 'p50', label: '50%', min: 0.5, max: 0.7 },
-      { key: 'p70', label: '70%', min: 0.7, max: 0.9 },
-      { key: 'p90', label: '90%+', min: 0.9, max: 1.01 },
-    ] as const;
-
-    return bucketDefs.map((bucket) => {
+    const openRows = openPipelineOpportunityRowsStats;
+    return PROBABILITY_BUCKET_DEFS.map((bucket) => {
       const rows = openRows.filter((row) => {
-        const prob = row.probability ?? 0;
+        const prob = row.probability;
         return prob >= bucket.min && prob < bucket.max;
       });
       return {
         ...bucket,
         count: rows.length,
-        arr: rows.reduce((sum, row) => sum + row.arr, 0),
+        arr: rows.reduce((sum, row) => sum + row.row.weightedArr, 0),
       };
     });
-  }, [filteredSalespipeRows]);
+  }, [openPipelineOpportunityRowsStats]);
+
+  const selectedProbabilityBucketRows = useMemo(() => {
+    if (!selectedProbabilityBucketKey) return [];
+    const selectedBucket = PROBABILITY_BUCKET_DEFS.find((bucket) => bucket.key === selectedProbabilityBucketKey);
+    if (!selectedBucket) return [];
+    return openPipelineOpportunityRowsAll
+      .filter((item) => item.probability >= selectedBucket.min && item.probability < selectedBucket.max)
+      .sort((a, b) => b.row.weightedArr - a.row.weightedArr);
+  }, [selectedProbabilityBucketKey, openPipelineOpportunityRowsAll]);
 
   const salesCyclePlanRules = useMemo(() => {
     const newClients =
@@ -3277,7 +4359,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
 
   const overdueOpportunities = useMemo(() => {
     const today = new Date();
-    const openOpportunities = baseFilteredSalespipeRows.filter((row) => {
+    const openOpportunities = baseFilteredSalespipeRowsStats.filter((row) => {
       if (row.source !== 'salespipe') return false;
       if (!row.opportunityId) return false;
       if (row.stageKey === 'sql' || row.stageKey === 'close_won' || row.stageKey === 'close_lost') return false;
@@ -3297,7 +4379,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
       })
       .filter((entry): entry is { row: PipelineRow; ageDays: number; limitDays: number; overdueDays: number } => !!entry)
       .sort((a, b) => b.overdueDays - a.overdueDays || b.row.arr - a.row.arr);
-  }, [baseFilteredSalespipeRows, overdueCloseDaysByProbability]);
+  }, [baseFilteredSalespipeRowsStats, overdueCloseDaysByProbability]);
 
   const startResizeSalespipeColumn = (index: number, event: any) => {
     event.preventDefault();
@@ -3409,19 +4491,19 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         </div>
       </div>
 
-      {/* Report Type Tabs */}
-      <div className="flex gap-2 mb-6">
+      {/* Main Category Tabs */}
+      <div className="flex gap-2 mb-4">
         {[
-          { id: 'forecast', label: t('dlt.reports.forecast'), icon: '🔮' },
-          { id: 'ytd', label: t('dlt.reports.ytdSummary'), icon: '📋' },
-          { id: 'salespipe', label: 'New Sales Pipe', icon: '🧭' }
+          { id: 'new_sales_arr', label: 'New Sales ARR', icon: '📈' },
+          { id: 'expanding_arr', label: 'Expanding ARR', icon: '📊' },
+          { id: 'total_business_arr', label: 'Total Business ARR', icon: '🏢' },
         ].map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setReportType(tab.id as typeof reportType)}
+            onClick={() => setReportCategory(tab.id as typeof reportCategory)}
             className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 ${
-              reportType === tab.id
-                ? 'bg-green-600 text-white'
+              reportCategory === tab.id
+                ? 'bg-slate-800 text-white'
                 : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
             }`}
           >
@@ -3431,14 +4513,47 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         ))}
       </div>
 
+      {reportCategory === 'new_sales_arr' && (
+        <div className="flex gap-2 mb-6">
+          {[
+            { id: 'forecast', label: t('dlt.reports.forecast'), icon: '🔮' },
+            { id: 'ytd', label: t('dlt.reports.ytdSummary'), icon: '📋' },
+            { id: 'salespipe', label: 'New Sales Pipe', icon: '🧭' }
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setReportType(tab.id as typeof reportType)}
+              className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 ${
+                reportType === tab.id
+                  ? 'bg-green-600 text-white'
+                  : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+              }`}
+            >
+              <span>{tab.icon}</span>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Export Container */}
       <div ref={exportRef}>
         {/* Forecast */}
-        {reportType === 'forecast' && (
+        {reportCategory === 'new_sales_arr' && reportType === 'forecast' && (
           <div className="space-y-6">
             <div className="bg-white rounded-xl shadow-sm p-6">
-              <h3 className="text-lg font-semibold text-gray-800 mb-4">NET ARR Forecast (Subs + Pay - Churn)</h3>
-              <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <button
+                type="button"
+                onClick={() => setForecastSettingsCollapsed((v) => !v)}
+                className="flex w-full items-center justify-between gap-2 mb-4 text-left"
+              >
+                <h3 className="text-lg font-semibold text-gray-800">NET ARR Forecast (Subs + Pay - Churn)</h3>
+                <span className="flex-shrink-0 text-gray-400 text-xs">
+                  {forecastSettingsCollapsed ? '▼ Einstellungen einblenden' : '▲ Einstellungen ausblenden'}
+                </span>
+              </button>
+              {!forecastSettingsCollapsed && (
+              <><div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
                 <div className="flex items-center justify-between gap-3 text-sm">
                   <span className="text-gray-700 font-medium">Lead Conversion Slider (Lead -&gt; Go-Live)</span>
                   <span className="text-gray-900 font-semibold">{leadToGoLiveForecastPercent.toFixed(1)}%</span>
@@ -3555,22 +4670,25 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
               </div>
               <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
                 {(() => {
-                  const churnSliderMax = Math.max(
-                    250,
-                    Math.ceil((churnScenarioSummary.defaultFactorPercent > 0 ? churnScenarioSummary.defaultFactorPercent * 2.5 : 250) / 10) * 10
-                  );
-                  const churnYtdMarkerFactor = Math.max(
-                    0,
-                    Math.min(churnSliderMax, churnScenarioSummary.ytdBookedFactorPercent || 0)
-                  );
-                  const churnYtdMarkerPercent = churnSliderMax > 0
-                    ? (churnYtdMarkerFactor / churnSliderMax) * 100
-                    : 0;
+                  const churnSliderMax = 300;
+                  // Default-Marker bei 100% (= YTD-Ø)
+                  const defaultMarkerPercent = (100 / churnSliderMax) * 100;
                   return (
                     <>
                       <div className="flex items-center justify-between gap-3 text-sm">
-                        <span className="text-gray-700 font-medium">Churn Slider (Faktor auf Plan+Trend)</span>
-                        <span className="text-gray-900 font-semibold">{futureChurnScenarioFactorPercent.toFixed(0)}%</span>
+                        <span className="text-gray-700 font-medium">Churn-Trend Slider (What-if-Szenario)</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-gray-900 font-semibold">{futureChurnScenarioFactorPercent.toFixed(0)}%</span>
+                          {futureChurnScenarioFactorPercent !== 100 && (
+                            <button
+                              type="button"
+                              onClick={() => setFutureChurnScenarioFactorPercent(100)}
+                              className="rounded border border-gray-300 bg-white px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+                            >
+                              Reset (100%)
+                            </button>
+                          )}
+                        </div>
                       </div>
                       <div className="mt-2 flex items-center gap-3">
                         <div className="w-full">
@@ -3589,39 +4707,38 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                             />
                             <div
                               className="pointer-events-none absolute top-1/2 -translate-y-1/2 z-0"
-                              style={{ left: `${churnYtdMarkerPercent}%` }}
+                              style={{ left: `${defaultMarkerPercent}%` }}
                               aria-hidden
                             >
                               <div className="h-5 border-l-2 border-indigo-500 opacity-80" />
                             </div>
                           </div>
                           <div className="mt-1 text-[11px] text-indigo-700">
-                            YTD-Marker: {formatCurrency(churnScenarioSummary.ytdMonthlyBookedAverage)} / Monat
-                            ({(churnScenarioSummary.ytdBookedFactorPercent || 0).toFixed(0)}%)
+                            Default (100%): {formatCurrency(churnScenarioSummary.ytdMonthlyBookedAverage)} / Monat (YTD-Ø)
                           </div>
                         </div>
                         <input
                           type="number"
                           min={0}
-                          max={300}
+                          max={churnSliderMax}
                           step={5}
                           value={futureChurnScenarioFactorPercent}
                           onChange={(e) => {
                             const next = Number(e.target.value);
                             if (!Number.isFinite(next)) return;
-                            setFutureChurnScenarioFactorPercent(Math.max(0, Math.min(300, next)));
+                            setFutureChurnScenarioFactorPercent(Math.max(0, Math.min(churnSliderMax, next)));
                           }}
                           className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
                         />
                       </div>
                       <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
                         <div className="rounded border border-gray-200 bg-white p-2">
-                          <div className="text-gray-500">Default Plan-Churn (Future Ø)</div>
-                          <div className="font-semibold text-gray-800">{formatCurrency(churnScenarioSummary.defaultMonthlyPlanChurn)}</div>
+                          <div className="text-gray-500">YTD-Ø Churn / Monat (Trend-Basis)</div>
+                          <div className="font-semibold text-gray-800">{formatCurrency(churnScenarioSummary.ytdMonthlyBookedAverage)}</div>
                         </div>
                         <div className="rounded border border-gray-200 bg-white p-2">
-                          <div className="text-gray-500">Future Churn Basis (Plan)</div>
-                          <div className="font-semibold text-gray-800">{formatCurrency(churnScenarioSummary.futurePlanBaseTotal)}</div>
+                          <div className="text-gray-500">Trend-Basis gesamt (Future)</div>
+                          <div className="font-semibold text-gray-800">{formatCurrency(churnScenarioSummary.futureTrendBaseTotal)}</div>
                         </div>
                         <div className="rounded border border-gray-200 bg-white p-2">
                           <div className="text-gray-500">Szenario Churn (Future)</div>
@@ -3629,12 +4746,220 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                         </div>
                       </div>
                       <div className="mt-1 text-xs text-gray-500">
-                        Plan-Regel: 100% = geplanter Churn. Werte über 100% erhöhen den Plan-Churn für Worst-Case-Szenarien.
+                        100% = aktueller YTD-Trend. Slider hoch → mehr Churn → NET ARR sinkt. Slider runter → weniger Churn → NET ARR steigt.
                       </div>
                     </>
                   );
                 })()}
               </div>
+              <div className="mb-4 rounded-lg border border-sky-200 bg-sky-50/50 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEnterpriseDealsCollapsed((v) => !v)}
+                    className="flex items-center gap-2 text-left"
+                  >
+                    <div>
+                      <div className="text-sm font-medium text-sky-900">Enterprise Deals (optional)</div>
+                      <div className="text-xs text-sky-800">
+                        Jeder Deal wird mit OAK-ID/Account zugeordnet, in der DB gespeichert und monatlich in die Projektion eingerechnet.
+                      </div>
+                    </div>
+                    <span className="flex-shrink-0 text-sky-400 text-xs ml-1">
+                      {enterpriseDealsCollapsed ? '▼' : '▲'}
+                    </span>
+                  </button>
+                  <label className="inline-flex items-center gap-2 text-sm text-sky-900">
+                    <input
+                      type="checkbox"
+                      checked={enterpriseForecastEnabled}
+                      onChange={(e) => setEnterpriseForecastEnabled(e.target.checked)}
+                      className="h-4 w-4 accent-sky-600"
+                    />
+                    Aktiv
+                  </label>
+                </div>
+
+                {!enterpriseDealsCollapsed && (
+                  <div>
+                <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-4">
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-sky-900">Deal suchen (OAK oder Account)</label>
+                    <input
+                      type="text"
+                      value={enterpriseLookupQuery}
+                      onChange={(e) => setEnterpriseLookupQuery(e.target.value)}
+                      list="enterprise-deal-search-options"
+                      placeholder="z. B. OAK 12345 oder Salonname"
+                      className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-sm"
+                    />
+                    <datalist id="enterprise-deal-search-options">
+                      {enterpriseLookupOptions.slice(0, 300).map((option) => (
+                        <option key={`${option.oakId || 'none'}-${option.accountName || 'none'}`} value={option.label} />
+                      ))}
+                    </datalist>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-sky-900">Zielmonat</label>
+                    <select
+                      value={enterpriseDealTargetMonthInput}
+                      onChange={(e) => setEnterpriseDealTargetMonthInput(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                      className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-sm"
+                    >
+                      {MONTH_NAMES_SHORT.map((label, idx) => (
+                        <option key={label} value={idx + 1}>
+                          {label} {selectedYear}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-sky-900">Erwartete Go-Lives</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={enterpriseDealExpectedGoLivesInput}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        if (!Number.isFinite(next)) return;
+                        setEnterpriseDealExpectedGoLivesInput(Math.max(0, next));
+                      }}
+                      className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-sky-900">ARR pro Go-Live</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={enterpriseDealArrPerGoLiveInput}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        if (!Number.isFinite(next)) return;
+                        setEnterpriseDealArrPerGoLiveInput(Math.max(0, Math.round(next)));
+                      }}
+                      className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleAddEnterpriseDeal}
+                    disabled={addingEnterpriseDeal}
+                    className="inline-flex items-center justify-center rounded bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {addingEnterpriseDeal ? 'Speichere Deal...' : 'Deal hinzufügen'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEnterpriseDealArrPerGoLiveInput(Math.max(0, Math.round(enterpriseDefaultArrPerGoLiveYtd)))}
+                    className="inline-flex items-center justify-center rounded border border-sky-300 px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-100"
+                  >
+                    YTD-Ø ARR/Go-Live übernehmen ({formatCurrency(enterpriseDefaultArrPerGoLiveYtd)})
+                  </button>
+                  <div className="text-xs text-sky-800">
+                    Deal-Preview: {formatCurrency(Math.max(0, enterpriseDealExpectedGoLivesInput) * Math.max(0, enterpriseDealArrPerGoLiveInput))}
+                  </div>
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 gap-2 text-xs md:grid-cols-3">
+                  <div className="rounded border border-sky-200 bg-white p-2">
+                    <div className="text-sky-700">Gesamt ARR (alle Deals)</div>
+                    <div className="font-semibold text-sky-900">{formatCurrency(enterpriseDealsSummary.all)}</div>
+                  </div>
+                  <div className="rounded border border-sky-200 bg-white p-2">
+                    <div className="text-sky-700">Aktive Deals ARR</div>
+                    <div className="font-semibold text-sky-900">{formatCurrency(enterpriseDealsSummary.active)}</div>
+                  </div>
+                  <div className="rounded border border-sky-200 bg-white p-2">
+                    <div className="text-sky-700">Deals (aktiv/gesamt)</div>
+                    <div className="font-semibold text-sky-900">
+                      {enterpriseDeals.filter((deal) => deal.is_active).length}/{enterpriseDeals.length}
+                    </div>
+                  </div>
+                </div>
+
+                {enterpriseDealsError && (
+                  <div className="mt-3 rounded border border-red-200 bg-red-50 px-2 py-1 text-xs text-red-700">
+                    {enterpriseDealsError}
+                  </div>
+                )}
+
+                <div className="mt-3 rounded border border-sky-200 bg-white">
+                  <div className="border-b border-sky-100 px-3 py-2 text-xs font-medium text-sky-900">
+                    Gespeicherte Enterprise Deals
+                    {enterpriseDealsLoading ? <span className="ml-2 text-sky-700">Lade...</span> : null}
+                  </div>
+                  {!enterpriseDealsLoading && enterpriseDeals.length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-gray-500">Noch keine Deals erfasst.</div>
+                  ) : (
+                    <div className="max-h-56 overflow-auto">
+                      <table className="w-full min-w-[780px] text-xs">
+                        <thead className="bg-sky-50 text-sky-900">
+                          <tr>
+                            <th className="px-2 py-2 text-left font-medium">Zuordnung</th>
+                            <th className="px-2 py-2 text-left font-medium">Monat</th>
+                            <th className="px-2 py-2 text-right font-medium">Go-Lives</th>
+                            <th className="px-2 py-2 text-right font-medium">ARR/Go-Live</th>
+                            <th className="px-2 py-2 text-right font-medium">Deal ARR</th>
+                            <th className="px-2 py-2 text-center font-medium">Aktiv</th>
+                            <th className="px-2 py-2 text-right font-medium">Aktion</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {enterpriseDeals.map((deal) => {
+                            const dealArr = Math.max(0, Number(deal.expected_go_lives) || 0) * Math.max(0, Number(deal.arr_per_go_live) || 0);
+                            return (
+                              <tr key={deal.id} className="border-t border-sky-100">
+                                <td className="px-2 py-2 text-gray-800">
+                                  <div className="font-medium">
+                                    {deal.account_name || (deal.oak_id ? `OAK ${deal.oak_id}` : 'Unbekannt')}
+                                  </div>
+                                  <div className="text-[11px] text-gray-500">
+                                    {deal.oak_id ? `OAK ${deal.oak_id}` : 'Keine OAK'}
+                                  </div>
+                                </td>
+                                <td className="px-2 py-2 text-gray-700">
+                                  {MONTH_NAMES_SHORT[Math.max(0, Math.min(11, Number(deal.target_month || 1) - 1))]} {selectedYear}
+                                </td>
+                                <td className="px-2 py-2 text-right text-gray-700">{Number(deal.expected_go_lives || 0).toFixed(0)}</td>
+                                <td className="px-2 py-2 text-right text-gray-700">{formatCurrency(Number(deal.arr_per_go_live || 0))}</td>
+                                <td className="px-2 py-2 text-right font-semibold text-sky-800">{formatCurrency(dealArr)}</td>
+                                <td className="px-2 py-2 text-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(deal.is_active)}
+                                    disabled={togglingEnterpriseDealId === deal.id}
+                                    onChange={() => handleToggleEnterpriseDeal(deal)}
+                                    className="h-4 w-4 accent-sky-600"
+                                  />
+                                </td>
+                                <td className="px-2 py-2 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteEnterpriseDeal(deal)}
+                                    disabled={deletingEnterpriseDealId === deal.id}
+                                    className="rounded border border-red-300 px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    {deletingEnterpriseDealId === deal.id ? 'Lösche...' : 'Löschen'}
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+                  </div>
+                )}
+              </div>
+              </>)}
               <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50/40 p-3">
                 <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <div className="text-xs text-emerald-900">
@@ -3691,84 +5016,209 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                 )}
 
                 {scenarioReport && (
-                  <div className="mt-3 rounded border border-indigo-200 bg-white p-3 text-xs text-gray-700">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-gray-900">{scenarioReport.headline}</span>
-                    </div>
-                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-3">
-                      <div className="rounded border border-gray-200 p-2">
-                        <div className="text-gray-500">NET Gap</div>
-                        <div className="font-semibold text-gray-900">{formatCurrency(scenarioReport.netGapArr)}</div>
-                        <div className="text-[11px] text-gray-600 mt-1">
-                          Delta ARR Prognose vs Szenario: {formatSignedCurrency(scenarioReport.scenarioDelta.deltaNetArrVsBaseline)}
-                        </div>
-                      </div>
-                      <div className="rounded border border-gray-200 p-2">
-                        <div className="text-gray-500">Wirkung +1 Lead/Monat</div>
-                        <div className="font-semibold text-gray-900">
-                          {formatCurrency(scenarioReport.leverSensitivity.netArrPerAdditionalLeadPerMonth)}
-                        </div>
-                        <div className="text-[11px] text-gray-600 mt-1">
-                          Mehr-Leads Szenario: {scenarioReport.scenarioDelta.additionalLeadsPerMonthVsBaseline.toFixed(1)} / Monat (
-                          {scenarioReport.scenarioDelta.additionalLeadsTotalVsBaseline.toFixed(1)} gesamt)
-                        </div>
-                        <div className="text-[11px] text-gray-600">
-                          ARR aus Mehr-Leads: {formatSignedCurrency(scenarioReport.scenarioDelta.additionalArrFromLeadVolumeVsBaseline)}
-                        </div>
-                      </div>
-                      <div className="rounded border border-gray-200 p-2">
-                        <div className="text-gray-500">Wirkung +1pp Conversion</div>
-                        <div className="font-semibold text-gray-900">
-                          {formatCurrency(scenarioReport.leverSensitivity.netArrPerConversionPoint)}
-                        </div>
-                        <div className="text-[11px] text-gray-600 mt-1">
-                          Conversion-Delta: {scenarioReport.scenarioDelta.conversionDeltaPctPointsVsBaseline.toFixed(1)}pp, Mehr-Leads:
-                          {' '}{scenarioReport.scenarioDelta.additionalLeadsFromConversionVsBaseline.toFixed(1)}
-                        </div>
-                        <div className="text-[11px] text-gray-600">
-                          ARR aus Conversion-Delta: {formatSignedCurrency(scenarioReport.scenarioDelta.additionalArrFromConversionVsBaseline)}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="mt-2 space-y-1">
-                      {scenarioReport.summaryLines.map((line, index) => (
-                        <div key={`${line}-${index}`}>- {line}</div>
-                      ))}
-                    </div>
-                    {scenarioReport.narrative && (
-                      <div className="mt-2 rounded border border-indigo-100 bg-indigo-50/50 p-2 whitespace-pre-wrap text-[12px] text-gray-700">
-                        {scenarioReport.narrative}
-                      </div>
-                    )}
-                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                      {scenarioReport.actions.slice(0, 4).map((action) => (
-                        <div key={action.key} className="rounded border border-gray-200 p-2">
-                          <div className="font-medium text-gray-900">{action.title}</div>
-                          <div>
-                            Ziel-Beitrag: {action.requiredDelta.toFixed(2)} {action.unit}
+                  <div ref={scenarioReportExportRef} className="mt-3 rounded border border-indigo-200 bg-white p-3 text-xs text-gray-700">
+                    {(() => {
+                      const sections = parseScenarioNarrativeSections(scenarioReport.narrative);
+                      const hebelevers = scenarioReport.actions.filter(
+                        (action) => action.key === 'lead_volume' || action.key === 'conversion' || action.key === 'churn'
+                      );
+                      const parsedCtaLines = (() => {
+                        if (sections.ctaLines.length === 0) return [] as string[];
+                        if (sections.ctaLines.length > 1) return sections.ctaLines;
+
+                        const single = sections.ctaLines[0] || '';
+                        const matches = single.match(/(?:\d+[.):-]?\s.*?)(?=(?:\s\d+[.):-]?\s)|$)/g);
+                        if (matches && matches.length > 1) {
+                          return matches.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+                        }
+                        return sections.ctaLines;
+                      })();
+
+                      const fallbackCtaLines = hebelevers.map(
+                        (action, idx) =>
+                          `${idx + 1}. ${action.title}: ${action.requiredDelta.toFixed(2)} ${action.unit} (ARR-Hebel ${formatCurrency(
+                            action.impactPerUnitNetArr
+                          )}/Einheit)`
+                      );
+
+                      const ctaLines = parsedCtaLines.length >= 3 ? parsedCtaLines : fallbackCtaLines;
+                      const ctaDisplayLines = ctaLines.slice(0, 3);
+
+                      const leadVolumeAction = hebelevers.find((action) => action.key === 'lead_volume');
+                      const conversionAction = hebelevers.find((action) => action.key === 'conversion');
+                      const churnAction = hebelevers.find((action) => action.key === 'churn');
+
+                      const leadVolumeDelta = Number(leadVolumeAction?.requiredDelta || 0);
+                      const conversionDelta = Number(conversionAction?.requiredDelta || 0);
+                      const churnDeltaReduction = Number(churnAction?.requiredDelta || 0);
+
+                      const currentLeadVolume = Number(futureLeadVolumeScenarioMonthlyLeads || 0);
+                      const currentConversion = Number(leadToGoLiveForecastPercent || 0);
+                      const currentChurn = Number(futureChurnScenarioFactorPercent || 0);
+
+                      const targetLeadVolume = Math.max(0, currentLeadVolume + (Number.isFinite(leadVolumeDelta) ? leadVolumeDelta : 0));
+                      const targetConversion = Math.max(0, Math.min(100, currentConversion + (Number.isFinite(conversionDelta) ? conversionDelta : 0)));
+                      const targetChurn = Math.max(0, Math.min(300, currentChurn - (Number.isFinite(churnDeltaReduction) ? churnDeltaReduction : 0)));
+
+                      const leadVolumeSliderMax = Math.max(100, Math.ceil(Math.max(currentLeadVolume, targetLeadVolume, 1) * 1.25));
+                      const conversionSliderMax = 100;
+                      const churnSliderMax = 300;
+
+                      return (
+                        <>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-gray-900">{scenarioReport.headline}</span>
                           </div>
-                          <div>
-                            Wirkung/Einheit: {formatCurrency(action.impactPerUnitNetArr)}
+
+                          <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-4">
+                            <div className="rounded border border-green-200 bg-green-50/40 p-2">
+                              <div className="text-gray-500">Forecast Summe Subs ARR</div>
+                              <div className="font-semibold text-green-700">{formatCurrency(forecastScenarioInput.forecastSubsArr)}</div>
+                              <div className={`text-[11px] mt-1 ${forecastGapSummary.subs > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                                Gap: {formatSignedCurrency(forecastGapSummary.subs)}
+                              </div>
+                            </div>
+                            <div className="rounded border border-orange-200 bg-orange-50/40 p-2">
+                              <div className="text-gray-500">Forecast Summe Pay ARR</div>
+                              <div className="font-semibold text-orange-700">{formatCurrency(forecastScenarioInput.forecastPayArr)}</div>
+                              <div className={`text-[11px] mt-1 ${forecastGapSummary.pay > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                                Gap: {formatSignedCurrency(forecastGapSummary.pay)}
+                              </div>
+                            </div>
+                            <div className="rounded border border-red-200 bg-red-50/40 p-2">
+                              <div className="text-gray-500">Forecast Churn ARR</div>
+                              <div className="font-semibold text-red-700">{formatCurrency(forecastScenarioInput.forecastChurnArr)}</div>
+                              <div className={`text-[11px] mt-1 ${forecastGapSummary.churn > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                                Gap: {formatSignedCurrency(forecastGapSummary.churn)}
+                              </div>
+                            </div>
+                            <div className="rounded border border-indigo-200 bg-indigo-50/40 p-2">
+                              <div className="text-gray-500">Forecast Summe NET ARR</div>
+                              <div className="font-semibold text-indigo-700">{formatCurrency(forecastScenarioInput.forecastNetArr)}</div>
+                              <div className={`text-[11px] mt-1 ${scenarioReport.netGapArr > 0 ? 'text-red-600' : 'text-green-700'}`}>
+                                Gap: {formatCurrency(scenarioReport.netGapArr)}
+                              </div>
+                            </div>
                           </div>
-                          <div className="text-gray-500">{action.details}</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex items-center justify-end gap-3">
-                      {savedScenarioConfirmation && (
-                        <div className="rounded-md bg-emerald-50 border border-emerald-300 px-3 py-1.5 text-xs font-medium text-emerald-800 animate-fade-in">
-                          {savedScenarioConfirmation}
-                        </div>
-                      )}
-                      <button
-                        type="button"
-                        onClick={handleSaveScenario}
-                        disabled={savedScenarioActionLoading}
-                        className="inline-flex items-center justify-center rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {savedScenarioActionLoading ? 'Speichere Szenario...' : 'In ein Szenario übernehmen'}
-                      </button>
-                    </div>
+
+                          <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+                            {hebelevers.map((action) => (
+                              <div key={action.key} className="rounded border border-gray-200 p-2">
+                                <div className="font-medium text-gray-900">{action.title}</div>
+                                <div>Ziel-Beitrag: {action.requiredDelta.toFixed(2)} {action.unit}</div>
+                                <div>Wirkung/Einheit: {formatCurrency(action.impactPerUnitNetArr)}</div>
+                                <div className="text-gray-500">{action.details}</div>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="mt-3 rounded border border-indigo-200 bg-indigo-50/30 p-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-indigo-700">
+                              Empfohlenes Slider-Szenario (Hard Copy)
+                            </div>
+                            <div className="mt-2 space-y-3">
+                              <div className="rounded border border-gray-200 bg-white p-2">
+                                <div className="mb-1 flex items-center justify-between text-[12px]">
+                                  <span className="font-medium text-gray-800">Lead Conversion (Lead -&gt; Go-Live)</span>
+                                  <span className="text-gray-700">
+                                    aktuell {currentConversion.toFixed(1)}% -&gt; Ziel {targetConversion.toFixed(1)}%
+                                    <span className="ml-1 font-semibold text-indigo-700">({conversionDelta >= 0 ? '+' : ''}{conversionDelta.toFixed(1)}pp)</span>
+                                  </span>
+                                </div>
+                                <input type="range" min={0} max={conversionSliderMax} step={0.1} value={targetConversion} readOnly className="w-full accent-slate-600" />
+                              </div>
+
+                              <div className="rounded border border-gray-200 bg-white p-2">
+                                <div className="mb-1 flex items-center justify-between text-[12px]">
+                                  <span className="font-medium text-gray-800">Lead Volumen (Leads pro Future-Monat)</span>
+                                  <span className="text-gray-700">
+                                    aktuell {currentLeadVolume.toFixed(0)} -&gt; Ziel {targetLeadVolume.toFixed(0)}
+                                    <span className="ml-1 font-semibold text-indigo-700">({leadVolumeDelta >= 0 ? '+' : ''}{leadVolumeDelta.toFixed(1)})</span>
+                                  </span>
+                                </div>
+                                <input type="range" min={0} max={leadVolumeSliderMax} step={1} value={targetLeadVolume} readOnly className="w-full accent-slate-600" />
+                              </div>
+
+                              <div className="rounded border border-gray-200 bg-white p-2">
+                                <div className="mb-1 flex items-center justify-between text-[12px]">
+                                  <span className="font-medium text-gray-800">Churn Faktor</span>
+                                  <span className="text-gray-700">
+                                    aktuell {currentChurn.toFixed(1)}% -&gt; Ziel {targetChurn.toFixed(1)}%
+                                    <span className="ml-1 font-semibold text-emerald-700">(-{Math.abs(churnDeltaReduction).toFixed(1)}pp)</span>
+                                  </span>
+                                </div>
+                                <input type="range" min={0} max={churnSliderMax} step={0.1} value={targetChurn} readOnly className="w-full accent-red-500" />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-3 rounded border border-gray-200 bg-white p-2">
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">Executive Summary</div>
+                            <div className="mt-1 whitespace-pre-wrap text-[12px] text-gray-800">{sections.executiveSummary || scenarioReport.summaryLines.join(' ')}</div>
+                          </div>
+
+                          <div className="mt-2 rounded border border-gray-200 bg-white p-2">
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">Hebelwirkung</div>
+                            <div className="mt-1 whitespace-pre-wrap text-[12px] text-gray-800">
+                              {sections.hebeleffekt || 'Die drei Hebel wirken zusammen auf Leadzufluss, Conversion und Churn-Stabilisierung.'}
+                            </div>
+                          </div>
+
+                          <div className="mt-2 rounded border border-gray-200 bg-white p-2">
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">CTA</div>
+                            <div className="mt-1 grid grid-cols-1 gap-2">
+                              {ctaDisplayLines.map((line, idx) => {
+                                const cleanedLine = line.replace(/^\s*\d+[.):-]?\s*/, '').trim();
+                                const metricMatch = cleanedLine.match(/([+\-]?\d+[\.,]?\d*\s*(?:pp|%|EUR|€|Leads\/Monat))/i);
+                                return (
+                                  <div
+                                    key={`${line}-${idx}`}
+                                    className="rounded border border-indigo-200 bg-indigo-50/40 p-2"
+                                  >
+                                    <div className="flex items-start gap-2">
+                                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-indigo-600 text-[11px] font-semibold text-white">
+                                        {idx + 1}
+                                      </span>
+                                      <div className="flex-1">
+                                        <div className="text-[12px] font-medium text-gray-800">{cleanedLine || line}</div>
+                                        {metricMatch && (
+                                          <span className="mt-1 inline-flex items-center rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                                            KPI: {metricMatch[1]}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div className="mt-2 rounded border border-gray-200 bg-white p-2">
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-gray-600">Elevator Pitch</div>
+                            <div className="mt-1 whitespace-pre-wrap text-[12px] text-gray-800">
+                              {sections.elevatorPitch || scenarioReport.narrative || 'Kein Elevator Pitch vorhanden.'}
+                            </div>
+                          </div>
+
+                          <div className="mt-3 flex items-center justify-end gap-3">
+                            {savedScenarioConfirmation && (
+                              <div className="rounded-md bg-emerald-50 border border-emerald-300 px-3 py-1.5 text-xs font-medium text-emerald-800 animate-fade-in">
+                                {savedScenarioConfirmation}
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              onClick={handleSaveScenario}
+                              disabled={savedScenarioActionLoading}
+                              className="inline-flex items-center justify-center rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                              {savedScenarioActionLoading ? 'Speichere Szenario...' : 'In ein Szenario übernehmen'}
+                            </button>
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -3816,22 +5266,32 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                                 {new Date(saved.created_at).toLocaleString('de-DE')}
                               </div>
                             </div>
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => handleApplySavedScenario(saved)}
-                                className="inline-flex items-center justify-center rounded border border-indigo-300 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
-                              >
-                                Szenario laden
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteSavedScenario(saved)}
-                                disabled={deletingScenarioId === saved.id}
-                                className="inline-flex items-center justify-center rounded border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                {deletingScenarioId === saved.id ? 'Lösche...' : 'Szenario löschen'}
-                              </button>
+                            <div className="flex flex-col items-end gap-2">
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleApplySavedScenario(saved)}
+                                  className="inline-flex items-center justify-center rounded border border-indigo-300 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+                                >
+                                  Szenario laden
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDownloadSavedScenarioPdf(saved)}
+                                  disabled={downloadingPdfScenarioId === saved.id}
+                                  className="inline-flex items-center justify-center rounded border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  {downloadingPdfScenarioId === saved.id ? 'Lade PDF...' : 'PDF herunterladen'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteSavedScenario(saved)}
+                                  disabled={deletingScenarioId === saved.id}
+                                  className="inline-flex items-center justify-center rounded border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                                >
+                                  {deletingScenarioId === saved.id ? 'Lösche...' : 'Szenario löschen'}
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );
@@ -3840,7 +5300,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                   )}
                 </div>
               </div>
-              <div className="mb-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div className="mb-4 grid grid-cols-1 md:grid-cols-5 gap-3">
                 <div className="bg-white rounded-lg shadow-sm p-4 border border-green-200">
                   <div className="text-xs text-gray-500">Forecast Summe Subs ARR</div>
                   <div className="text-xl font-bold text-green-700">{formatCurrency(forecastSummary.subs)}</div>
@@ -3882,6 +5342,16 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                   </div>
                   <div className={`text-sm font-bold mt-2 ${forecastGapSummary.churn > 0 ? 'text-red-600' : 'text-green-700'}`}>
                     Gap: {formatSignedCurrency(forecastGapSummary.churn)}
+                  </div>
+                </div>
+                <div className="bg-white rounded-lg shadow-sm p-4 border border-sky-200">
+                  <div className="text-xs text-gray-500">Forecast Enterprise ARR</div>
+                  <div className="text-xl font-bold text-sky-700">{formatCurrency(forecastSummary.enterprise)}</div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Status: {enterpriseForecastEnabled ? 'Aktiv' : 'Inaktiv'}
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    Aktive Deals: {enterpriseDeals.filter((deal) => deal.is_active).length}
                   </div>
                 </div>
                 <div className="bg-white rounded-lg shadow-sm p-4 border border-blue-200">
@@ -3942,6 +5412,13 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                     minPointSize={3}
                   />
                   <Bar
+                    dataKey="arrEnterpriseExpectation"
+                    stackId="arrSplit"
+                    name="ARR aus Enterprise Erwartung"
+                    fill="#0EA5E9"
+                    minPointSize={3}
+                  />
+                  <Bar
                     dataKey="arrChurnBookedDeduction"
                     stackId="arrSplit"
                     name="Churn ARR eingebucht (abgezogen)"
@@ -3986,7 +5463,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         )}
 
         {/* New Sales Pipe */}
-        {reportType === 'salespipe' && (
+        {reportCategory === 'new_sales_arr' && reportType === 'salespipe' && (
           <div className="space-y-6">
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h3 className="text-lg font-semibold text-gray-800">New Sales Pipe</h3>
@@ -4034,14 +5511,147 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
                           {probabilityBuckets.map((bucket) => (
-                            <div key={bucket.key} className="rounded-lg border border-gray-200 p-3 bg-gray-50">
-                              <div className="text-xs font-medium text-gray-600">{bucket.label}</div>
+                            <button
+                              key={bucket.key}
+                              type="button"
+                              onClick={() =>
+                                setSelectedProbabilityBucketKey((prev) => (prev === bucket.key ? null : bucket.key))
+                              }
+                              className={`rounded-lg border p-3 text-left transition ${
+                                selectedProbabilityBucketKey === bucket.key
+                                  ? 'border-indigo-300 bg-indigo-50'
+                                  : 'border-gray-200 bg-gray-50 hover:bg-gray-100'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-xs font-medium text-gray-600">{bucket.label}</div>
+                                <div className="text-[10px] text-gray-500">
+                                  {selectedProbabilityBucketKey === bucket.key ? 'Ausblenden ▴' : 'Details ▾'}
+                                </div>
+                              </div>
                               <div className="text-lg font-bold text-gray-800">{bucket.count}</div>
                               <div className="text-xs text-gray-500">{formatCurrency(bucket.arr)}</div>
-                            </div>
+                            </button>
                           ))}
                         </div>
                       </div>
+
+                      {selectedProbabilityBucketKey && (
+                        <div className="bg-white rounded-xl shadow-sm border border-indigo-200 overflow-hidden">
+                          <div className="px-4 py-3 border-b border-indigo-200 bg-indigo-50 flex items-center justify-between">
+                            <div>
+                              <h4 className="text-sm font-semibold text-indigo-800">
+                                Opportunity-Details – Probability{' '}
+                                {PROBABILITY_BUCKET_DEFS.find((bucket) => bucket.key === selectedProbabilityBucketKey)?.label}
+                              </h4>
+                              <p className="text-xs text-indigo-700">
+                                {selectedProbabilityBucketRows.length} Opportunities ·{' '}
+                                {formatCurrency(
+                                  selectedProbabilityBucketRows.reduce((sum, item) => sum + item.row.weightedArr, 0)
+                                )}{' '}
+                                Weighted ARR
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedProbabilityBucketKey(null)}
+                              className="rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-indigo-700 hover:bg-indigo-100"
+                            >
+                              Schließen
+                            </button>
+                          </div>
+                          <div className="overflow-x-auto">
+                            <table className="w-full min-w-[980px] text-xs">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  <th className="px-2 py-2 text-center font-semibold text-gray-600">Aktiv</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Datensatz</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Stage</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Owner</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Leadsource</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">ARR</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">Probability</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">Weighted ARR</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Angelegt am</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Schlusstermin</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">Tage bis Schlusstermin</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {selectedProbabilityBucketRows.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={11} className="px-2 py-6 text-center text-gray-500">
+                                      Keine Opportunities für diese Probability-Stage in der aktuellen Filterung.
+                                    </td>
+                                  </tr>
+                                ) : (
+                                  selectedProbabilityBucketRows.map((item) => {
+                                    const row = item.row;
+                                    const rowDisabled = isPipelineRowDisabled(row);
+                                    const daysUntilClose = calculateDaysUntil(row.closeDate);
+                                    const stageCfg =
+                                      PIPELINE_STAGE_CONFIG.find((cfg) => cfg.key === row.stageKey) || PIPELINE_STAGE_CONFIG[0];
+                                    return (
+                                      <tr
+                                        key={`prob-detail-${row.id}`}
+                                        className={`border-b last:border-b-0 ${rowDisabled ? 'bg-gray-100/70 text-gray-400' : ''}`}
+                                      >
+                                        <td className="px-2 py-1.5 text-center">
+                                          <input
+                                            type="checkbox"
+                                            checked={!rowDisabled}
+                                            onChange={() => togglePipelineRowDisabled(row)}
+                                            className="h-4 w-4 accent-indigo-600"
+                                            title="Datensatz aktiv/inaktiv"
+                                          />
+                                        </td>
+                                        <td className="px-2 py-1.5">
+                                          <div className="font-medium text-gray-800">
+                                            {row.opportunityId ? (
+                                              <a
+                                                href={buildSalesforceOpportunityUrl(row.opportunityId) || '#'}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-indigo-700 hover:text-indigo-900 underline"
+                                              >
+                                                {row.name}
+                                              </a>
+                                            ) : (
+                                              row.name
+                                            )}
+                                          </div>
+                                          <div className="text-[11px] text-gray-500">OAK: {row.oakId ?? '-'}</div>
+                                        </td>
+                                        <td className="px-2 py-1.5">
+                                          <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCfg.bg} ${stageCfg.color}`}>
+                                            {stageCfg.label}
+                                          </span>
+                                        </td>
+                                        <td className="px-2 py-1.5 text-gray-700">{row.owner || '-'}</td>
+                                        <td className="px-2 py-1.5 text-gray-700">{row.leadSource || '-'}</td>
+                                        <td className="px-2 py-1.5 text-right text-blue-700">{formatCurrency(row.arr)}</td>
+                                        <td className="px-2 py-1.5 text-right text-gray-700">
+                                          {row.probability === null ? '-' : `${(row.probability * 100).toFixed(0)}%`}
+                                        </td>
+                                        <td className="px-2 py-1.5 text-right text-emerald-700">{formatCurrency(row.weightedArr)}</td>
+                                        <td className="px-2 py-1.5 text-gray-700">
+                                          {row.filterDate ? new Date(row.filterDate).toLocaleDateString('de-DE') : '-'}
+                                        </td>
+                                        <td className="px-2 py-1.5 text-gray-700">
+                                          {row.closeDate ? new Date(row.closeDate).toLocaleDateString('de-DE') : '-'}
+                                        </td>
+                                        <td className="px-2 py-1.5 text-right text-gray-700">
+                                          {daysUntilClose === null ? '-' : daysUntilClose}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
 
                       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-2">
                         {PIPELINE_STAGE_CONFIG_VISIBLE.map((stage) => (
@@ -4350,7 +5960,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                           </div>
                         </div>
                         <div className="rounded-lg border p-3 bg-indigo-50">
-                          <div className="text-xs text-indigo-700">Open Pipeline ARR</div>
+                          <div className="text-xs text-indigo-700">Weighted Pipeline ARR</div>
                           <div className="text-lg font-bold text-gray-800">
                             {formatCurrency(whatIfScenario.openPipelineArrWhatIf)}
                             <span className="text-xs font-normal text-gray-500 ml-1">(aktuell {formatCurrency(whatIfScenario.openPipelineArrBase)})</span>
@@ -4371,25 +5981,136 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                           </div>
                         </div>
                       </div>
+
+                      <div className="bg-white rounded-xl shadow-sm border border-indigo-200 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => setSalespipeWhatIfDatasetExpanded((prev) => !prev)}
+                          className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-indigo-50 transition"
+                        >
+                          <span className="text-sm font-semibold text-indigo-800">Datensätze (What-if Grundlage)</span>
+                          <span className="text-sm text-indigo-600">
+                            {salespipeWhatIfDatasetExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}
+                          </span>
+                        </button>
+                        {salespipeWhatIfDatasetExpanded && (
+                          <div className="border-t border-indigo-200 overflow-x-auto">
+                            <table className="w-full min-w-[1280px] text-xs">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  <th className="px-2 py-2 text-center font-semibold text-gray-600">Aktiv</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Datensatz</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Stage</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">Tage</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Owner</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Leadsource</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">ARR</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">Probability</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">Weighted ARR</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Angelegt am</th>
+                                  <th className="px-2 py-2 text-left font-semibold text-gray-600">Schlusstermin</th>
+                                  <th className="px-2 py-2 text-right font-semibold text-gray-600">Tage bis Schlusstermin</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {filteredSalespipeRows.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={12} className="px-2 py-6 text-center text-gray-500">
+                                      Keine Datensätze für die aktuelle Auswahl.
+                                    </td>
+                                  </tr>
+                                ) : (
+                                  filteredSalespipeRows
+                                    .slice()
+                                    .sort((a, b) => b.arr - a.arr)
+                                    .map((row) => {
+                                      const stageCfg =
+                                        PIPELINE_STAGE_CONFIG.find((cfg) => cfg.key === row.stageKey) || PIPELINE_STAGE_CONFIG[0];
+                                      const rowDisabled = isPipelineRowDisabled(row);
+                                      const leadToCloseDays = calculateDaysBetween(row.leadCreatedDate, row.closeDate);
+                                      const daysUntilClose = calculateDaysUntil(row.closeDate);
+                                      return (
+                                        <tr
+                                          key={`whatif-row-${row.id}`}
+                                          className={`border-b last:border-b-0 ${rowDisabled ? 'bg-gray-100/70 text-gray-400' : ''}`}
+                                        >
+                                          <td className="px-2 py-1.5 text-center">
+                                            <input
+                                              type="checkbox"
+                                              checked={!rowDisabled}
+                                              onChange={() => togglePipelineRowDisabled(row)}
+                                              className="h-4 w-4 accent-indigo-600"
+                                              title="Datensatz aktiv/inaktiv"
+                                            />
+                                          </td>
+                                          <td className="px-2 py-1.5">
+                                            <div className="font-medium text-gray-800">{row.name}</div>
+                                            <div className="text-[11px] text-gray-500">OAK: {row.oakId ?? '-'}</div>
+                                          </td>
+                                          <td className="px-2 py-1.5">
+                                            <span className={`inline-flex rounded px-2 py-0.5 text-xs font-medium ${stageCfg.bg} ${stageCfg.color}`}>
+                                              {stageCfg.label}
+                                            </span>
+                                          </td>
+                                          <td className="px-2 py-1.5 text-right">
+                                            {(row.stageKey === 'close_won' || row.stageKey === 'close_lost') && leadToCloseDays !== null
+                                              ? `${leadToCloseDays}d`
+                                              : '-'}
+                                          </td>
+                                          <td className="px-2 py-1.5 text-gray-700">{row.owner || '-'}</td>
+                                          <td className="px-2 py-1.5 text-gray-700">{row.leadSource || '-'}</td>
+                                          <td className="px-2 py-1.5 text-right text-blue-700">{formatCurrency(row.arr)}</td>
+                                          <td className="px-2 py-1.5 text-right text-gray-700">
+                                            {row.probability === null ? '-' : `${(row.probability * 100).toFixed(0)}%`}
+                                          </td>
+                                          <td className="px-2 py-1.5 text-right text-emerald-700">{formatCurrency(row.weightedArr)}</td>
+                                          <td className="px-2 py-1.5 text-gray-700">
+                                            {row.filterDate ? new Date(row.filterDate).toLocaleDateString('de-DE') : '-'}
+                                          </td>
+                                          <td className="px-2 py-1.5 text-gray-700">
+                                            {row.closeDate ? new Date(row.closeDate).toLocaleDateString('de-DE') : '-'}
+                                          </td>
+                                          <td className="px-2 py-1.5 text-right text-gray-700">
+                                            {daysUntilClose === null ? '-' : daysUntilClose}
+                                          </td>
+                                        </tr>
+                                      );
+                                    })
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
 
                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <div
-                    ref={salespipeMainTopScrollRef}
-                    onScroll={handleTopScroll}
-                    style={{ overflowX: 'scroll', overflowY: 'hidden', height: 10, marginBottom: -1 }}
+                  <button
+                    type="button"
+                    onClick={() => setSalespipeDatasetExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition border-b border-gray-200"
                   >
-                    <div style={{ width: salespipeMainTableMinWidth, height: 1 }} />
-                  </div>
-                <div
-                  ref={salespipeMainBottomScrollRef}
-                  onScroll={handleBottomScroll}
-                  style={{ overflowX: 'auto' }}
-                  className="pb-2"
-                >
-                  <table style={{ minWidth: salespipeMainTableMinWidth }} className="text-xs table-fixed">
+                    <span className="text-sm font-semibold text-gray-700">Datensätze (Sales Pipe)</span>
+                    <span className="text-sm text-gray-500">{salespipeDatasetExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}</span>
+                  </button>
+                  {salespipeDatasetExpanded && (
+                    <>
+                      <div
+                        ref={salespipeMainTopScrollRef}
+                        onScroll={handleTopScroll}
+                        style={{ overflowX: 'scroll', overflowY: 'hidden', height: 10, marginBottom: -1 }}
+                      >
+                        <div style={{ width: salespipeMainTableMinWidth, height: 1 }} />
+                      </div>
+                    <div
+                      ref={salespipeMainBottomScrollRef}
+                      onScroll={handleBottomScroll}
+                      style={{ overflowX: 'auto' }}
+                      className="pb-2"
+                    >
+                      <table style={{ minWidth: salespipeMainTableMinWidth }} className="text-xs table-fixed">
                     <colgroup>
                       {salespipeMainColWidths.map((width, idx) => (
                         <col key={`salespipe-col-${idx}`} style={{ width }} />
@@ -4398,16 +6119,18 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                     <thead className="bg-gray-50">
                       <tr>
                         {[
+                          { label: 'Aktiv', align: 'text-center' },
                           { label: 'Datensatz', align: 'text-left' },
                           { label: 'Stage', align: 'text-left' },
+                          { label: 'Tage', align: 'text-right' },
                           { label: 'Owner', align: 'text-left' },
                           { label: 'Leadsource', align: 'text-left' },
                           { label: 'ARR', align: 'text-right' },
                           { label: 'Probability', align: 'text-right' },
                           { label: 'Weighted ARR', align: 'text-right' },
                           { label: 'Match', align: 'text-left' },
+                          { label: 'Angelegt am', align: 'text-left' },
                           { label: 'Schlusstermin', align: 'text-left' },
-                          { label: 'Lead erstellt am', align: 'text-left' },
                           { label: 'Tage bis Schlusstermin', align: 'text-right' },
                         ].map((column, index) => (
                           <th
@@ -4427,7 +6150,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                     <tbody>
                       {filteredSalespipeRows.length === 0 ? (
                         <tr>
-                          <td colSpan={11} className="px-2 py-8 text-center text-gray-500">
+                          <td colSpan={13} className="px-2 py-8 text-center text-gray-500">
                             Keine Pipeline-Daten für die aktuelle Auswahl.
                           </td>
                         </tr>
@@ -4437,9 +6160,23 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                           .sort((a, b) => b.arr - a.arr)
                           .map((row) => {
                             const stageCfg = PIPELINE_STAGE_CONFIG.find((cfg) => cfg.key === row.stageKey) || PIPELINE_STAGE_CONFIG[0];
+                            const rowDisabled = isPipelineRowDisabled(row);
                             const leadToCloseDays = calculateDaysBetween(row.leadCreatedDate, row.closeDate);
+                            const daysUntilClose = calculateDaysUntil(row.closeDate);
                             return (
-                              <tr key={row.id} className="border-b last:border-b-0">
+                              <tr
+                                key={row.id}
+                                className={`border-b last:border-b-0 ${rowDisabled ? 'bg-gray-100/70 text-gray-400' : ''}`}
+                              >
+                                <td className="px-2 py-1.5 text-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={!rowDisabled}
+                                    onChange={() => togglePipelineRowDisabled(row)}
+                                    className="h-4 w-4 accent-indigo-600"
+                                    title="Datensatz aktiv/inaktiv"
+                                  />
+                                </td>
                                 <td className="px-2 py-1.5">
                                   <div className="font-medium text-gray-800">
                                     {row.opportunityId ? (
@@ -4462,6 +6199,13 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                                     {stageCfg.label}
                                   </span>
                                 </td>
+                                <td className="px-2 py-1.5 text-right">
+                                  {(row.stageKey === 'close_won' || row.stageKey === 'close_lost') && leadToCloseDays !== null ? (
+                                    <span className={`font-medium ${row.stageKey === 'close_won' ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                      {leadToCloseDays}d
+                                    </span>
+                                  ) : '-'}
+                                </td>
                                 <td className="px-2 py-1.5 text-gray-700">{row.owner || '-'}</td>
                                 <td className="px-2 py-1.5 text-gray-700">{row.leadSource || '-'}</td>
                                 <td className="px-2 py-1.5 text-right text-blue-700">{formatCurrency(row.arr)}</td>
@@ -4473,35 +6217,47 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                                   {row.matchedSignupName || '-'}
                                 </td>
                                 <td className="px-2 py-1.5 text-gray-700">
-                                  {row.closeDate ? new Date(row.closeDate).toLocaleDateString('de-DE') : '-'}
+                                  {row.filterDate ? new Date(row.filterDate).toLocaleDateString('de-DE') : '-'}
                                 </td>
                                 <td className="px-2 py-1.5 text-gray-700">
-                                  {row.leadCreatedDate ? new Date(row.leadCreatedDate).toLocaleDateString('de-DE') : '-'}
+                                  {row.closeDate ? new Date(row.closeDate).toLocaleDateString('de-DE') : '-'}
                                 </td>
                                 <td className="px-2 py-1.5 text-right text-gray-700">
-                                  {leadToCloseDays === null ? '-' : leadToCloseDays}
+                                  {daysUntilClose === null ? '-' : daysUntilClose}
                                 </td>
                               </tr>
                             );
                           })
                       )}
                     </tbody>
-                  </table>
-                </div>
+                      </table>
+                    </div>
+                    </>
+                  )}
                 </div>
 
                 <div style={{ overflowX: 'auto', width: '100%' }} className="bg-white rounded-xl shadow-sm border border-rose-200 pb-2">
-                  <div className="px-4 py-3 border-b border-rose-200 bg-rose-50 flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setOverdueOpportunitiesExpanded((prev) => !prev)}
+                    className="w-full px-4 py-3 border-b border-rose-200 bg-rose-50 flex items-center justify-between text-left hover:bg-rose-100 transition"
+                  >
                     <div>
                       <h4 className="text-sm font-semibold text-rose-800">Überfällige Opportunities (nach Probability-Stage-Regeln)</h4>
                       <p className="text-xs text-rose-700">
                         Nur offene Opportunities (ohne SQL). Direktlink öffnet den Salesforce-Datensatz.
                       </p>
                     </div>
-                    <span className="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-800">
-                      {overdueOpportunities.length} überfällig
-                    </span>
-                  </div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-800">
+                        {overdueOpportunities.length} überfällig
+                      </span>
+                      <span className="text-xs text-rose-700">
+                        {overdueOpportunitiesExpanded ? 'Ausblenden ▴' : 'Einblenden ▾'}
+                      </span>
+                    </div>
+                  </button>
+                  {overdueOpportunitiesExpanded && (
                   <table style={{ minWidth: 1120 }} className="w-full text-xs">
                     <thead className="bg-gray-50">
                       <tr>
@@ -4569,6 +6325,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                       )}
                     </tbody>
                   </table>
+                  )}
                 </div>
               </>
             )}
@@ -4576,7 +6333,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
         )}
 
         {/* YTD Summary – wie Jahresübersicht, basierend auf zentralen DLT-Settings (ohne Provision) */}
-        {reportType === 'ytd' && (
+        {reportCategory === 'new_sales_arr' && reportType === 'ytd' && (
           <div className="space-y-6">
             <div className="rounded-xl bg-white shadow-sm border border-gray-200 overflow-hidden">
               <button
@@ -4937,6 +6694,527 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
             </div>
           </div>
         )}
+
+        {reportCategory === 'expanding_arr' && (() => {
+          const nrrBasis = planzahlen?.expanding_arr_data?.nrr_basis;
+          const arrBasisDec = Number(nrrBasis?.arr_basis_dec) || 0;
+          const arrBasisJanEnd = Number(nrrBasis?.arr_basis_jan_end) || 0;
+          const hasBasis = arrBasisJanEnd > 0;
+
+          // Hilfsfunktionen
+          const getUpDownsell = (monthKey: string) =>
+            upDownsellsData.find((r) => r.month === monthKey) ?? { netGrowthArr: 0, netLossArr: 0, netArr: 0 };
+          const getSmsMrr = (monthKey: string) =>
+            smsData.find((r) => r.month === monthKey)?.mrr ?? null;
+          const getPhorestPay = (monthKey: string) =>
+            phorestPayData.find((r) => r.month === monthKey)?.dachValue ?? null;
+
+          // Januar = Referenzmonat (automatisch aus Import)
+          const janKey = `${selectedYear}-01`;
+          const janSmsMrr = getSmsMrr(janKey);
+          const janPayValMonthly = getPhorestPay(janKey);
+          const janPayVal = janPayValMonthly !== null ? janPayValMonthly * 12 : null;
+          const hasJanSmsRef = janSmsMrr !== null;
+          const hasJanPayRef = janPayVal !== null;
+
+          // Alle 12 Monate aufbauen
+          // Januar: isRef=true (wird angezeigt, aber nicht in NRR gerechnet)
+          // Feb–Dez: Delta vs. Januar
+          const months = Array.from({ length: 12 }, (_, i) => {
+            const monthNum = i + 1;
+            const monthKey = `${selectedYear}-${String(monthNum).padStart(2, '0')}`;
+            const isRef = monthNum === 1;
+            const upDown = getUpDownsell(monthKey);
+            const smsMrr = getSmsMrr(monthKey);
+            const payValMonthly = getPhorestPay(monthKey);
+            // Expanding ARR arbeitet ARR-basiert: Monatswert auf ARR annualisieren.
+            const payVal = payValMonthly !== null ? payValMonthly * 12 : null;
+            // Delta gegen Januar-Basis (ab Feb); ARR-Betrachtung: MRR × 12
+            const smsDelta = !isRef && smsMrr !== null && hasJanSmsRef
+              ? (smsMrr - janSmsMrr!) * 12
+              : null;
+            const payDelta = !isRef && payVal !== null && hasJanPayRef
+              ? payVal - janPayVal!
+              : null;
+            return { monthKey, monthNum, isRef, upDown, smsMrr, payVal, smsDelta, payDelta };
+          });
+
+          // Churn: Total ARR Lost (Scheduled + Non-Scheduled), identisch zu „Churn pro Monat“
+          const churnByMonth = churnTotalArrLostByMonth;
+
+          // YTD: nur Feb–aktueller Monat (Januar ausgeschlossen)
+          const rollingMonths = months.filter((m) => !m.isRef);
+          const ytdRollingMonths = rollingMonths.slice(0, Math.max(0, currentMonth)); // currentMonth=0 → Jan, also Feb ist idx 0 in rolling
+          const ytdUpDown = ytdRollingMonths.reduce((s, m) => s + m.upDown.netArr, 0);
+          const ytdGrowthArr = ytdRollingMonths.filter(m => m.upDown.netGrowthArr > 0).reduce((s, m) => s + m.upDown.netGrowthArr, 0);
+          const ytdLossArr = ytdRollingMonths.reduce((s, m) => s + m.upDown.netLossArr, 0);
+          const ytdSmsDelta = ytdRollingMonths.reduce((s, m) => s + (m.smsDelta ?? 0), 0);
+          const ytdLatestPayMonth = [...ytdRollingMonths].reverse().find((m) => m.payDelta !== null);
+          const ytdPayDelta = ytdLatestPayMonth?.payDelta ?? 0;
+          const ytdChurn = churnByMonth.slice(1, currentMonth + 1).reduce((s, v) => s + v, 0); // ab Feb
+          const ytdNetMovement = ytdUpDown + ytdSmsDelta + ytdPayDelta - ytdChurn;
+          const ytdEndArr = arrBasisJanEnd + ytdNetMovement;
+          const ytdNrr =
+            arrBasisJanEnd > 0 && ytdRollingMonths.length > 0 ? (ytdEndArr / arrBasisJanEnd) * 100 : null;
+
+          // Quartalswerte: Q1 = nur Feb+Mär (Jan = Referenz), Q2–Q4 normal
+          const quarters = [
+            { label: 'Q1 (Feb–Mär)', monthIdxs: [1, 2] },
+            { label: 'Q2', monthIdxs: [3, 4, 5] },
+            { label: 'Q3', monthIdxs: [6, 7, 8] },
+            { label: 'Q4', monthIdxs: [9, 10, 11] },
+          ].map(({ label, monthIdxs }) => {
+            const netUpDown = monthIdxs.reduce((s, i) => s + months[i].upDown.netArr, 0);
+            const smsDelta = monthIdxs.reduce((s, i) => s + (months[i].smsDelta ?? 0), 0);
+            const latestPayMonth = [...monthIdxs].reverse().map((i) => months[i]).find((m) => m.payDelta !== null);
+            const payDelta = latestPayMonth?.payDelta ?? 0;
+            const churn = monthIdxs.reduce((s, i) => s + churnByMonth[i], 0);
+            const net = netUpDown + smsDelta + payDelta - churn;
+            return { label, netUpDown, smsDelta, payDelta, churn, net };
+          });
+
+          const nrrColor = (v: number | null) => {
+            if (v === null) return 'text-gray-400';
+            if (v >= 100) return 'text-emerald-600 font-semibold';
+            if (v >= 95) return 'text-yellow-600 font-semibold';
+            return 'text-red-600 font-semibold';
+          };
+
+          return (
+            <div className="space-y-6">
+              {/* Basiswert-Hinweis */}
+              {!hasBasis && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                  <strong>Berechnungsbasis fehlt:</strong> Bitte trage unter <em>Planzahlen → NRR Basiswerte</em> den <strong>ARR-Stand Ende Januar</strong> des Planjahres ein (Ausgangspunkt für NRR). Der Wert per 31.12. ist nur Referenz.
+                </div>
+              )}
+              {(!hasJanSmsRef || !hasJanPayRef) && (
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 text-xs text-blue-700">
+                  <strong>Hinweis:</strong> {!hasJanSmsRef && 'SMS-Januar-Daten nicht importiert — SMS-Delta nicht berechenbar. '}
+                  {!hasJanPayRef && 'Phorest Pay Net Margin (DACH) Januar nicht importiert — Pay-Delta nicht berechenbar. '}
+                  Januar dient als automatischer Referenzmonat für SMS- und Pay-Deltas (ersetzt Dezember-Basis).
+                </div>
+              )}
+
+              {/* KPI-Übersicht */}
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-2 lg:grid-cols-4">
+                <div className="space-y-2">
+                  <div className="rounded-xl bg-white border-2 border-indigo-200 shadow-sm p-4">
+                    <div className="text-xs text-gray-500 mb-1">ARR Ende Jan. (Berechnungsbasis)</div>
+                    <div className="text-lg font-bold text-gray-800">
+                      {arrBasisJanEnd > 0 ? formatCurrency(arrBasisJanEnd) : '—'}
+                    </div>
+                    <div className="text-xs text-gray-400 mt-0.5">Fortschreibung ab Feb.</div>
+                  </div>
+                  <div className="rounded-lg bg-white border border-gray-200 shadow-sm p-3">
+                    <div className="text-[11px] text-gray-500 mb-0.5">ARR Referenz 31.12.</div>
+                    <div className="text-sm font-semibold text-gray-600">
+                      {arrBasisDec > 0 ? formatCurrency(arrBasisDec) : '—'}
+                    </div>
+                    <div className="text-[11px] text-gray-400 mt-0.5">nur Kontext</div>
+                  </div>
+                </div>
+                <div className="rounded-xl bg-white border border-gray-200 shadow-sm p-4">
+                  <div className="text-xs text-gray-500 mb-1">ARR aktuell (YTD)</div>
+                  <div className="text-lg font-bold text-gray-800">
+                    {hasBasis && ytdRollingMonths.length > 0 ? formatCurrency(ytdEndArr) : '—'}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-0.5">Ende Jan. + Net Movement</div>
+                </div>
+                <div className="rounded-xl bg-white border border-gray-200 shadow-sm p-4">
+                  <div className="text-xs text-gray-500 mb-1">YTD Net Movement</div>
+                  <div className={`text-lg font-bold ${ytdNetMovement >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {hasBasis && ytdRollingMonths.length > 0 ? `${ytdNetMovement >= 0 ? '+' : ''}${formatCurrency(ytdNetMovement)}` : '—'}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-0.5">Feb–heute, Expansion − Churn</div>
+                </div>
+                <div className="rounded-xl bg-white border border-gray-200 shadow-sm p-4">
+                  <div className="text-xs text-gray-500 mb-1">NRR YTD (ab Feb)</div>
+                  <div className={`text-2xl ${nrrColor(ytdNrr)}`}>
+                    {ytdNrr !== null ? `${ytdNrr.toFixed(1)}%` : '—'}
+                  </div>
+                  <div className="text-xs text-gray-400 mt-0.5">gegen ARR Ende Jan.</div>
+                </div>
+              </div>
+
+              {/* Kompakte YTD-Pillar-Zusammenfassung */}
+              <div className="bg-white rounded-xl shadow-md border-2 border-indigo-200 overflow-hidden">
+                <div className="px-5 py-3 border-b border-indigo-100 bg-indigo-50">
+                  <h4 className="text-sm font-semibold text-indigo-800">YTD Pillar-Übersicht <span className="text-xs font-normal text-indigo-500 ml-1">(aus der Monatsübersicht, ab Feb)</span></h4>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-indigo-100 bg-white text-gray-500">
+                        <th className="px-4 py-2 text-left font-medium">Zeitraum</th>
+                        <th className="px-4 py-2 text-right font-medium">Net Up/Down</th>
+                        <th className="px-4 py-2 text-right font-medium">SMS-Delta ARR</th>
+                        <th className="px-4 py-2 text-right font-medium">Pay-Delta</th>
+                        <th className="px-4 py-2 text-right font-medium">Churn</th>
+                        <th className="px-4 py-2 text-right font-medium">Net Movement</th>
+                        <th className="px-4 py-2 text-right font-medium">NRR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="bg-indigo-50/80 font-semibold">
+                        <td className="px-4 py-3 text-gray-700">YTD (ab Feb)</td>
+                        <td className={`px-4 py-3 text-right ${ytdUpDown >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {ytdUpDown !== 0 ? `${ytdUpDown >= 0 ? '+' : ''}${formatCurrency(ytdUpDown)}` : '—'}
+                        </td>
+                        <td className={`px-4 py-3 text-right ${ytdSmsDelta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {hasJanSmsRef ? `${ytdSmsDelta >= 0 ? '+' : ''}${formatCurrency(ytdSmsDelta)}` : '—'}
+                        </td>
+                        <td className={`px-4 py-3 text-right ${ytdPayDelta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {hasJanPayRef ? `${ytdPayDelta >= 0 ? '+' : ''}${formatCurrency(ytdPayDelta)}` : '—'}
+                        </td>
+                        <td className="px-4 py-3 text-right text-red-500">
+                          {ytdChurn > 0 ? `−${formatCurrency(ytdChurn)}` : '—'}
+                        </td>
+                        <td className={`px-4 py-3 text-right ${ytdNetMovement >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                          {hasBasis && ytdRollingMonths.length > 0 ? `${ytdNetMovement >= 0 ? '+' : ''}${formatCurrency(ytdNetMovement)}` : '—'}
+                        </td>
+                        <td className={`px-4 py-3 text-right ${nrrColor(ytdNrr)}`}>
+                          {ytdNrr !== null ? `${ytdNrr.toFixed(1)}%` : '—'}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Quartalssicht */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                <div className="px-5 py-3 border-b border-gray-100 bg-gray-50">
+                  <h4 className="text-sm font-semibold text-gray-700">Quartalsübersicht NRR <span className="text-xs font-normal text-gray-400 ml-1">(Jan = Referenzmonat, nicht gerechnet)</span></h4>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-gray-100 bg-gray-50 text-gray-500">
+                        <th className="px-4 py-2 text-left font-medium">Quartal</th>
+                        <th className="px-4 py-2 text-right font-medium">Up-/Downsell netto</th>
+                        <th className="px-4 py-2 text-right font-medium">SMS-Delta</th>
+                        <th className="px-4 py-2 text-right font-medium">Pay-Delta</th>
+                        <th className="px-4 py-2 text-right font-medium">Churn</th>
+                        <th className="px-4 py-2 text-right font-medium">Net Movement</th>
+                        <th className="px-4 py-2 text-right font-medium">NRR %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {quarters.map((q) => {
+                        const endArr = arrBasisJanEnd > 0 ? arrBasisJanEnd + q.net : null;
+                        const qNrr = endArr !== null && arrBasisJanEnd > 0 ? (endArr / arrBasisJanEnd) * 100 : null;
+                        return (
+                          <tr key={q.label} className="border-b border-gray-50 hover:bg-gray-50">
+                            <td className="px-4 py-2 font-semibold text-gray-700">{q.label}</td>
+                            <td className={`px-4 py-2 text-right ${q.netUpDown >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                              {q.netUpDown !== 0 ? `${q.netUpDown >= 0 ? '+' : ''}${formatCurrency(q.netUpDown)}` : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right ${q.smsDelta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                              {hasJanSmsRef ? `${q.smsDelta >= 0 ? '+' : ''}${formatCurrency(q.smsDelta)}` : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right ${q.payDelta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                              {hasJanPayRef ? `${q.payDelta >= 0 ? '+' : ''}${formatCurrency(q.payDelta)}` : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right text-red-500">
+                              {q.churn > 0 ? `−${formatCurrency(q.churn)}` : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right font-semibold ${q.net >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                              {hasBasis ? `${q.net >= 0 ? '+' : ''}${formatCurrency(q.net)}` : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right ${nrrColor(qNrr)}`}>
+                              {qNrr !== null ? `${qNrr.toFixed(1)}%` : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Monatstabelle */}
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                <div className="px-5 py-3 border-b border-gray-100 bg-gray-50">
+                  <h4 className="text-sm font-semibold text-gray-700">Monatliche ARR-Bewegung (Pillar-Ansicht)</h4>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-gray-100 bg-gray-50 text-gray-500">
+                        <th className="px-4 py-2 text-left font-medium w-16">Monat</th>
+                        <th className="px-4 py-2 text-right font-medium">Up-Sell</th>
+                        <th className="px-4 py-2 text-right font-medium">Down-Sell</th>
+                        <th className="px-4 py-2 text-right font-medium">Net Up/Down</th>
+                        <th className="px-4 py-2 text-right font-medium">SMS ARR</th>
+                        <th className="px-4 py-2 text-right font-medium">SMS-Delta ARR</th>
+                        <th className="px-4 py-2 text-right font-medium">Pay Net Margin (DACH, ARR)</th>
+                        <th className="px-4 py-2 text-right font-medium">Pay-Delta</th>
+                        <th className="px-4 py-2 text-right font-medium">Churn</th>
+                        <th className="px-4 py-2 text-right font-medium">Net Movement</th>
+                        <th className="px-4 py-2 text-right font-medium">NRR</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {months.map(({ monthNum, monthKey, isRef, upDown, smsMrr, payVal, smsDelta, payDelta }) => {
+                        const churn = churnByMonth[monthNum - 1] ?? 0;
+                        const smsDeltaVal = isRef ? 0 : smsDelta ?? 0;
+                        const payDeltaVal = isRef ? 0 : payDelta ?? 0;
+                        const netMovement = isRef ? 0 : upDown.netArr + smsDeltaVal + payDeltaVal - churn;
+                        const endArr =
+                          arrBasisJanEnd > 0
+                            ? arrBasisJanEnd + netMovement
+                            : null;
+                        const monthNrr =
+                          endArr !== null && arrBasisJanEnd > 0 ? (endArr / arrBasisJanEnd) * 100 : null;
+                        const hasData = isRef || upDown.netArr !== 0 || smsMrr !== null || payVal !== null || churn > 0;
+                        return (
+                          <tr key={monthKey} className={`border-b ${isRef ? 'bg-indigo-50 font-semibold' : !hasData ? 'opacity-40' : 'hover:bg-gray-50'}`}>
+                            <td className={`px-4 py-2 ${isRef ? 'font-bold text-indigo-700' : 'font-medium text-gray-700'}`}>
+                              {isRef ? 'DELTA Jan.' : MONTH_NAMES_SHORT[monthNum - 1]}
+                            </td>
+                            <td className="px-4 py-2 text-right text-emerald-600">
+                              {!isRef && upDown.netGrowthArr > 0 ? `+${formatCurrency(upDown.netGrowthArr)}` : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right text-red-500">
+                              {!isRef && upDown.netLossArr < 0 ? formatCurrency(upDown.netLossArr) : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right font-medium ${upDown.netArr >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                              {!isRef && upDown.netArr !== 0 ? `${upDown.netArr >= 0 ? '+' : ''}${formatCurrency(upDown.netArr)}` : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right text-gray-600">
+                              {smsMrr !== null ? formatCurrency(smsMrr * 12) : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right ${smsDelta !== null ? (smsDelta >= 0 ? 'text-emerald-600' : 'text-red-500') : 'text-gray-400'}`}>
+                              {isRef && hasJanSmsRef ? formatCurrency(0) : smsDelta !== null ? `${smsDelta >= 0 ? '+' : ''}${formatCurrency(smsDelta)}` : smsMrr !== null ? '—' : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right text-gray-600">
+                              {payVal !== null ? formatCurrency(payVal) : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right ${payDelta !== null ? (payDelta >= 0 ? 'text-emerald-600' : 'text-red-500') : 'text-gray-400'}`}>
+                              {isRef && hasJanPayRef ? formatCurrency(0) : payDelta !== null ? `${payDelta >= 0 ? '+' : ''}${formatCurrency(payDelta)}` : payVal !== null ? '—' : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right text-red-500">
+                              {!isRef && churn > 0 ? `−${formatCurrency(churn)}` : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right font-semibold ${!hasData ? 'text-gray-300' : netMovement >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                              {hasBasis ? (isRef ? formatCurrency(0) : `${netMovement >= 0 ? '+' : ''}${formatCurrency(netMovement)}`) : '—'}
+                            </td>
+                            <td className={`px-4 py-2 text-right text-sm ${nrrColor(monthNrr)}`}>
+                              {hasData && monthNrr !== null ? `${monthNrr.toFixed(1)}%` : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t-2 border-gray-200 bg-gray-50 font-semibold">
+                        <td className="px-4 py-2 text-gray-700">YTD (ab Feb)</td>
+                        <td className="px-4 py-2 text-right text-emerald-600">
+                          {ytdGrowthArr > 0 ? `+${formatCurrency(ytdGrowthArr)}` : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right text-red-500">
+                          {ytdLossArr < 0 ? formatCurrency(ytdLossArr) : '—'}
+                        </td>
+                        <td className={`px-4 py-2 text-right ${ytdUpDown >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {ytdUpDown !== 0 ? `${ytdUpDown >= 0 ? '+' : ''}${formatCurrency(ytdUpDown)}` : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right text-gray-500">—</td>
+                        <td className={`px-4 py-2 text-right ${ytdSmsDelta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {hasJanSmsRef ? `${ytdSmsDelta >= 0 ? '+' : ''}${formatCurrency(ytdSmsDelta)}` : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right text-gray-500">—</td>
+                        <td className={`px-4 py-2 text-right ${ytdPayDelta >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                          {hasJanPayRef ? `${ytdPayDelta >= 0 ? '+' : ''}${formatCurrency(ytdPayDelta)}` : '—'}
+                        </td>
+                        <td className="px-4 py-2 text-right text-red-500">
+                          {ytdChurn > 0 ? `−${formatCurrency(ytdChurn)}` : '—'}
+                        </td>
+                        <td className={`px-4 py-2 text-right ${ytdNetMovement >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                          {hasBasis && ytdRollingMonths.length > 0 ? `${ytdNetMovement >= 0 ? '+' : ''}${formatCurrency(ytdNetMovement)}` : '—'}
+                        </td>
+                        <td className={`px-4 py-2 text-right text-sm ${nrrColor(ytdNrr)}`}>
+                          {ytdNrr !== null ? `${ytdNrr.toFixed(1)}%` : '—'}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+
+              {/* Legende */}
+              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-500 space-y-1">
+                <p><strong>NRR (ARR-basiert):</strong> (ARR Ende Januar + Net Movement) / ARR Ende Januar × 100 — rollierend ab Februar; 31.12.-Referenz nur Anzeige</p>
+                <p><strong>Januar = Referenzmonat:</strong> SMS- und Pay-Basiswert werden automatisch aus dem Januar-Import abgeleitet. Januar wird als fette DELTA-Basiszeile angezeigt, fließt aber nicht in NRR/YTD ein.</p>
+                <p><strong>SMS ARR:</strong> SMS MRR × 12. <strong>SMS-Delta ARR:</strong> SMS ARR Monat − SMS ARR Januar — {smsData.length > 0 ? `${smsData.length} Monate importiert` : 'keine Daten für dieses Jahr'}{hasJanSmsRef ? `, Januar-Basis: ${formatCurrency(janSmsMrr! * 12)} ARR` : ', Januar-Daten fehlen'}</p>
+                <p><strong>Pay-Delta:</strong> Monatswert = (Phorest Pay Net Margin (DACH) Monat × 12) − Januar-Basis; YTD = letzter verfügbarer Pay-ARR-Stand − Januar-Basis (Import: <em>net_margin</em>/<em>margin</em>-CSV aus der Phorest-Pay-ZIP) — {phorestPayData.length > 0 ? `${phorestPayData.length} Monate` : 'keine Daten für dieses Jahr'}{hasJanPayRef ? `, Januar ARR: ${formatCurrency(janPayVal!)}` : ', Januar fehlt'}</p>
+                <p><strong>Up-/Downsell:</strong> Aus importierten Up-Downsells Events ({upDownsellsData.length} Einträge für {selectedYear})</p>
+                <p><strong>Churn:</strong> Total ARR Lost pro Monat (Scheduled + Non-Scheduled), wie unter „Churn pro Monat“. YTD-Summe ab Februar — ohne Januar, da die Berechnungsbasis ARR Ende Januar den Januar-Churn bereits enthält.</p>
+              </div>
+            </div>
+          );
+        })()}
+
+        {reportCategory === 'total_business_arr' && (
+          <div className="space-y-4">
+            {!totalBusinessReport.hasBeginningArr && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                <strong>Beginning ARR fehlt:</strong> Bitte unter <em>Planzahlen → NRR Basiswerte</em> den
+                ARR-Stand Ende Januar pflegen. Ohne diesen Startwert bleiben Beginning/Ending ARR und
+                Retention-Metriken leer.
+              </div>
+            )}
+
+            <div className="rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden">
+              <div className="border-b border-gray-200 bg-white px-5 py-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-800">Total Business ARR</h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      Startbasis ist ARR Ende Januar; die monatliche Fortschreibung beginnt ab Februar.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs sm:min-w-[360px]">
+                    <div className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+                      <div className="text-indigo-600">Startbasis Ende Jan.</div>
+                      <div className="mt-0.5 text-sm font-bold text-slate-800">
+                        {totalBusinessReport.arrBasisJanEnd > 0 ? formatCurrency(totalBusinessReport.arrBasisJanEnd) : '—'}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                      <div className="text-gray-500">ARR 31.12. Kontext</div>
+                      <div className="mt-0.5 text-sm font-semibold text-gray-700">
+                        {totalBusinessReport.arrBasisDec > 0 ? formatCurrency(totalBusinessReport.arrBasisDec) : '—'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div
+                ref={totalBusinessTopScrollRef}
+                onScroll={handleTotalBusinessTopScroll}
+                className="border-b border-gray-100 overflow-x-scroll overflow-y-hidden"
+                style={{ height: 14 }}
+                aria-label="Total Business ARR horizontal scroll"
+              >
+                <div className="min-w-[2450px] h-1" />
+              </div>
+              <div
+                ref={totalBusinessBottomScrollRef}
+                onScroll={handleTotalBusinessBottomScroll}
+                className="max-w-full overflow-x-scroll pb-3"
+              >
+                <table className="min-w-[2450px] w-full border-collapse text-[11px]">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-600">
+                      <th className="sticky left-0 z-20 w-64 min-w-64 border-r border-gray-200 bg-gray-50 px-3 py-2 text-left font-semibold">
+                        Metric
+                      </th>
+                      <th className="border-r border-indigo-200 bg-indigo-50 px-3 py-2 text-center font-semibold text-indigo-700">
+                        Startbasis Ende Jan.
+                      </th>
+                      {MONTH_NAMES.slice(1).map((month) => (
+                        <th key={month} colSpan={2} className="border-r border-gray-200 px-3 py-2 text-center font-semibold">
+                          {month}
+                        </th>
+                      ))}
+                    </tr>
+                    <tr className="bg-white text-[10px] uppercase tracking-wide text-gray-400">
+                      <th className="sticky left-0 z-20 border-r border-gray-200 bg-white px-3 py-2 text-left font-medium">
+                        &nbsp;
+                      </th>
+                      <th className="min-w-28 border-r border-indigo-200 bg-indigo-50/60 px-2 py-2 text-right font-medium text-indigo-500">
+                        Basis
+                      </th>
+                      {MONTH_NAMES.slice(1).flatMap((month) => [
+                        <th key={`${month}-actual`} className="min-w-20 border-r border-gray-100 px-2 py-2 text-right font-medium">
+                          Actual
+                        </th>,
+                        <th key={`${month}-plan`} className="min-w-24 border-r border-gray-200 px-2 py-2 text-right font-medium">
+                          Commercial plan
+                        </th>,
+                      ])}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {totalBusinessReport.rows.map((row, rowIdx) => {
+                      if (row.type === 'section') {
+                        return (
+                          <tr key={`${row.label}-${rowIdx}`} className="bg-violet-100/70">
+                            <td className="sticky left-0 z-10 border-r border-violet-200 bg-violet-100 px-3 py-2 font-bold text-slate-800">
+                              {row.label}
+                            </td>
+                            <td colSpan={23} className="border-r border-violet-200 px-2 py-2" />
+                          </tr>
+                        );
+                      }
+
+                      const formatTotalBusinessCell = (value: number | null) => {
+                        if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+                        if (row.format === 'currency') return formatCurrency(value);
+                        if (row.format === 'percent') return `${(value * 100).toFixed(1)}%`;
+                        return Math.round(value).toLocaleString('de-DE');
+                      };
+
+                      const startBasisValue =
+                        totalBusinessReport.hasBeginningArr &&
+                        (row.label === 'Beginning ARR' || row.label === 'Ending ARR')
+                          ? totalBusinessReport.arrBasisJanEnd
+                          : null;
+
+                      return (
+                        <tr key={`${row.label}-${rowIdx}`} className="border-b border-gray-100 hover:bg-gray-50">
+                          <td className="sticky left-0 z-10 border-r border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-700">
+                            {row.label}
+                          </td>
+                          <td className="border-r border-indigo-200 bg-indigo-50/40 px-2 py-1.5 text-right font-semibold tabular-nums text-indigo-700">
+                            {formatTotalBusinessCell(startBasisValue)}
+                          </td>
+                          {row.actual.slice(1).flatMap((actualValue, relativeIdx) => {
+                            const idx = relativeIdx + 1;
+                            const planValue = row.plan[idx] ?? null;
+                            const actualClass =
+                              actualValue !== null && row.format !== 'number'
+                                ? actualValue < 0
+                                  ? 'text-red-600'
+                                  : 'text-gray-800'
+                                : 'text-gray-800';
+                            const planClass =
+                              planValue !== null && row.format !== 'number'
+                                ? planValue < 0
+                                  ? 'text-red-500'
+                                  : 'text-gray-500'
+                                : 'text-gray-500';
+                            return [
+                              <td
+                                key={`${row.label}-${idx}-actual`}
+                                className={`border-r border-gray-100 px-2 py-1.5 text-right tabular-nums ${actualClass}`}
+                              >
+                                {formatTotalBusinessCell(actualValue)}
+                              </td>,
+                              <td
+                                key={`${row.label}-${idx}-plan`}
+                                className={`border-r border-gray-200 bg-gray-50/50 px-2 py-1.5 text-right tabular-nums ${planClass}`}
+                              >
+                                {formatTotalBusinessCell(planValue)}
+                              </td>,
+                            ];
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-xs text-gray-500 space-y-1">
+              <p><strong>Datenbasis:</strong> ARR 31.12. ist nur Kontext. Die Fortschreibung startet mit ARR Ende Januar; New Sales, Expanding und Churn werden ab Februar gerechnet.</p>
+              <p><strong>Bewegungen:</strong> New Sales ARR aus Go-Lives, Expanding ARR aus Up-/Downsells plus SMS/Pay-Delta, Churn ARR aus importierten Churn-Events.</p>
+              <p><strong>P&L:</strong> Revenue wird aus Ending ARR / 12 abgeleitet. Kosten-, EBITDA- und Rule-of-40-Zeilen bleiben leer, bis dafür eine belastbare Quelle angebunden ist.</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {selectedMonthDetail && (
@@ -5177,7 +7455,7 @@ export default function DLTStrategicReports({ user }: DLTStrategicReportsProps) 
                               </td>
                               <td className="px-3 py-2 text-right text-violet-700">{formatCurrency(Number(event.subs_revenue_lost) || 0)}</td>
                               <td className="px-3 py-2 text-right text-orange-700">{formatCurrency(Number(event.pay_revenue_lost) || 0)}</td>
-                              <td className="px-3 py-2 text-right font-medium text-red-700">{formatCurrency(Number(event.total_arr_lost) || 0)}</td>
+                              <td className="px-3 py-2 text-right font-medium text-red-700">{formatCurrency(effectiveTotalArrLost(event))}</td>
                             </tr>
                           ))}
                         </tbody>

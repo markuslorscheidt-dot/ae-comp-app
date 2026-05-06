@@ -16,6 +16,16 @@ import { ToastProvider } from '@/components/Toast';
 import { useLanguage } from '@/lib/LanguageContext';
 import { User } from '@/lib/types';
 
+const SELECTED_AREA_STORAGE_KEY = 'ae-comp-selected-area';
+
+function getStoredSelectedArea(): BusinessArea | null {
+  if (typeof window === 'undefined') return null;
+  const stored = window.localStorage.getItem(SELECTED_AREA_STORAGE_KEY);
+  return stored === 'new_business' || stored === 'dlt' || stored === 'expanding_business' || stored === 'marketing'
+    ? stored
+    : null;
+}
+
 // Wrapper für Admin-Panel vom Startbildschirm aus
 function GlobalAdminWrapper({ user, onBack, onSignOut }: { user: User; onBack: () => void; onSignOut: () => void }) {
   const { t } = useLanguage();
@@ -66,10 +76,26 @@ function GlobalAdminWrapper({ user, onBack, onSignOut }: { user: User; onBack: (
   );
 }
 
-function AppContent() {
-  const { user, loading, signIn, signUp, signOut, requestOnboardingAccess } = useAuth();
-  const [selectedArea, setSelectedArea] = useState<BusinessArea | null>(null);
+function AppContent({ auth }: { auth: ReturnType<typeof useAuth> }) {
+  const { user, loading, signIn, signUp, signOut, requestOnboardingAccess } = auth;
+  const [selectedArea, setSelectedArea] = useState<BusinessArea | null>(() => getStoredSelectedArea());
   const [showAdmin, setShowAdmin] = useState(false);
+
+  const handleSelectArea = (area: BusinessArea | null) => {
+    setSelectedArea(area);
+    if (area) {
+      window.localStorage.setItem(SELECTED_AREA_STORAGE_KEY, area);
+    } else {
+      window.localStorage.removeItem(SELECTED_AREA_STORAGE_KEY);
+    }
+  };
+
+  const handleSignOut = () => {
+    window.localStorage.removeItem(SELECTED_AREA_STORAGE_KEY);
+    setSelectedArea(null);
+    setShowAdmin(false);
+    signOut();
+  };
 
   // Loading State
   if (loading) {
@@ -94,7 +120,7 @@ function AppContent() {
       <GlobalAdminWrapper 
         user={user} 
         onBack={() => setShowAdmin(false)} 
-        onSignOut={signOut} 
+        onSignOut={handleSignOut} 
       />
     );
   }
@@ -104,9 +130,9 @@ function AppContent() {
     return (
       <AreaSelector 
         user={user} 
-        onSelectArea={setSelectedArea}
+        onSelectArea={handleSelectArea}
         onOpenAdmin={() => setShowAdmin(true)}
-        onSignOut={signOut}
+        onSignOut={handleSignOut}
       />
     );
   }
@@ -117,9 +143,9 @@ function AppContent() {
     return (
       <Dashboard 
         user={user} 
-        onSignOut={signOut}
+        onSignOut={handleSignOut}
         selectedArea={selectedArea}
-        onBackToAreaSelector={() => setSelectedArea(null)}
+        onBackToAreaSelector={() => handleSelectArea(null)}
       />
     );
   }
@@ -129,8 +155,8 @@ function AppContent() {
     return (
       <DLTDashboard 
         user={user}
-        onBack={() => setSelectedArea(null)}
-        onSignOut={signOut}
+        onBack={() => handleSelectArea(null)}
+        onSignOut={handleSignOut}
       />
     );
   }
@@ -140,20 +166,21 @@ function AppContent() {
     <AreaPlaceholder
       area={selectedArea}
       userName={user.name}
-      onBack={() => setSelectedArea(null)}
-      onSignOut={signOut}
+      onBack={() => handleSelectArea(null)}
+      onSignOut={handleSignOut}
     />
   );
 }
 
 export default function Home() {
-  const { user } = useAuth();
+  const auth = useAuth();
+  const { user } = auth;
   
   return (
     <LanguageProvider userId={user?.id}>
       <DataSourceProvider>
         <ToastProvider>
-          <AppContent />
+          <AppContent auth={auth} />
         </ToastProvider>
       </DataSourceProvider>
     </LanguageProvider>

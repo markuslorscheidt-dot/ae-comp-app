@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import { google } from 'googleapis';
 import Papa from 'papaparse';
 import AdmZip from 'adm-zip';
@@ -156,11 +157,8 @@ function getSummaryType(fileName: string): string {
   return 'summary_unknown';
 }
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 function getDriveFolderId(): string | null {
@@ -648,7 +646,7 @@ async function upsertSummaryRows(
 }
 
 export async function getChurnDriveAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -679,7 +677,7 @@ export async function getChurnDriveAutoImportState() {
 }
 
 export async function runDryRun(options?: { force?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return { success: false as const, status: 500, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' };
   }
@@ -705,7 +703,7 @@ export async function runDryRun(options?: { force?: boolean }) {
 export async function runCommitImport(
   context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean; force?: boolean }
 ) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,
@@ -823,7 +821,7 @@ export async function runCommitFromPayload(
   payload: ChurnDriveIngestPayload,
   context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }
 ) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

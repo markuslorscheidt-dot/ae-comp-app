@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase } from '@/lib/supabaseServer';
 import { getSmsAutoImportState, runCommitImport } from '../shared';
 
 async function handleCronImport(request: Request) {
@@ -28,11 +28,9 @@ async function handleCronImport(request: Request) {
   }
 
   if (!autoImportState.enabled) {
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (supabaseUrl && serviceRoleKey) {
+    const supabase = await getServerSupabase();
+    if (supabase) {
       try {
-        const supabase = createClient(supabaseUrl, serviceRoleKey);
         await supabase.from('sms_import_runs').insert({
           triggered_by: 'cron',
           status: 'skipped',

@@ -1,9 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import { google } from 'googleapis';
 import Papa from 'papaparse';
 
 const SMS_AUTO_IMPORT_KEY = 'sms_auto_import_enabled';
 const DRIVE_SCOPE = ['https://www.googleapis.com/auth/drive.readonly'];
+const SMS_DRIVE_FALLBACK_FOLDER_ID = '1FbUdzPrd0DtHVsdFfilBL4Rm7hdm6Y4y';
 
 type ImportTrigger = 'manual' | 'cron';
 type ImportStatus = 'success' | 'partial' | 'failed' | 'skipped';
@@ -42,15 +44,34 @@ type ExtractResult =
       error: string;
     };
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
+}
+
+function extractGoogleDriveFolderId(input: string | null | undefined): string | null {
+  const value = String(input || '').trim();
+  if (!value) return null;
+
+  const directIdMatch = value.match(/^[A-Za-z0-9_-]{10,}$/);
+  if (directIdMatch) return directIdMatch[0];
+
+  const folderPathMatch = value.match(/\/folders\/([A-Za-z0-9_-]+)/);
+  if (folderPathMatch?.[1]) return folderPathMatch[1];
+
+  const idQueryMatch = value.match(/[?&]id=([A-Za-z0-9_-]+)/);
+  if (idQueryMatch?.[1]) return idQueryMatch[1];
+
+  return null;
 }
 
 function getDriveFolderId(): string | null {
-  return process.env.GOOGLE_DRIVE_SMS_FOLDER_ID?.trim() || null;
+  const explicitId = extractGoogleDriveFolderId(process.env.GOOGLE_DRIVE_SMS_FOLDER_ID);
+  if (explicitId) return explicitId;
+
+  const urlBasedId = extractGoogleDriveFolderId(process.env.GOOGLE_DRIVE_SMS_FOLDER_URL);
+  if (urlBasedId) return urlBasedId;
+
+  return SMS_DRIVE_FALLBACK_FOLDER_ID;
 }
 
 function getDriveAuth() {
@@ -68,7 +89,12 @@ function getDriveAuth() {
 async function listCsvFiles(): Promise<{ success: true; files: DriveFileMeta[] } | { success: false; status: number; error: string }> {
   const folderId = getDriveFolderId();
   if (!folderId) {
-    return { success: false, status: 500, error: 'GOOGLE_DRIVE_SMS_FOLDER_ID fehlt.' };
+    return {
+      success: false,
+      status: 500,
+      error:
+        'SMS Drive Folder-ID fehlt. Bitte GOOGLE_DRIVE_SMS_FOLDER_ID oder GOOGLE_DRIVE_SMS_FOLDER_URL setzen.',
+    };
   }
   const auth = getDriveAuth();
   if (!auth) {
@@ -281,7 +307,7 @@ async function persistImportRun(params: {
 }
 
 export async function getSmsAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -312,7 +338,7 @@ export async function getSmsAutoImportState() {
 }
 
 export async function extractSmsRows(supabase?: ReturnType<typeof createClient>): Promise<ExtractResult> {
-  const client = supabase || getServerSupabase();
+  const client = supabase || await getServerSupabase();
   if (!client) {
     return { success: false, status: 500, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' };
   }
@@ -353,7 +379,7 @@ export async function extractSmsRows(supabase?: ReturnType<typeof createClient>)
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

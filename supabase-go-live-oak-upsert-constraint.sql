@@ -60,9 +60,11 @@ USING ranked r
 WHERE g.id = r.id
   AND r.rn > 1;
 
+-- Fuer ON CONFLICT (oak_id) muss ein nicht-partieller UNIQUE Index existieren.
+-- PostgreSQL erlaubt trotz UNIQUE mehrere NULL-Werte, daher ist kein WHERE-Filter noetig.
+DROP INDEX IF EXISTS idx_go_lives_oak_id_unique;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_go_lives_oak_id_unique
-  ON go_lives(oak_id)
-  WHERE oak_id IS NOT NULL;
+  ON go_lives(oak_id);
 
 COMMIT;
 

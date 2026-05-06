@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import Papa from 'papaparse';
 
 type ParsedCsvRow = {
@@ -30,11 +31,8 @@ function parseOakId(value: unknown): number | null {
   return Number.isInteger(n) ? n : null;
 }
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 async function persistPaymarginImportRun(params: {
@@ -121,7 +119,7 @@ async function persistPaymarginImportRun(params: {
 
 export async function POST(request: Request) {
   try {
-    const supabase = getServerSupabase();
+    const supabase = await getServerSupabase();
     if (!supabase) {
       return NextResponse.json(
         { success: false, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt fuer CSV-Import.' },

@@ -25,6 +25,7 @@ Web-App zur Steuerung von Sales-Performance, Targets und Provisionen (DACH) mit 
 - `src/lib` – Typen, Hooks, Berechnungen, Berechtigungen, API-nahe Logik
 - `supabase-*.sql` – SQL-Migrationen/Policies
 - `DOCUMENTATION.md` – ausführliche technische Langdoku
+- `PROJECT.md` – aktuelle Gesamtübersicht zu Architektur, Betrieb und Workflows
 - `AGENTS.md` – AI/Agent-Betriebswissen
 - `project-context.json` – maschinenlesbarer Projektkontext
 
@@ -57,5 +58,6 @@ Diese README ist die schnelle Einstiegssicht.
 Für Details und Agenten-Kontext:
 
 - Human-Detaildoku: `DOCUMENTATION.md`
+- Projekt-Gesamtübersicht: `PROJECT.md`
 - Agenten-/AI-Kontext: `AGENTS.md`
 - Maschinenlesbar: `project-context.json`

@@ -110,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_opportunities_sfid ON opportunities(sfid);
 -- Import Batches: Nur CM/LM können lesen und schreiben
 ALTER TABLE import_batches ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "import_batches_admin" ON import_batches;
 CREATE POLICY "import_batches_admin" ON import_batches
   FOR ALL USING (
     EXISTS (
@@ -122,6 +123,7 @@ CREATE POLICY "import_batches_admin" ON import_batches
 -- Import Staging: Nur CM/LM können lesen und schreiben
 ALTER TABLE import_staging ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "import_staging_admin" ON import_staging;
 CREATE POLICY "import_staging_admin" ON import_staging
   FOR ALL USING (
     EXISTS (

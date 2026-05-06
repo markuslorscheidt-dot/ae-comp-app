@@ -51,6 +51,12 @@ export default function UserProfile({
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordLoading, setPasswordLoading] = useState(false);
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordSuccess, setPasswordSuccess] = useState('');
   
   // Editierbare Felder
   const [editData, setEditData] = useState({
@@ -124,6 +130,41 @@ export default function UserProfile({
       console.error('Error saving profile:', error);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const isOwnProfile = currentUser.id === user.id;
+
+  const handleChangePassword = async () => {
+    setPasswordError('');
+    setPasswordSuccess('');
+
+    if (newPassword.length < 8) {
+      setPasswordError('Passwort muss mindestens 8 Zeichen haben.');
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Passwörter stimmen nicht überein.');
+      return;
+    }
+
+    setPasswordLoading(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) {
+        setPasswordError(error.message || 'Passwort konnte nicht aktualisiert werden.');
+        return;
+      }
+
+      setPasswordSuccess('Passwort erfolgreich aktualisiert.');
+      setNewPassword('');
+      setConfirmPassword('');
+      setShowPasswordForm(false);
+    } catch (error: any) {
+      setPasswordError(error?.message || 'Passwort konnte nicht aktualisiert werden.');
+    } finally {
+      setPasswordLoading(false);
     }
   };
 
@@ -224,6 +265,23 @@ export default function UserProfile({
               <label className="block text-sm font-medium text-gray-500">{t('profile.email')}</label>
               <p className="text-gray-800">{user.email}</p>
             </div>
+
+            {isOwnProfile && (
+              <div>
+                <label className="block text-sm font-medium text-gray-500">Passwort</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPasswordForm((prev) => !prev);
+                    setPasswordError('');
+                    setPasswordSuccess('');
+                  }}
+                  className="mt-1 px-3 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition"
+                >
+                  {showPasswordForm ? 'Passwort-Form schließen' : 'Passwort ändern'}
+                </button>
+              </div>
+            )}
 
             {/* Telefon */}
             <div>
@@ -328,6 +386,49 @@ export default function UserProfile({
               <p className="text-gray-800">{formatDate(user.created_at)}</p>
             </div>
           </div>
+
+          {isOwnProfile && showPasswordForm && (
+            <div className="mt-6 pt-4 border-t space-y-3">
+              <div className="text-sm font-semibold text-gray-700">Neues Passwort setzen</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Neues Passwort (mind. 8 Zeichen)"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Passwort wiederholen"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                />
+              </div>
+              {passwordError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg text-sm">
+                  {passwordError}
+                </div>
+              )}
+              <div>
+                <button
+                  type="button"
+                  onClick={handleChangePassword}
+                  disabled={passwordLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition disabled:opacity-50"
+                >
+                  {passwordLoading ? 'Speichere...' : 'Passwort speichern'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isOwnProfile && passwordSuccess && (
+            <div className="mt-4 p-3 bg-green-50 border border-green-200 text-green-700 rounded-lg text-sm">
+              {passwordSuccess}
+            </div>
+          )}
 
           {/* Edit Buttons */}
           {isEditing && (

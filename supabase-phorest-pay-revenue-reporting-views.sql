@@ -66,3 +66,6 @@ SELECT
 FROM reporting_phorest_pay_revenue_stripe_processed_base
 WHERE row_type = 'grand_total';
 
+-- Erweiterung: Net Margin + Monats-Dedupe fuer reporting_phorest_pay_revenue_dach_monthly
+-- siehe supabase-phorest-pay-revenue-net-margin-views.sql (nach dieser Datei ausfuehren).
+

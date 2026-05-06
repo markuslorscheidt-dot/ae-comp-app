@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { supabase } from './supabase';
 import { 
   User, 
@@ -62,12 +62,38 @@ function getFriendlyAuthErrorMessage(error: unknown): string {
   const raw = String((error as any)?.message || '').trim();
   const message = raw.toLowerCase();
   if (message.includes('failed to fetch') || message.includes('networkerror')) {
-    return 'Netzwerkfehler beim Login. Bitte Internetverbindung, VPN oder Firewall prüfen.';
+    return 'Netzwerkfehler beim Login. Bitte prüfen, ob die gewählte Datenbank-Umgebung erreichbar ist.';
   }
   if (message.includes('timeout') || message.includes('aborted')) {
     return 'Login timeout - bitte erneut versuchen';
   }
   return raw || 'Login fehlgeschlagen';
+}
+
+function toErrorObject(error: unknown) {
+  const candidate = error as any;
+  return {
+    code: String(candidate?.code || ''),
+    message: String(candidate?.message || ''),
+    details: String(candidate?.details || ''),
+    hint: String(candidate?.hint || ''),
+    raw: error,
+  };
+}
+
+function mapUserProfile(profile: any): User {
+  return {
+    id: profile.id,
+    email: profile.email,
+    name: profile.name,
+    role: profile.role as UserRole,
+    is_active: profile.is_active ?? true,
+    language: profile.language,
+    created_at: profile.created_at,
+    start_date: profile.start_date,
+    entry_date: profile.entry_date || profile.start_date,
+    exit_date: profile.exit_date
+  };
 }
 
 // Helper: Korrupte Session bereinigen
@@ -133,6 +159,11 @@ async function getEffectiveRoleAtDate(userId: string, date: string, fallbackRole
 export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const userRef = useRef<User | null>(null);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
 
   useEffect(() => {
     let mounted = true;
@@ -179,33 +210,30 @@ export function useAuth() {
           );
 
           if (profileError) {
-            const profileErrorMessage = String((profileError as any)?.message || '');
+            const profileErrorInfo = toErrorObject(profileError);
+            const profileErrorCode = profileErrorInfo.code;
+            const profileErrorMessage = profileErrorInfo.message;
             const isTimeoutProfileError =
               profileErrorMessage.toLowerCase().includes('timeout') ||
               profileErrorMessage.toLowerCase().includes('aborted') ||
               isAbortLikeError(profileError);
+            // PGRST116: kein Datensatz gefunden — kein echter Fehler, nur kein User-Profil
+            const isNoRowsError = profileErrorCode === 'PGRST116';
             if (isTimeoutProfileError) {
               console.warn('Profile timeout beim Session-Load');
+            } else if (isNoRowsError) {
+              console.warn('Kein User-Profil gefunden für Session-User:', session?.user?.id);
             } else {
-              console.error('Profile error:', profileError);
+              console.error('Profile error:', profileErrorInfo);
+              // Bei unerwarteten Profilfehlern Session bereinigen, damit kein inkonsistenter Zustand haengen bleibt.
+              await clearCorruptSession();
             }
             if (mounted) setLoading(false);
             return;
           }
 
           if (profile && mounted) {
-            setUser({
-              id: profile.id,
-              email: profile.email,
-              name: profile.name,
-              role: profile.role as UserRole,
-              is_active: profile.is_active ?? true,
-              language: profile.language,
-              created_at: profile.created_at,
-              start_date: profile.start_date,
-              entry_date: profile.entry_date || profile.start_date,
-              exit_date: profile.exit_date
-            });
+            setUser(mapUserProfile(profile));
           }
         }
       } catch (error: any) {
@@ -229,7 +257,7 @@ export function useAuth() {
     getSession();
 
     // Auth State Change Listener
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       console.log('Auth event:', event);
       
       if (event === 'SIGNED_OUT' || event === 'TOKEN_REFRESHED' && !session) {
@@ -242,10 +270,25 @@ export function useAuth() {
 
       if (event === 'TOKEN_REFRESHED' && session) {
         console.log('Token erfolgreich erneuert');
+        if (userRef.current) return;
       }
 
       if (session?.user && mounted) {
-        try {
+        if (userRef.current?.id === session.user.id) {
+          // Supabase kann SIGNED_IN/INITIAL_SESSION auch bei Tab-Fokus oder
+          // Session-Erneuerung erneut feuern. Wenn derselbe User bereits
+          // geladen ist, darf die sichtbare App nicht in den globalen
+          // Loading-State springen, sonst werden Dashboard/Reports unmounted.
+          return;
+        }
+
+        if (mounted) setLoading(true);
+
+        // Supabase empfiehlt, im Auth-Callback keine weiteren Supabase-Calls
+        // direkt zu awaiten. Sonst kann der Profil-Load nach dem Login hängen.
+        setTimeout(async () => {
+          if (!mounted) return;
+          try {
           // Bei Auth-Change Timeout nicht als Exception werfen, damit kein Overlay-Error entsteht.
           const profilePromise = (async () => {
             try {
@@ -277,7 +320,8 @@ export function useAuth() {
             if (isAbortLikeError(profileResult.__error)) {
               console.warn('Profile request aborted bei Auth-Change');
             } else {
-              console.error('Profile fetch error:', profileResult.__error);
+              console.error('Profile fetch error:', toErrorObject(profileResult.__error));
+              await clearCorruptSession();
             }
             if (mounted) setLoading(false);
             return;
@@ -286,18 +330,7 @@ export function useAuth() {
           const { data: profile } = profileResult;
 
           if (profile && mounted) {
-            setUser({
-              id: profile.id,
-              email: profile.email,
-              name: profile.name,
-              role: profile.role as UserRole,
-              is_active: profile.is_active ?? true,
-              language: profile.language,
-              created_at: profile.created_at,
-              start_date: profile.start_date,
-              entry_date: profile.entry_date || profile.start_date,
-              exit_date: profile.exit_date
-            });
+            setUser(mapUserProfile(profile));
           }
         } catch (error) {
           const message = String((error as any)?.message || '');
@@ -310,7 +343,11 @@ export function useAuth() {
           } else {
             console.error('Profile fetch error:', error);
           }
+        } finally {
+          if (mounted) setLoading(false);
         }
+        }, 0);
+        return;
       }
       if (mounted) setLoading(false);
     });
@@ -324,13 +361,20 @@ export function useAuth() {
 
   const signIn = async (email: string, password: string) => {
     try {
+      console.log('Starte Supabase Login...');
       const { error } = await withTimeout(
         supabase.auth.signInWithPassword({ email, password }),
         AUTH_TIMEOUT,
         'Login timeout - bitte erneut versuchen'
       );
+      if (error) {
+        console.warn('Supabase Login fehlgeschlagen:', error.message || error);
+      } else {
+        console.log('Supabase Login erfolgreich');
+      }
       return { error };
     } catch (error: any) {
+      console.error('Supabase Login Exception:', error?.message || error);
       return { error: { message: getFriendlyAuthErrorMessage(error) } };
     }
   };
@@ -2525,6 +2569,260 @@ export function usePaymarginImportedCohortKeys(enabled: boolean): ReadonlySet<st
   }, [enabled]);
 
   return keys;
+}
+
+// ============================================
+// EXPANDING ARR: IMPORT-DATEN HOOKS
+// ============================================
+
+export type UpDownsellMonthlyRow = {
+  month: string;        // 'YYYY-MM'
+  netGrowthArr: number;
+  netLossArr: number;
+  netArr: number;
+};
+
+export function useUpDownsellsMonthly(year: number): {
+  data: UpDownsellMonthlyRow[];
+  loading: boolean;
+  error: string | null;
+} {
+  const [data, setData] = useState<UpDownsellMonthlyRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const yearStart = `${year}-01-01`;
+        const yearEnd = `${year}-12-31`;
+        const { data: rows, error: dbError } = await supabase
+          .from('up_downsells_events')
+          .select('event_month, net_growth_arr, net_loss_arr, net_arr, source_tab')
+          .gte('event_month', yearStart)
+          .lte('event_month', yearEnd)
+          .order('event_month', { ascending: true });
+
+        if (cancelled) return;
+        if (dbError) { setError(dbError.message); setLoading(false); return; }
+
+        // Aggregiere pro Monat (mehrere OAK-Einträge pro Monat).
+        // Bevorzuge Looker-ZIP-Daten; Legacy-Sheet nur als Fallback, falls für den Monat keine ZIP-Zeilen existieren.
+        const byMonth = new Map<
+          string,
+          {
+            looker: { netGrowthArr: number; netLossArr: number; netArr: number; count: number };
+            legacy: { netGrowthArr: number; netLossArr: number; netArr: number; count: number };
+          }
+        >();
+        for (const row of rows || []) {
+          const monthKey = String(row.event_month || '').slice(0, 7); // 'YYYY-MM'
+          if (!monthKey) continue;
+
+          const existing =
+            byMonth.get(monthKey) ?? {
+              looker: { netGrowthArr: 0, netLossArr: 0, netArr: 0, count: 0 },
+              legacy: { netGrowthArr: 0, netLossArr: 0, netArr: 0, count: 0 },
+            };
+          const sourceTab = String((row as any).source_tab || '');
+          const bucket = sourceTab.startsWith('looker_zip:') ? existing.looker : existing.legacy;
+          bucket.netGrowthArr += Number(row.net_growth_arr) || 0;
+          bucket.netLossArr += Number(row.net_loss_arr) || 0;
+          bucket.netArr += Number(row.net_arr) || 0;
+          bucket.count += 1;
+          byMonth.set(monthKey, existing);
+        }
+
+        const result: UpDownsellMonthlyRow[] = Array.from(byMonth.entries())
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([month, vals]) => {
+            const chosen = vals.looker.count > 0 ? vals.looker : vals.legacy;
+            return {
+              month,
+              netGrowthArr: chosen.netGrowthArr,
+              netLossArr: chosen.netLossArr,
+              netArr: chosen.netArr,
+            };
+          });
+
+        setData(result);
+      } catch (err: any) {
+        if (!cancelled) setError(err?.message || 'Unbekannter Fehler');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [year]);
+
+  return { data, loading, error };
+}
+
+export type SmsMonthlyRow = {
+  month: string;   // 'YYYY-MM'
+  mrr: number;     // DACH SMS MRR
+};
+
+/** CSV liefert oft 'YYYY-MM' oder ISO-Datum 'YYYY-MM-DD' — fuer Aggregation immer YYYY-MM. */
+function normalizeSmsAccountingMonth(raw: string): string | null {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}$/.test(s)) return s;
+  const isoPrefix = s.match(/^(\d{4}-\d{2})(?:-\d{2}|T|$)/);
+  if (isoPrefix) return isoPrefix[1];
+  const de = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (de) {
+    const d = de[1].padStart(2, '0');
+    const mo = de[2].padStart(2, '0');
+    return `${de[3]}-${mo}`;
+  }
+  return null;
+}
+
+function parseSmsNumeric(raw: string): number | null {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const cleaned = s.replace(/\s+/g, '').replace(/€/g, '');
+  if (!cleaned) return null;
+
+  // Unterstützt sowohl 46,341.25 als auch 46.341,25
+  let normalized = cleaned;
+  if (cleaned.includes('.') && cleaned.includes(',')) {
+    const lastDot = cleaned.lastIndexOf('.');
+    const lastComma = cleaned.lastIndexOf(',');
+    normalized =
+      lastComma > lastDot
+        ? cleaned.replace(/\./g, '').replace(',', '.')
+        : cleaned.replace(/,/g, '');
+  } else if (cleaned.includes(',')) {
+    normalized = cleaned.replace(',', '.');
+  }
+
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function useSmsMonthly(year: number): {
+  data: SmsMonthlyRow[];
+  loading: boolean;
+  error: string | null;
+} {
+  const [data, setData] = useState<SmsMonthlyRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        // Primär direkter Read über Client (wenn RLS/Policies es zulassen).
+        const { data: rows, error: dbError } = await supabase
+          .from('sms_events')
+          .select('payload');
+        if (cancelled) return;
+
+        const buildResult = (inputRows: Array<{ payload: unknown }>): SmsMonthlyRow[] => {
+          const byMonth = new Map<string, number>();
+          for (const row of inputRows || []) {
+            const payload = row.payload as Record<string, string> | null;
+            if (!payload) continue;
+
+            const monthRaw =
+              String(payload['Accounting Month'] || '').trim() ||
+              String(payload['Region'] || '').trim();
+            const monthKey = normalizeSmsAccountingMonth(monthRaw);
+            if (!monthKey || !monthKey.startsWith(String(year))) continue;
+
+            const mrr = parseSmsNumeric(String(payload['DACH'] || ''));
+            if (mrr === null) continue;
+
+            const existing = byMonth.get(monthKey) ?? 0;
+            if (mrr > existing) byMonth.set(monthKey, mrr);
+          }
+
+          return Array.from(byMonth.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([month, mrr]) => ({ month, mrr }));
+        };
+
+        // Falls clientseitig wegen RLS leer ist, serverseitigen Fallback nutzen.
+        if (!dbError && (rows?.length || 0) > 0) {
+          setData(buildResult(rows as Array<{ payload: unknown }>));
+          return;
+        }
+
+        const response = await fetch(`/api/sms/monthly?year=${year}`, { cache: 'no-store' });
+        const fallback = await response.json();
+        if (!response.ok || !fallback?.success) {
+          const message =
+            fallback?.error ||
+            dbError?.message ||
+            'SMS-Monatsdaten konnten nicht geladen werden.';
+          setError(message);
+          setLoading(false);
+          return;
+        }
+
+        setData((fallback.data || []) as SmsMonthlyRow[]);
+      } catch (err: any) {
+        if (!cancelled) setError(err?.message || 'Unbekannter Fehler');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [year]);
+
+  return { data, loading, error };
+}
+
+/** Phorest Pay: DACH Net Margin (Monat), aus reporting_phorest_pay_revenue_dach_net_margin_monthly */
+export type PhorestPayMonthlyRow = {
+  month: string;   // 'YYYY-MM'
+  dachValue: number;
+};
+
+export function usePhorestPayMonthly(year: number): {
+  data: PhorestPayMonthlyRow[];
+  loading: boolean;
+  error: string | null;
+} {
+  const [data, setData] = useState<PhorestPayMonthlyRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const response = await fetch(`/api/phorestPayRevenue/monthly?year=${year}`, { cache: 'no-store' });
+        const payload = await response.json();
+        if (cancelled) return;
+
+        if (!response.ok || !payload?.success) {
+          setError(payload?.error || 'Phorest Pay Monatsdaten konnten nicht geladen werden.');
+          setLoading(false);
+          return;
+        }
+
+        setData((payload.data || []) as PhorestPayMonthlyRow[]);
+      } catch (err: any) {
+        if (!cancelled) setError(err?.message || 'Unbekannter Fehler');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [year]);
+
+  return { data, loading, error };
 }
 
 export function downloadBackup(backup: BackupData) {

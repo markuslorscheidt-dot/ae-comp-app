@@ -1,11 +1,8 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 
-function createServiceClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function createServiceClient() {
+  return getEnvironmentServerSupabase();
 }
 
 function getAppBaseUrl() {
@@ -29,7 +26,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'Name und E-Mail sind erforderlich.' }, { status: 400 });
     }
 
-    const supabase = createServiceClient();
+    const supabase = await createServiceClient();
     if (!supabase) {
       return NextResponse.json({ success: false, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' }, { status: 500 });
     }

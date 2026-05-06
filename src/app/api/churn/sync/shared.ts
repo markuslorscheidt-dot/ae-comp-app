@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 
 const CHURN_AUTO_IMPORT_KEY = 'churn_auto_import_enabled';
 
@@ -143,11 +144,8 @@ function validateRow(row: ParsedChurnRow): string[] {
   return reasons;
 }
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 async function persistImportRun(params: {
@@ -244,7 +242,7 @@ async function persistImportRun(params: {
 }
 
 export async function getChurnAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -400,7 +398,7 @@ export async function extractSheetRows(): Promise<ExtractResult> {
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

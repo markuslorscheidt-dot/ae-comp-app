@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import { google } from 'googleapis';
 import Papa from 'papaparse';
 
@@ -121,11 +122,8 @@ function validateRow(row: ParsedSignupsRow): string[] {
   return reasons;
 }
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 type DriveCsvFileMeta = {
@@ -366,7 +364,7 @@ async function persistImportRun(params: {
 }
 
 export async function getSignupsAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -503,7 +501,7 @@ export async function extractSheetRows(): Promise<ExtractResult> {
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

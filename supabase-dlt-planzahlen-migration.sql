@@ -57,12 +57,14 @@ CREATE INDEX IF NOT EXISTS idx_dlt_planzahlen_year ON dlt_planzahlen(year);
 ALTER TABLE dlt_planzahlen ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Alle authentifizierten Benutzer können lesen
+DROP POLICY IF EXISTS "Allow read access for authenticated users" ON dlt_planzahlen;
 CREATE POLICY "Allow read access for authenticated users" ON dlt_planzahlen
   FOR SELECT
   TO authenticated
   USING (true);
 
 -- Policy: Nur DLT-Mitglieder und Country Manager können schreiben
+DROP POLICY IF EXISTS "Allow write access for DLT members" ON dlt_planzahlen;
 CREATE POLICY "Allow write access for DLT members" ON dlt_planzahlen
   FOR ALL
   TO authenticated

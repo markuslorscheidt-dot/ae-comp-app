@@ -1,11 +1,8 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 
-function createServiceClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function createServiceClient() {
+  return getEnvironmentServerSupabase();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -14,7 +11,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export async function GET(request: Request) {
   try {
-    const supabase = createServiceClient();
+    const supabase = await createServiceClient();
     if (!supabase) {
       return NextResponse.json({ success: false, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' }, { status: 500 });
     }
@@ -55,7 +52,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const supabase = createServiceClient();
+    const supabase = await createServiceClient();
     if (!supabase) {
       return NextResponse.json({ success: false, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' }, { status: 500 });
     }
@@ -114,7 +111,7 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const supabase = createServiceClient();
+    const supabase = await createServiceClient();
     if (!supabase) {
       return NextResponse.json({ success: false, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' }, { status: 500 });
     }

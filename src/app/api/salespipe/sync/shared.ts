@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 
 const SALESPIPE_AUTO_IMPORT_KEY = 'salespipe_auto_import_enabled';
 const SALESPIPE_SOURCE_TAB = 'mirror_salespipe_raw';
@@ -157,11 +158,8 @@ function validateRow(row: ParsedSalespipeRow): string[] {
   return reasons;
 }
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 async function appendGoogleSheetImportLog(params: {
@@ -333,7 +331,7 @@ async function persistImportRun(params: {
 }
 
 export async function getSalespipeAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -487,7 +485,7 @@ export async function extractSheetRows(): Promise<ExtractResult> {
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

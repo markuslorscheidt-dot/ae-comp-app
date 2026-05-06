@@ -169,24 +169,48 @@ export function paymarginCohortKey(year: number, month: number): string {
 export type PayArrReportingOptions = {
   /** Wenn gesetzt: für diese Kohorten kein Planungs-Default (avg_pay_bill×12), nur pay_arr / pay_arr_target / 0 */
   paymarginImportedCohortKeys?: ReadonlySet<string>;
+  /** Dynamischer Fallback (ARR/Jahr) je Terminal-Go-Live ohne Ist/Target */
+  payFallbackArrPerGoLive?: number;
 };
 
 /**
  * PAY IST für Reporting:
  * 1) Finance-Actual (pay_arr), falls vorhanden
  * 2) sonst Go-Live Forecast (pay_arr_target)
- * 3) sonst Settings-Default bei Terminal (avg_pay_bill * 12) — nur wenn für die Kohorte kein Paymargin-Commit existiert
+ * 3) sonst dynamischer Fallback bei Terminal (falls berechnet)
+ * 4) sonst Settings-Default bei Terminal (avg_pay_bill * 12) — nur wenn für die Kohorte kein Paymargin-Commit existiert
  */
 export function getEffectivePayArrForReporting(gl: GoLive, settings: AESettings, options?: PayArrReportingOptions): number {
   if (gl.pay_arr !== null && gl.pay_arr !== undefined) return gl.pay_arr;
   if (gl.pay_arr_target !== null && gl.pay_arr_target !== undefined) return gl.pay_arr_target;
   if (!gl.has_terminal) return 0;
+  if (options?.payFallbackArrPerGoLive !== undefined) {
+    return options.payFallbackArrPerGoLive;
+  }
   const cohortKey = paymarginCohortKey(gl.year, gl.month);
   const imported = options?.paymarginImportedCohortKeys;
   if (imported !== undefined && imported.has(cohortKey)) {
     return 0;
   }
   return (settings.avg_pay_bill || 0) * 12;
+}
+
+function derivePayFallbackArrPerGoLive(goLives: GoLive[], options?: PayArrReportingOptions): number | undefined {
+  const imported = options?.paymarginImportedCohortKeys;
+  if (!imported || imported.size === 0) return undefined;
+
+  const referenceValues = goLives
+    .filter((gl) => gl.has_terminal)
+    .filter((gl) => imported.has(paymarginCohortKey(gl.year, gl.month)))
+    .map((gl) => {
+      if (gl.pay_arr !== null && gl.pay_arr !== undefined) return gl.pay_arr;
+      if (gl.pay_arr_target !== null && gl.pay_arr_target !== undefined) return gl.pay_arr_target;
+      return 0;
+    })
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (referenceValues.length === 0) return undefined;
+  return referenceValues.reduce((sum, v) => sum + v, 0) / referenceValues.length;
 }
 
 /**
@@ -388,10 +412,20 @@ export function calculateYearSummary(
   settings: AESettings,
   payOptions?: PayArrReportingOptions
 ): YearSummary {
+  const derivedFallback = derivePayFallbackArrPerGoLive(goLives, payOptions);
+  const effectivePayOptions: PayArrReportingOptions | undefined = payOptions
+    ? {
+        ...payOptions,
+        payFallbackArrPerGoLive: payOptions.payFallbackArrPerGoLive ?? derivedFallback,
+      }
+    : derivedFallback !== undefined
+      ? { payFallbackArrPerGoLive: derivedFallback }
+      : undefined;
+
   const monthlyResults: MonthlyResult[] = [];
   
   for (let month = 1; month <= 12; month++) {
-    monthlyResults.push(calculateMonthlyResult(month, goLives, settings, payOptions));
+    monthlyResults.push(calculateMonthlyResult(month, goLives, settings, effectivePayOptions));
   }
   
   const totalGoLives = monthlyResults.reduce((sum, r) => sum + r.go_lives_count, 0);

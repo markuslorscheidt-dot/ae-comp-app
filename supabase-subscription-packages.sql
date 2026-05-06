@@ -17,11 +17,13 @@ COMMENT ON TABLE subscription_packages IS 'Subscription-Pakete (Kickstart, Power
 ALTER TABLE subscription_packages ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies für subscription_packages
+DROP POLICY IF EXISTS "Subscription Packages sind für alle authentifizierten User sichtbar" ON subscription_packages;
 CREATE POLICY "Subscription Packages sind für alle authentifizierten User sichtbar"
   ON subscription_packages FOR SELECT
   TO authenticated
   USING (true);
 
+DROP POLICY IF EXISTS "Admins können Subscription Packages anlegen" ON subscription_packages;
 CREATE POLICY "Admins können Subscription Packages anlegen"
   ON subscription_packages FOR INSERT
   TO authenticated
@@ -39,6 +41,7 @@ CREATE POLICY "Admins können Subscription Packages anlegen"
     )
   );
 
+DROP POLICY IF EXISTS "Admins können Subscription Packages bearbeiten" ON subscription_packages;
 CREATE POLICY "Admins können Subscription Packages bearbeiten"
   ON subscription_packages FOR UPDATE
   TO authenticated
@@ -56,6 +59,7 @@ CREATE POLICY "Admins können Subscription Packages bearbeiten"
     )
   );
 
+DROP POLICY IF EXISTS "Admins können Subscription Packages löschen" ON subscription_packages;
 CREATE POLICY "Admins können Subscription Packages löschen"
   ON subscription_packages FOR DELETE
   TO authenticated

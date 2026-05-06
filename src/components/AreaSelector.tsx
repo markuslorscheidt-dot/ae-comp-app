@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { User, BusinessArea, BUSINESS_AREAS, BUSINESS_AREA_LABELS, canAccessArea } from '@/lib/types';
+import { User, BusinessArea, canAccessArea } from '@/lib/types';
 import { useLanguage } from '@/lib/LanguageContext';
 import { hasAdminAccess } from '@/lib/permissions';
 import LanguageSelector from './LanguageSelector';
@@ -13,6 +13,8 @@ interface AreaSelectorProps {
   onSignOut: () => void;
 }
 
+const VISIBLE_BUSINESS_AREAS: BusinessArea[] = ['dlt', 'new_business'];
+
 // Icons für die Bereiche
 const AREA_ICONS: Record<BusinessArea, string> = {
   dlt: '👔',
@@ -21,35 +23,12 @@ const AREA_ICONS: Record<BusinessArea, string> = {
   marketing: '📣'
 };
 
-// Farben für die Bereiche
-const AREA_COLORS: Record<BusinessArea, { bg: string; border: string; hover: string }> = {
-  dlt: { 
-    bg: 'bg-purple-50', 
-    border: 'border-purple-200', 
-    hover: 'hover:border-purple-400 hover:bg-purple-100' 
-  },
-  new_business: { 
-    bg: 'bg-blue-50', 
-    border: 'border-blue-200', 
-    hover: 'hover:border-blue-400 hover:bg-blue-100' 
-  },
-  expanding_business: { 
-    bg: 'bg-green-50', 
-    border: 'border-green-200', 
-    hover: 'hover:border-green-400 hover:bg-green-100' 
-  },
-  marketing: { 
-    bg: 'bg-orange-50', 
-    border: 'border-orange-200', 
-    hover: 'hover:border-orange-400 hover:bg-orange-100' 
-  }
-};
-
 export default function AreaSelector({ user, onSelectArea, onOpenAdmin, onSignOut }: AreaSelectorProps) {
   const { t } = useLanguage();
+  const [selectedArea, setSelectedArea] = useState<BusinessArea | ''>('');
   
   // Ermittle die Bereiche, auf die der User zugreifen kann
-  const accessibleAreas = BUSINESS_AREAS.filter(area => canAccessArea(user.role, area));
+  const accessibleAreas = VISIBLE_BUSINESS_AREAS.filter(area => canAccessArea(user.role, area));
   
   // Prüfe ob User Admin-Zugang hat
   const canAccessAdmin = hasAdminAccess(user.role);
@@ -105,77 +84,49 @@ export default function AreaSelector({ user, onSelectArea, onOpenAdmin, onSignOu
 
       {/* Main Content - Responsive */}
       <main className="max-w-5xl mx-auto px-4 py-8 md:py-16">
-        <div className="text-center mb-8 md:mb-12">
+        <div className="text-center mb-4 md:mb-5">
           <h2 className="text-2xl md:text-3xl font-bold text-white mb-2">
             {t('areas.selectArea')}
           </h2>
-          <p className="text-blue-200 text-sm md:text-base">
-            {t('areas.selectAreaSubtitle')}
-          </p>
         </div>
 
-        {/* Area Cards Grid - Responsive */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 md:gap-6">
-          {BUSINESS_AREAS.map(area => {
-            const isAccessible = accessibleAreas.includes(area);
-            const colors = AREA_COLORS[area];
-            
-            return (
-              <button
-                key={area}
-                onClick={() => isAccessible && onSelectArea(area)}
-                disabled={!isAccessible}
-                className={`
-                  relative p-5 md:p-8 rounded-xl md:rounded-2xl border-2 text-left transition-all duration-200
-                  ${isAccessible 
-                    ? `${colors.bg} ${colors.border} ${colors.hover} cursor-pointer transform active:scale-[0.98] md:hover:scale-[1.02] hover:shadow-xl` 
-                    : 'bg-gray-100 border-gray-200 opacity-50 cursor-not-allowed'
-                  }
-                `}
-              >
-                {/* Icon */}
-                <div className="text-4xl md:text-5xl mb-3 md:mb-4">
-                  {AREA_ICONS[area]}
-                </div>
-                
-                {/* Title */}
-                <h3 className={`text-xl md:text-2xl font-bold mb-1 md:mb-2 ${isAccessible ? 'text-gray-800' : 'text-gray-500'}`}>
-                  {t(`areas.${area}`)}
-                </h3>
-                
-                {/* Description based on area */}
-                <p className={`text-xs md:text-sm ${isAccessible ? 'text-gray-600' : 'text-gray-400'}`}>
-                  {area === 'dlt' && t('areas.dltDescription')}
-                  {area === 'new_business' && t('areas.newBusinessDescription')}
-                  {area === 'expanding_business' && t('areas.expandingBusinessDescription')}
-                  {area === 'marketing' && t('areas.marketingDescription')}
-                </p>
+        {/* Area Dropdown */}
+        <div className="mx-auto max-w-xl rounded-2xl border border-white/20 bg-white/10 p-4 shadow-xl backdrop-blur-sm md:p-6">
+          <label htmlFor="business-area-select" className="mb-2 block text-sm font-medium text-blue-100">
+            Arbeitsbereich
+          </label>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <select
+              id="business-area-select"
+              value={selectedArea}
+              onChange={(e) => setSelectedArea(e.target.value as BusinessArea | '')}
+              className="min-h-12 flex-1 rounded-xl border border-white/20 bg-white px-4 py-3 text-base font-medium text-gray-800 shadow-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-300"
+            >
+              <option value="">Bereich auswählen...</option>
+              {VISIBLE_BUSINESS_AREAS.map(area => {
+                const isAccessible = accessibleAreas.includes(area);
 
-                {/* Lock indicator for inaccessible areas */}
-                {!isAccessible && (
-                  <div className="absolute top-3 right-3 md:top-4 md:right-4 text-gray-400">
-                    <svg className="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                    </svg>
-                  </div>
-                )}
-
-                {/* Arrow for accessible areas */}
-                {isAccessible && (
-                  <div className="absolute bottom-3 right-3 md:bottom-4 md:right-4 text-gray-400">
-                    <svg className="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                    </svg>
-                  </div>
-                )}
-              </button>
-            );
-          })}
+                return (
+                  <option key={area} value={area} disabled={!isAccessible}>
+                    {AREA_ICONS[area]} {t(`areas.${area}`)}
+                  </option>
+                );
+              })}
+            </select>
+            <button
+              type="button"
+              disabled={!selectedArea}
+              onClick={() => selectedArea && onSelectArea(selectedArea)}
+              className="min-h-12 rounded-xl bg-white px-5 py-3 text-base font-semibold text-blue-900 shadow-sm transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Öffnen
+            </button>
+          </div>
         </div>
 
         {/* Info Text */}
         <p className="text-center text-blue-200/60 mt-6 md:mt-8 text-xs md:text-sm">
-          {t('areas.accessInfo', { accessible: accessibleAreas.length, total: BUSINESS_AREAS.length })}
+          {t('areas.accessInfo', { accessible: accessibleAreas.length, total: VISIBLE_BUSINESS_AREAS.length })}
         </p>
       </main>
     </div>

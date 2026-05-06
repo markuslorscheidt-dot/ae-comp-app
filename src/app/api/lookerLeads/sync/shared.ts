@@ -1,10 +1,15 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import { google } from 'googleapis';
 import Papa from 'papaparse';
 import AdmZip from 'adm-zip';
 
 const LOOKER_LEADS_AUTO_IMPORT_KEY = 'looker_leads_auto_import_enabled';
 const DRIVE_SCOPE = ['https://www.googleapis.com/auth/drive.readonly'];
+const LOOKER_LEADS_PREFERRED_CSV_BASENAMES = [
+  'lead_level_details_with_conversion_flag_date.csv',
+  'lead_level_details.csv',
+];
 
 type ImportTrigger = 'manual' | 'cron';
 type ImportStatus = 'success' | 'partial' | 'failed' | 'skipped';
@@ -50,11 +55,8 @@ type ExtractResult =
       error: string;
     };
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 function getDriveFolderId(): string | null {
@@ -205,6 +207,9 @@ function parseCsv(csvText: string): { header: string[]; rows: Record<string, str
 function scoreCsvEntryName(entryName: string): number {
   const name = entryName.toLowerCase();
   let score = 0;
+  if (name.includes('lead_level_details_with_conversion_flag_date')) score += 2000;
+  if (name.includes('lead_level_details')) score += 1500;
+  if (name.includes('lead_level')) score += 1200;
   if (name.includes('leads')) score += 100;
   if (name.includes('looker')) score += 90;
   if (name.includes('dashboard')) score += 20;
@@ -213,19 +218,20 @@ function scoreCsvEntryName(entryName: string): number {
 
 function pickPreferredCsvEntry(csvEntries: AdmZip.IZipEntry[]) {
   const sorted = [...csvEntries].sort((a, b) => a.entryName.localeCompare(b.entryName));
+  for (const preferredBaseName of LOOKER_LEADS_PREFERRED_CSV_BASENAMES) {
+    const explicitMatch = sorted.find((entry) => {
+      const normalizedPath = entry.entryName.replace(/\\/g, '/').toLowerCase();
+      const baseName = normalizedPath.split('/').pop() || '';
+      return baseName === preferredBaseName;
+    });
+    if (explicitMatch) {
+      return explicitMatch;
+    }
+  }
   const ranked = sorted
     .map((entry) => ({ entry, score: scoreCsvEntryName(entry.entryName) }))
     .sort((a, b) => b.score - a.score || a.entry.entryName.localeCompare(b.entry.entryName));
   return ranked[0]?.entry || null;
-}
-
-function buildSecondarySourceRowNumber(csvEntryName: string, rowNumber: number): number {
-  let hash = 0;
-  for (let i = 0; i < csvEntryName.length; i++) {
-    hash = (hash * 31 + csvEntryName.charCodeAt(i)) % 20000;
-  }
-  const base = (hash + 1) * 100000;
-  return base + rowNumber;
 }
 
 async function upsertSourceFileStatus(
@@ -340,7 +346,7 @@ async function persistImportRun(params: {
 }
 
 export async function getLookerLeadsAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -371,7 +377,7 @@ export async function getLookerLeadsAutoImportState() {
 }
 
 export async function extractLookerLeadsRows(options?: { force?: boolean }): Promise<ExtractResult> {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return { success: false, status: 500, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' };
   }
@@ -404,11 +410,7 @@ export async function extractLookerLeadsRows(options?: { force?: boolean }): Pro
     };
   }
   const preferredCsvName = preferredCsvEntry.entryName;
-  const csvEntriesSorted = [...csvEntries].sort((a, b) => {
-    const scoreDiff = scoreCsvEntryName(b.entryName) - scoreCsvEntryName(a.entryName);
-    if (scoreDiff !== 0) return scoreDiff;
-    return a.entryName.localeCompare(b.entryName);
-  });
+  const preferredCsvScore = scoreCsvEntryName(preferredCsvName);
 
   const warnings: Array<{ rowNumber: number; warning: string }> = [];
   if (csvEntries.length > 1) {
@@ -419,50 +421,47 @@ export async function extractLookerLeadsRows(options?: { force?: boolean }): Pro
         `Verfuegbare CSVs: ${csvEntries.map((entry) => entry.entryName).join(', ')}`,
     });
   }
+  if (preferredCsvScore <= 0) {
+    warnings.push({
+      rowNumber: 0,
+      warning: `Keine klar passende CSV erkannt. Fallback auf: ${preferredCsvName}`,
+    });
+  }
 
   const headerSet = new Set<string>();
   const rawRows: Record<string, string>[] = [];
   const validRows: ParsedLookerLeadsRow[] = [];
   const invalidRows: InvalidLookerLeadsRow[] = [];
-
-  for (const csvEntry of csvEntriesSorted) {
-    const csvText = csvEntry.getData().toString('utf8');
-    const parsed = parseCsv(csvText);
-    if (parsed.header.length === 0) {
-      warnings.push({
-        rowNumber: 0,
-        warning: `CSV Header leer oder nicht lesbar: ${csvEntry.entryName}`,
+  const csvText = preferredCsvEntry.getData().toString('utf8');
+  const parsed = parseCsv(csvText);
+  if (parsed.header.length === 0) {
+    return {
+      success: false,
+      status: 422,
+      error: `CSV Header leer oder nicht lesbar: ${preferredCsvName}`,
+    };
+  }
+  parsed.header.forEach((h) => headerSet.add(h));
+  parsed.rows.forEach((row, idx) => {
+    const rowNumber = idx + 2;
+    rawRows.push(row);
+    if (isRowEffectivelyEmpty(row)) {
+      invalidRows.push({
+        csvEntryName: preferredCsvName,
+        rowNumber,
+        reasons: [`Leere Zeile (${preferredCsvName})`],
+        raw: row,
       });
-      continue;
+      return;
     }
 
-    parsed.header.forEach((h) => headerSet.add(h));
-    parsed.rows.forEach((row, idx) => {
-      const rowNumber = idx + 2;
-      rawRows.push(row);
-      if (isRowEffectivelyEmpty(row)) {
-        invalidRows.push({
-          csvEntryName: csvEntry.entryName,
-          rowNumber,
-          reasons: [`Leere Zeile (${csvEntry.entryName})`],
-          raw: row,
-        });
-        return;
-      }
-
-      const sourceRowNumber =
-        csvEntry.entryName === preferredCsvName
-          ? rowNumber
-          : buildSecondarySourceRowNumber(csvEntry.entryName, rowNumber);
-
-      validRows.push({
-        csvEntryName: csvEntry.entryName,
-        rowNumber,
-        sourceRowNumber,
-        payload: row,
-      });
+    validRows.push({
+      csvEntryName: preferredCsvName,
+      rowNumber,
+      sourceRowNumber: rowNumber,
+      payload: row,
     });
-  }
+  });
 
   if (headerSet.size === 0) {
     return { success: false, status: 422, error: 'Keine lesbare CSV mit Header in der ZIP gefunden.' };
@@ -472,7 +471,7 @@ export async function extractLookerLeadsRows(options?: { force?: boolean }): Pro
     success: true,
     sourceFile,
     csvEntryName: preferredCsvName,
-    csvEntryNames: csvEntriesSorted.map((entry) => entry.entryName),
+    csvEntryNames: [preferredCsvName],
     zipEntries: entries.length,
     header: Array.from(headerSet),
     rawRows,
@@ -483,7 +482,7 @@ export async function extractLookerLeadsRows(options?: { force?: boolean }): Pro
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean; force?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

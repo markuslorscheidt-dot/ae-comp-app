@@ -22,11 +22,13 @@ COMMENT ON TABLE partners IS 'Partner-Unternehmen für Partnership-Deals (L''Or�
 ALTER TABLE partners ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies für partners
+DROP POLICY IF EXISTS "Partners sind für alle authentifizierten User sichtbar" ON partners;
 CREATE POLICY "Partners sind für alle authentifizierten User sichtbar"
   ON partners FOR SELECT
   TO authenticated
   USING (true);
 
+DROP POLICY IF EXISTS "Admins und Head of Partnerships können Partner anlegen" ON partners;
 CREATE POLICY "Admins und Head of Partnerships können Partner anlegen"
   ON partners FOR INSERT
   TO authenticated
@@ -38,6 +40,7 @@ CREATE POLICY "Admins und Head of Partnerships können Partner anlegen"
     )
   );
 
+DROP POLICY IF EXISTS "Admins können Partner bearbeiten" ON partners;
 CREATE POLICY "Admins können Partner bearbeiten"
   ON partners FOR UPDATE
   TO authenticated
@@ -49,6 +52,7 @@ CREATE POLICY "Admins können Partner bearbeiten"
     )
   );
 
+DROP POLICY IF EXISTS "Admins können Partner löschen" ON partners;
 CREATE POLICY "Admins können Partner löschen"
   ON partners FOR DELETE
   TO authenticated

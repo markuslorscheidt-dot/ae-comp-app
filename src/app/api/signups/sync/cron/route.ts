@@ -1,16 +1,13 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import { getSignupsAutoImportState, runCommitImport } from '../shared';
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 async function persistSkippedCronRun(reason: string) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) return;
   try {
     await supabase.from('signups_import_runs').insert({
@@ -54,7 +51,7 @@ async function handleCronImport(request: Request) {
   }
 
   if (!autoImportState.enabled) {
-    const supabase = getServerSupabase();
+    const supabase = await getServerSupabase();
     if (supabase) {
       try {
         await supabase.from('signups_import_runs').insert({

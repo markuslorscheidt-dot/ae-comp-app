@@ -23,11 +23,7 @@ interface DLTDashboardProps {
 type DLTView = 'home' | 'leadership' | 'team' | 'reports' | 'settings';
 
 // Navigation Cards Configuration
-type ExtendedDLTView =
-  | DLTView
-  | 'newBusinessSalesPipeline'
-  | 'expandingBusinessPayPipeline'
-  | 'expandingBusinessPipeline';
+type ExtendedDLTView = DLTView;
 
 const NAV_CARDS: {
   id: ExtendedDLTView;
@@ -41,39 +37,29 @@ const NAV_CARDS: {
   { id: 'leadership', icon: '📊', color: 'text-purple-600', borderColor: 'border-l-purple-500', hoverBg: 'hover:bg-purple-50' },
   { id: 'team', icon: '👥', color: 'text-blue-600', borderColor: 'border-l-blue-500', hoverBg: 'hover:bg-blue-50' },
   { id: 'reports', icon: '📈', color: 'text-green-600', borderColor: 'border-l-green-500', hoverBg: 'hover:bg-green-50' },
-  { id: 'settings', icon: '⚙️', color: 'text-gray-600', borderColor: 'border-l-gray-500', hoverBg: 'hover:bg-gray-50' },
-  {
-    id: 'newBusinessSalesPipeline',
-    icon: '🚀',
-    color: 'text-indigo-600',
-    borderColor: 'border-l-indigo-500',
-    hoverBg: 'hover:bg-indigo-50',
-    label: 'New Business Sales Pipeline',
-    description: 'DLT Sicht auf New Business Pipeline'
-  },
-  {
-    id: 'expandingBusinessPayPipeline',
-    icon: '💳',
-    color: 'text-emerald-600',
-    borderColor: 'border-l-emerald-500',
-    hoverBg: 'hover:bg-emerald-50',
-    label: 'Expanding Business Pay Pipeline',
-    description: 'DLT Sicht auf Pay Pipeline'
-  },
-  {
-    id: 'expandingBusinessPipeline',
-    icon: '📈',
-    color: 'text-teal-600',
-    borderColor: 'border-l-teal-500',
-    hoverBg: 'hover:bg-teal-50',
-    label: 'Expanding Business Pipeline',
-    description: 'DLT Sicht auf Expanding Pipeline'
-  }
+  { id: 'settings', icon: '⚙️', color: 'text-gray-600', borderColor: 'border-l-gray-500', hoverBg: 'hover:bg-gray-50' }
 ];
+
+const DLT_VIEW_STORAGE_KEY = 'ae-comp-dlt-view';
+
+function isDLTView(value: unknown): value is ExtendedDLTView {
+  return value === 'home' || NAV_CARDS.some((card) => card.id === value);
+}
+
+function getStoredDLTView(): ExtendedDLTView {
+  if (typeof window === 'undefined') return 'home';
+  const stored = window.localStorage.getItem(DLT_VIEW_STORAGE_KEY);
+  return isDLTView(stored) ? stored : 'home';
+}
 
 export default function DLTDashboard({ user, onBack, onSignOut }: DLTDashboardProps) {
   const { t } = useLanguage();
-  const [currentView, setCurrentView] = useState<ExtendedDLTView>('home');
+  const [currentView, setCurrentViewState] = useState<ExtendedDLTView>(() => getStoredDLTView());
+
+  const setCurrentView = (view: ExtendedDLTView) => {
+    setCurrentViewState(view);
+    window.localStorage.setItem(DLT_VIEW_STORAGE_KEY, view);
+  };
 
   // Header Component (reusable)
   const Header = ({ showBackToHome = false }: { showBackToHome?: boolean }) => (
@@ -146,42 +132,6 @@ export default function DLTDashboard({ user, onBack, onSignOut }: DLTDashboardPr
         <Header showBackToHome />
         <DLTSettings user={user} />
       </div>
-    );
-  }
-
-  const renderPipelinePlaceholder = (title: string, description: string) => (
-    <div className="min-h-screen bg-gradient-to-br from-slate-100 to-slate-200">
-      <Header showBackToHome />
-      <main className="max-w-4xl mx-auto px-4 py-10">
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 md:p-10">
-          <h2 className="text-2xl font-bold text-gray-800 mb-3">{title}</h2>
-          <p className="text-gray-600 mb-5">{description}</p>
-          <div className="inline-flex items-center rounded-full border border-amber-300 bg-amber-50 px-3 py-1 text-sm text-amber-800">
-            Schrittweise Umsetzung: Bereich ist angelegt, Inhalte folgen im nächsten Schritt.
-          </div>
-        </div>
-      </main>
-    </div>
-  );
-
-  if (currentView === 'newBusinessSalesPipeline') {
-    return renderPipelinePlaceholder(
-      'New Business Sales Pipeline',
-      'Dieser neue DLT-Bereich ist angelegt und wird als nächstes mit den konkreten Pipeline-Inhalten verbunden.'
-    );
-  }
-
-  if (currentView === 'expandingBusinessPayPipeline') {
-    return renderPipelinePlaceholder(
-      'Expanding Business Pay Pipeline',
-      'Dieser neue DLT-Bereich ist angelegt und wird im nächsten Schritt mit den Pay-Pipeline-Daten verdrahtet.'
-    );
-  }
-
-  if (currentView === 'expandingBusinessPipeline') {
-    return renderPipelinePlaceholder(
-      'Expanding Business Pipeline',
-      'Dieser neue DLT-Bereich ist angelegt und wird im nächsten Schritt mit den Expanding-Business-KPIs verbunden.'
     );
   }
 

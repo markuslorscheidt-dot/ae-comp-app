@@ -1,10 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import { google } from 'googleapis';
 import Papa from 'papaparse';
 import AdmZip from 'adm-zip';
 
 const PAY_STRIPE_TERMINAL_INSTALLATION_AUTO_IMPORT_KEY = 'pay_stripe_terminal_installation_auto_import_enabled';
 const DRIVE_SCOPE = ['https://www.googleapis.com/auth/drive.readonly'];
+const PAY_STRIPE_TERMINAL_INSTALLATION_PREFERRED_CSV = 'salon_level_details.csv';
 
 type ImportTrigger = 'manual' | 'cron';
 type ImportStatus = 'success' | 'partial' | 'failed' | 'skipped';
@@ -46,11 +48,8 @@ type ExtractResult =
       error: string;
     };
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 function getDriveFolderId(): string | null {
@@ -176,6 +175,18 @@ function parseCsv(csvText: string): { header: string[]; rows: Record<string, str
   return { header, rows };
 }
 
+function getPreferredCsvEntry(csvEntries: Array<{ entryName: string; getData: () => Buffer }>) {
+  const sortedCsvEntries = [...csvEntries].sort((a, b) =>
+    a.entryName.localeCompare(b.entryName, 'en', { sensitivity: 'base' })
+  );
+  const preferred = sortedCsvEntries.find((entry) => {
+    const normalizedPath = entry.entryName.replace(/\\/g, '/').toLowerCase();
+    const baseName = normalizedPath.split('/').pop() || '';
+    return baseName === PAY_STRIPE_TERMINAL_INSTALLATION_PREFERRED_CSV;
+  });
+  return preferred || null;
+}
+
 async function upsertSourceFileStatus(
   supabase: ReturnType<typeof createClient>,
   sourceFile: DriveFileMeta,
@@ -288,7 +299,7 @@ async function persistImportRun(params: {
 }
 
 export async function getPayStripeTerminalInstallationAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -319,7 +330,7 @@ export async function getPayStripeTerminalInstallationAutoImportState() {
 }
 
 export async function extractPayStripeTerminalInstallationRows(options?: { force?: boolean }): Promise<ExtractResult> {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return { success: false, status: 500, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' };
   }
@@ -343,7 +354,17 @@ export async function extractPayStripeTerminalInstallationRows(options?: { force
     };
   }
 
-  const csvEntry = csvEntries[0];
+  const csvEntry = getPreferredCsvEntry(csvEntries);
+  if (!csvEntry) {
+    const available = csvEntries.map((entry) => entry.entryName).sort((a, b) => a.localeCompare(b, 'en'));
+    return {
+      success: false,
+      status: 422,
+      error:
+        `Bevorzugte CSV (${PAY_STRIPE_TERMINAL_INSTALLATION_PREFERRED_CSV}) fehlt in der ZIP-Datei. ` +
+        `Vorhandene CSVs: ${available.join(', ')}`,
+    };
+  }
   const csvText = csvEntry.getData().toString('utf8');
   const parsed = parseCsv(csvText);
   if (parsed.header.length === 0) {
@@ -383,7 +404,7 @@ export async function extractPayStripeTerminalInstallationRows(options?: { force
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean; force?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

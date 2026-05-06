@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import {
+  getServerSupabase as getEnvironmentServerSupabase,
+  getServerSupabaseAnon,
+} from '@/lib/supabaseServer';
 
 type RolePayload = {
   role_key: string;
@@ -8,18 +12,8 @@ type RolePayload = {
   areas: string[];
 };
 
-function createServiceClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
-}
-
-function createAnonClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!supabaseUrl || !anonKey) return null;
-  return createClient(supabaseUrl, anonKey);
+async function createServiceClient() {
+  return getEnvironmentServerSupabase();
 }
 
 function isValidRoleKey(value: string) {
@@ -31,7 +25,7 @@ async function getRequestUserRole(request: Request, serviceClient: ReturnType<ty
   const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!token) return { role: null as string | null, error: 'Unauthorized' };
 
-  const anonClient = createAnonClient();
+  const anonClient = await getServerSupabaseAnon();
   if (!anonClient) return { role: null as string | null, error: 'Auth-Konfiguration fehlt.' };
 
   const { data: userRes, error: authError } = await anonClient.auth.getUser(token);
@@ -54,7 +48,7 @@ async function getRequestUserRole(request: Request, serviceClient: ReturnType<ty
 
 export async function GET(request: Request) {
   try {
-    const supabase = createServiceClient();
+    const supabase = await createServiceClient();
     if (!supabase) {
       return NextResponse.json({ success: false, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' }, { status: 500 });
     }
@@ -82,7 +76,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const supabase = createServiceClient();
+    const supabase = await createServiceClient();
     if (!supabase) {
       return NextResponse.json({ success: false, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' }, { status: 500 });
     }

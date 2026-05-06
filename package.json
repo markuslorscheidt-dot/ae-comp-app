@@ -7,7 +7,12 @@
     "dev:turbo": "next dev --turbo",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint .",
+    "cron:local": "scripts/run-local-crons.sh",
+    "imports:auto:run": "scripts/run-local-imports-cycle.sh",
+    "imports:auto:install": "scripts/install-local-import-scheduler.sh",
+    "imports:auto:uninstall": "scripts/uninstall-local-import-scheduler.sh",
+    "imports:auto:status": "scripts/status-local-import-scheduler.sh"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.90.1",
@@ -17,6 +22,7 @@
     "jspdf": "^4.1.0",
     "next": "^16.2.1",
     "papaparse": "^5.4.1",
+    "pdf-lib": "^1.17.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "recharts": "^2.10.0"
@@ -28,6 +34,8 @@
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "autoprefixer": "^10.0.1",
+    "eslint": "^9.39.1",
+    "eslint-config-next": "^16.2.1",
     "postcss": "^8",
     "tailwindcss": "^3.3.0",
     "typescript": "^5"

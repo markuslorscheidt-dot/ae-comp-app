@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { getServerSupabase as getEnvironmentServerSupabase } from '@/lib/supabaseServer';
 import { google } from 'googleapis';
 import Papa from 'papaparse';
 import AdmZip from 'adm-zip';
@@ -50,11 +51,8 @@ type ExtractResult =
       error: string;
     };
 
-function getServerSupabase() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) return null;
-  return createClient(supabaseUrl, serviceRoleKey);
+async function getServerSupabase() {
+  return getEnvironmentServerSupabase();
 }
 
 function getDriveFolderId(): string | null {
@@ -201,15 +199,6 @@ function pickPreferredCsvEntry(csvEntries: AdmZip.IZipEntry[]) {
   return ranked[0]?.entry || null;
 }
 
-function buildSecondarySourceRowNumber(csvEntryName: string, rowNumber: number): number {
-  let hash = 0;
-  for (let i = 0; i < csvEntryName.length; i++) {
-    hash = (hash * 31 + csvEntryName.charCodeAt(i)) % 20000;
-  }
-  const base = (hash + 1) * 100000;
-  return base + rowNumber;
-}
-
 async function upsertSourceFileStatus(
   supabase: ReturnType<typeof createClient>,
   sourceFile: DriveFileMeta,
@@ -322,7 +311,7 @@ async function persistImportRun(params: {
 }
 
 export async function getPhorestPayRevenueAutoImportState() {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false as const,
@@ -353,7 +342,7 @@ export async function getPhorestPayRevenueAutoImportState() {
 }
 
 export async function extractPhorestPayRevenueRows(options?: { force?: boolean }): Promise<ExtractResult> {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return { success: false, status: 500, error: 'SUPABASE_SERVICE_ROLE_KEY fehlt.' };
   }
@@ -386,19 +375,25 @@ export async function extractPhorestPayRevenueRows(options?: { force?: boolean }
     };
   }
   const preferredCsvName = preferredCsvEntry.entryName;
-  const csvEntriesSorted = [...csvEntries].sort((a, b) => {
-    const scoreDiff = scoreCsvEntryName(b.entryName) - scoreCsvEntryName(a.entryName);
-    if (scoreDiff !== 0) return scoreDiff;
-    return a.entryName.localeCompare(b.entryName);
-  });
+  const preferredCsvScore = scoreCsvEntryName(preferredCsvName);
+
+  /** Pro CSV-Datei eigener Block, damit source_row_number nicht kollidiert (Upsert-Key). */
+  const SOURCE_ROW_OFFSET_PER_FILE = 1_000_000;
+  const sortedCsvEntries = [...csvEntries].sort((a, b) => a.entryName.localeCompare(b.entryName));
 
   const warnings: Array<{ rowNumber: number; warning: string }> = [];
   if (csvEntries.length > 1) {
     warnings.push({
       rowNumber: 0,
       warning:
-        `ZIP enthaelt ${csvEntries.length} CSV-Dateien. Priorisiert wurde: ${preferredCsvName}. ` +
-        `Verfuegbare CSVs: ${csvEntries.map((entry) => entry.entryName).join(', ')}`,
+        `ZIP enthaelt ${csvEntries.length} CSV-Dateien; alle werden importiert (Row-Offset ${SOURCE_ROW_OFFSET_PER_FILE} pro Datei). ` +
+        `Dateien: ${sortedCsvEntries.map((entry) => entry.entryName).join(', ')}`,
+    });
+  }
+  if (preferredCsvScore <= 0) {
+    warnings.push({
+      rowNumber: 0,
+      warning: `Keine klar passende CSV erkannt. Referenz-Dateiname fuer Run-Log: ${preferredCsvName}`,
     });
   }
 
@@ -407,43 +402,59 @@ export async function extractPhorestPayRevenueRows(options?: { force?: boolean }
   const validRows: ParsedRevenueRow[] = [];
   const invalidRows: InvalidRevenueRow[] = [];
 
-  for (const csvEntry of csvEntriesSorted) {
-    const csvText = csvEntry.getData().toString('utf8');
-    const parsed = parseCsv(csvText);
+  sortedCsvEntries.forEach((csvEntry, fileIndex) => {
+    const entryName = csvEntry.entryName;
+    let parsed: { header: string[]; rows: Record<string, string>[] };
+    try {
+      const csvText = csvEntry.getData().toString('utf8');
+      parsed = parseCsv(csvText);
+    } catch (err: any) {
+      warnings.push({
+        rowNumber: 0,
+        warning: `CSV uebersprungen (${entryName}): ${err?.message || 'Lesen/Parse fehlgeschlagen'}`,
+      });
+      return;
+    }
+
     if (parsed.header.length === 0) {
       warnings.push({
         rowNumber: 0,
-        warning: `CSV Header leer oder nicht lesbar: ${csvEntry.entryName}`,
+        warning: `CSV ohne Header uebersprungen: ${entryName}`,
       });
-      continue;
+      return;
     }
 
     parsed.header.forEach((h) => headerSet.add(h));
+    const rowOffset = fileIndex * SOURCE_ROW_OFFSET_PER_FILE;
+
     parsed.rows.forEach((row, idx) => {
       const rowNumber = idx + 2;
       rawRows.push(row);
       if (isRowEffectivelyEmpty(row)) {
         invalidRows.push({
-          csvEntryName: csvEntry.entryName,
+          csvEntryName: entryName,
           rowNumber,
-          reasons: [`Leere Zeile (${csvEntry.entryName})`],
+          reasons: [`Leere Zeile (${entryName})`],
           raw: row,
         });
         return;
       }
 
-      const sourceRowNumber =
-        csvEntry.entryName === preferredCsvName
-          ? rowNumber
-          : buildSecondarySourceRowNumber(csvEntry.entryName, rowNumber);
-
       validRows.push({
-        csvEntryName: csvEntry.entryName,
+        csvEntryName: entryName,
         rowNumber,
-        sourceRowNumber,
+        sourceRowNumber: rowOffset + rowNumber,
         payload: row,
       });
     });
+  });
+
+  if (validRows.length === 0) {
+    return {
+      success: false,
+      status: 422,
+      error: 'Keine importierbaren Zeilen in der ZIP (alle CSVs leer, fehlerhaft oder ohne Header).',
+    };
   }
 
   if (headerSet.size === 0) {
@@ -454,7 +465,7 @@ export async function extractPhorestPayRevenueRows(options?: { force?: boolean }
     success: true,
     sourceFile,
     csvEntryName: preferredCsvName,
-    csvEntryNames: csvEntriesSorted.map((entry) => entry.entryName),
+    csvEntryNames: sortedCsvEntries.map((e) => e.entryName),
     zipEntries: entries.length,
     header: Array.from(headerSet),
     rawRows,
@@ -465,7 +476,7 @@ export async function extractPhorestPayRevenueRows(options?: { force?: boolean }
 }
 
 export async function runCommitImport(context?: { triggeredBy?: ImportTrigger; autoImportEnabled?: boolean; force?: boolean }) {
-  const supabase = getServerSupabase();
+  const supabase = await getServerSupabase();
   if (!supabase) {
     return {
       success: false,

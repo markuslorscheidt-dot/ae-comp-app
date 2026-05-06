@@ -8,21 +8,19 @@ Der Import soll aus einem Drive-ZIP die fachlich relevante CSV fuer Revenue-KPIs
 
 ## Import-Quelle und Priorisierung
 
-Der ZIP-Import kann mehrere CSV-Dateien enthalten. Alle CSV-Dateien werden in einem Lauf verarbeitet.
-Die Priorisierung steuert dabei:
+Der ZIP-Import verarbeitet **alle** enthaltenen CSV-Dateien in einem Lauf (alphabetisch sortiert).
 
-- welche CSV als `primary` fuer Referenzen/Run-Metadaten (`csv_entry_name`) gilt
-- welche CSV den nativen Zeilenindex fuer `source_row_number` behaelt
+Die **Prioritaetsliste** steuert nur noch, welcher Dateiname im Import-Run-Log als Referenz (`csv_entry_name`) gilt — nicht mehr, welche Datei allein importiert wird.
 
-Prioritaet:
+Prioritaet (hoeher = Referenz fuer Run-Log):
 
-1. Dateiname enthaelt `total_transaction_value` (hoechste Prioritaet)
+1. Dateiname enthaelt `total_transaction_value`
 2. Dateiname enthaelt `stripe_value_processed`
 3. Dateiname enthaelt `dach`
 4. Dateiname enthaelt `total_net_margin`
 5. Sonst alphabetischer Fallback
 
-Hinweis: Bei mehreren CSVs wird die priorisierte Datei in den Run-Warnings protokolliert (inkl. Liste aller verfuegbaren CSVs).
+Hinweis: Run-Warnings listen alle CSVs und den Row-Offset (siehe unten).
 
 ## Speicherung
 
@@ -39,10 +37,10 @@ Damit bleiben Quelle und Feldherkunft nachvollziehbar.
 
 ### Schluessel-Strategie bei mehreren CSVs
 
-- Priorisierte CSV: `source_row_number = originale CSV-Zeilennummer`
-- Weitere CSVs: deterministischer technischer Offset pro `csv_entry_name`, damit keine Kollision auf `(source_file_id, source_row_number)` entsteht
+- Jede CSV-Zeile: `source_row_number = datei_index * 1_000_000 + (CSV-Datenzeile, 1-basiert inkl. Header-Offset wie bisher)`
+- Dadurch keine Kollision auf `(source_file_id, source_row_number)` zwischen Dateien derselben ZIP.
 
-Dadurch sind alle CSVs derselben ZIP parallel speicherbar, ohne Schemawechsel.
+Die erste Datei (alphabetisch) behaelt damit weiterhin die kleinsten Nummern (kompatibel mit aelteren Ein-CSV-Imports).
 
 ## KPI-Mapping
 
@@ -75,21 +73,23 @@ Typischer Total-Filter:
 
 ## Empfehlung fuer Weiterentwicklung
 
-1. CSV-Auswahl optional im UI explizit steuerbar machen (z. B. `total_transaction_value` vs `total_net_margin`)
-2. Regionsfeld (`Region`/`Country`) verpflichtend importieren, damit DACH-Filter datengetrieben statt implizit ist
-3. Dedizierte Reporting-View aufbauen, die KPI-Feldnamen stabilisiert (unabhaengig vom CSV-Header-Wording)
+1. Regionsfeld (`Region`/`Country`) verpflichtend importieren, damit DACH-Filter datengetrieben statt implizit ist
+2. Optional: UI-Schalter fuer KPI-Auswahl (Transaction Value vs. Net Margin) in Berichten
 
 ## Reporting-Views (umgesetzt)
 
-Migration/SQL-Datei:
+Migration/SQL-Dateien:
 
-- `supabase-phorest-pay-revenue-reporting-views.sql`
+- `supabase-phorest-pay-revenue-reporting-views.sql` — Stripe / Transaction Value (Pivot-CSV)
+- `supabase-phorest-pay-revenue-net-margin-views.sql` — **Net Margin DACH** (`*net_margin*`-CSV, ohne `stripe_value_processed`), plus Monats-Dedupe fuer beide Monats-Views
 
-Enthaelt:
+Enthaelt u. a.:
 
 - `reporting_phorest_pay_revenue_stripe_processed_base`
-- `reporting_phorest_pay_revenue_dach_monthly`
+- `reporting_phorest_pay_revenue_dach_monthly` (Transaction Volume, eine Zeile pro Monat / juengster Import)
 - `reporting_phorest_pay_revenue_dach_grand_total`
+- `reporting_phorest_pay_revenue_net_margin_base`
+- `reporting_phorest_pay_revenue_dach_net_margin_monthly` — **fuer NRR / Expanding ARR (Pay-Delta)**
 
 ### Beispielabfragen
 
@@ -98,6 +98,13 @@ Monatswerte DACH / Total Transaction Value:
 ```sql
 SELECT activity_month, dach_total_transaction_value, global_total_transaction_value
 FROM reporting_phorest_pay_revenue_dach_monthly;
+```
+
+Monatswerte DACH / Net Margin (NRR):
+
+```sql
+SELECT activity_month, dach_net_margin, global_net_margin
+FROM reporting_phorest_pay_revenue_dach_net_margin_monthly;
 ```
 
 Gesamtwert DACH / Total Transaction Value:

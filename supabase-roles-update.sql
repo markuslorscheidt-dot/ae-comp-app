@@ -82,6 +82,7 @@ CREATE POLICY "Users can insert own go_lives" ON go_lives
   FOR INSERT WITH CHECK (user_id = auth.uid());
 
 DROP POLICY IF EXISTS "Users can update own go_lives" ON go_lives;
+DROP POLICY IF EXISTS "Users can update go_lives" ON go_lives;
 CREATE POLICY "Users can update go_lives" ON go_lives
   FOR UPDATE USING (
     user_id = auth.uid()
@@ -89,6 +90,7 @@ CREATE POLICY "Users can update go_lives" ON go_lives
   );
 
 DROP POLICY IF EXISTS "Users can delete own go_lives" ON go_lives;
+DROP POLICY IF EXISTS "Users can delete go_lives" ON go_lives;
 CREATE POLICY "Users can delete go_lives" ON go_lives
   FOR DELETE USING (
     user_id = auth.uid()

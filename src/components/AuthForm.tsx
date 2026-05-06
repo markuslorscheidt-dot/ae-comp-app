@@ -2,6 +2,12 @@
 
 import { useState } from 'react';
 import { useLanguage } from '@/lib/LanguageContext';
+import {
+  getSupabaseEnvironment,
+  getSupabaseEnvironmentLabel,
+  setSupabaseEnvironment,
+  type SupabaseEnvironment,
+} from '@/lib/supabase';
 import LanguageSelector from './LanguageSelector';
 
 interface AuthFormProps {
@@ -20,6 +26,14 @@ export default function AuthForm({ onSignIn, onSignUp, onRequestOnboarding }: Au
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
   const [onboardingLoading, setOnboardingLoading] = useState(false);
+  const [environment, setEnvironment] = useState<SupabaseEnvironment>(() => getSupabaseEnvironment());
+
+  const handleEnvironmentChange = (nextEnvironment: SupabaseEnvironment) => {
+    setEnvironment(nextEnvironment);
+    setSupabaseEnvironment(nextEnvironment);
+    setError('');
+    setSuccess('');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,10 +42,13 @@ export default function AuthForm({ onSignIn, onSignUp, onRequestOnboarding }: Au
     setLoading(true);
 
     try {
+      console.log(`Login-Versuch gegen ${getSupabaseEnvironmentLabel(environment)}-Supabase`);
       if (isLogin) {
         const result = await onSignIn(email, password);
         if (result.error) {
           setError(result.error.message || t('auth.loginError'));
+        } else {
+          setSuccess(`Login gegen ${getSupabaseEnvironmentLabel(environment)} erfolgreich. Lade Profil...`);
         }
       } else {
         const result = await onSignUp(email, password, name);
@@ -83,6 +100,41 @@ export default function AuthForm({ onSignIn, onSignUp, onRequestOnboarding }: Au
           <h1 className="text-2xl font-bold text-gray-800">Commercial Business Planner</h1>
           <p className="text-gray-500 mt-2">
             {isLogin ? t('auth.loginTitle') : t('auth.registerTitle')}
+          </p>
+        </div>
+
+        <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 p-2">
+          <div className="mb-2 px-1 text-xs font-medium uppercase tracking-wide text-gray-500">
+            Datenbank-Umgebung
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => handleEnvironmentChange('local')}
+              className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                environment === 'local'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              Lokal
+            </button>
+            <button
+              type="button"
+              onClick={() => handleEnvironmentChange('online')}
+              className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                environment === 'online'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              Online
+            </button>
+          </div>
+          <p className="mt-2 px-1 text-xs text-gray-500">
+            {environment === 'local'
+              ? 'Login, Lesen und Speichern laufen gegen deine lokale Supabase.'
+              : 'Login, Lesen und Speichern laufen gegen die Online-Supabase.'}
           </p>
         </div>
 

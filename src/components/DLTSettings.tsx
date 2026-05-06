@@ -188,12 +188,21 @@ interface ChurnAutoImportResponse {
 interface UpDownsellsDryRunResponse {
   success: boolean;
   mode?: string;
+  sourceFile?: {
+    id: string;
+    name: string;
+    modifiedTime: string;
+  };
+  csvEntryName?: string;
+  zipEntries?: number;
+  header?: string[];
   stats?: {
-    totalRowsFromSheet: number;
+    totalRowsFromFile: number;
     parsedRows: number;
     validRows: number;
     invalidRows: number;
   };
+  warnings?: Array<{ rowNumber: number; warning: string }>;
   preview?: {
     valid: Array<{
       rowNumber: number;
@@ -215,8 +224,15 @@ interface UpDownsellsDryRunResponse {
 interface UpDownsellsCommitResponse {
   success: boolean;
   mode?: string;
+  sourceFile?: {
+    id: string;
+    name: string;
+    modifiedTime: string;
+  };
+  csvEntryName?: string;
+  skipped?: boolean;
   stats?: {
-    totalRowsFromSheet: number;
+    totalRowsFromFile: number;
     parsedRows: number;
     validRows: number;
     invalidRows: number;
@@ -225,6 +241,7 @@ interface UpDownsellsCommitResponse {
     failed: number;
     duplicates: number;
     updated?: number;
+    zipEntries?: number;
   };
   errors?: Array<{ rowNumber: number; oakId: number | null; error: string }>;
   warnings?: Array<{ rowNumber: number; oakId: number | null; warning: string }>;
@@ -354,6 +371,12 @@ type PhorestPayRevenueAutoImportResponse = PayStripeTerminalInstallationAutoImpo
 type LookerLeadsDryRunResponse = PayStripeTerminalInstallationDryRunResponse;
 type LookerLeadsCommitResponse = PayStripeTerminalInstallationCommitResponse;
 type LookerLeadsAutoImportResponse = PayStripeTerminalInstallationAutoImportResponse;
+type DachClientNumbersDryRunResponse = PayStripeTerminalInstallationDryRunResponse;
+type DachClientNumbersCommitResponse = PayStripeTerminalInstallationCommitResponse;
+type DachClientNumbersAutoImportResponse = PayStripeTerminalInstallationAutoImportResponse;
+type MarketingCostsDryRunResponse = PayStripeTerminalInstallationDryRunResponse;
+type MarketingCostsCommitResponse = PayStripeTerminalInstallationCommitResponse;
+type MarketingCostsAutoImportResponse = PayStripeTerminalInstallationAutoImportResponse;
 
 interface SalespipeDryRunResponse {
   success: boolean;
@@ -611,6 +634,10 @@ interface UpDownsellsImportRun {
   status: 'success' | 'partial' | 'failed' | 'skipped';
   started_at: string;
   finished_at: string | null;
+  sheet_range?: string | null;
+  source_file_name?: string | null;
+  csv_entry_name?: string | null;
+  zip_entries?: number;
   imported: number;
   failed: number;
   duplicates: number;
@@ -693,6 +720,10 @@ type PhorestPayRevenueImportRun = PayStripeTerminalInstallationImportRun;
 type PhorestPayRevenueImportRunItem = PayStripeTerminalInstallationImportRunItem;
 type LookerLeadsImportRun = PayStripeTerminalInstallationImportRun;
 type LookerLeadsImportRunItem = PayStripeTerminalInstallationImportRunItem;
+type DachClientNumbersImportRun = PayStripeTerminalInstallationImportRun;
+type DachClientNumbersImportRunItem = PayStripeTerminalInstallationImportRunItem;
+type MarketingCostsImportRun = PayStripeTerminalInstallationImportRun;
+type MarketingCostsImportRunItem = PayStripeTerminalInstallationImportRunItem;
 
 interface SalespipeImportRun {
   id: string;
@@ -798,6 +829,9 @@ interface Salespipe2ImportRunItem {
   created_at: string;
 }
 
+const SALESPIPE2_UI_TIMEOUT_MS = 60000;
+const SMS_UI_TIMEOUT_MS = 60000;
+
 const GO_LIVE_BATCH_FIELD_MAPPING: Array<{
   source: string;
   target: string;
@@ -844,16 +878,25 @@ const UP_DOWNSELLS_BATCH_FIELD_MAPPING: Array<{
   required?: boolean;
 }> = [
   {
-    source: 'Upgrade / Downgrade Month',
+    source: 'Usage Month (Looker) / Upgrade / Downgrade Month (Legacy-Sheet)',
     target: 'up_downsells_events.event_month',
-    transform: 'YYYY-MM -> YYYY-MM-01',
+    transform: 'ISO, YYYY-MM, DD.MM.YYYY oder z. B. Mar 2026 -> YYYY-MM-01',
     required: true,
   },
-  { source: 'Oak ID', target: 'up_downsells_events.oak_id', transform: 'Integer', required: true },
-  { source: 'Customer Name', target: 'up_downsells_events.customer_name', transform: 'Trim / String', required: true },
-  { source: 'Net Growth ARR', target: 'up_downsells_events.net_growth_arr', transform: 'Numerisch (DE/EN Format)' },
-  { source: 'Net Loss ARR', target: 'up_downsells_events.net_loss_arr', transform: 'Numerisch (DE/EN Format)' },
-  { source: 'Net Growth + Net Loss', target: 'up_downsells_events.net_arr', transform: 'Berechnet' },
+  { source: 'OAK ID', target: 'up_downsells_events.oak_id', transform: 'Integer', required: true },
+  {
+    source: 'Branch Name (Looker) / Customer Name (Legacy-Sheet)',
+    target: 'up_downsells_events.customer_name',
+    transform: 'Trim / String',
+    required: true,
+  },
+  {
+    source: 'Net Package fee growth Amount(ARR) (Looker)',
+    target: 'up_downsells_events.net_growth_arr / net_loss_arr',
+    transform: '>0 -> Growth, <0 -> Loss (negativ in DB)',
+    required: true,
+  },
+  { source: '—', target: 'up_downsells_events.net_arr', transform: 'Summe Growth + Loss', required: true },
 ];
 
 const SALESPIPE_BATCH_FIELD_MAPPING: Array<{
@@ -999,6 +1042,70 @@ const LOOKER_LEADS_FIELD_MAPPING: Array<{
   },
 ];
 
+const DACH_CLIENT_NUMBERS_FIELD_MAPPING: Array<{
+  source: string;
+  target: string;
+  transform: string;
+  required?: boolean;
+}> = [
+  {
+    source: 'ZIP-Datei "DACH Client Numbers" aus Drive-Ordner',
+    target: 'dach_client_numbers_source_files',
+    transform: 'Neueste unverarbeitete ZIP-Datei (inkrementell via drive_file_id)',
+    required: true,
+  },
+  {
+    source: 'CSV in ZIP',
+    target: 'dach_client_numbers_events.csv_entry_name',
+    transform: 'Alle CSV-Dateien werden verarbeitet; priorisierte CSV als Referenz im Run',
+    required: true,
+  },
+  {
+    source: 'CSV Zeile',
+    target: 'dach_client_numbers_events.source_row_number',
+    transform: 'Business Key mit source_file_id (idempotent; bei mehreren CSVs mit technischem Offset)',
+    required: true,
+  },
+  {
+    source: 'Alle CSV-Spalten',
+    target: 'dach_client_numbers_events.payload',
+    transform: 'Dynamisch als JSONB gespeichert',
+    required: true,
+  },
+];
+
+const MARKETING_COSTS_FIELD_MAPPING: Array<{
+  source: string;
+  target: string;
+  transform: string;
+  required?: boolean;
+}> = [
+  {
+    source: 'ZIP-Datei "Marketing Cost" aus Drive-Ordner',
+    target: 'marketing_costs_source_files',
+    transform: 'Neueste unverarbeitete ZIP-Datei (inkrementell via drive_file_id)',
+    required: true,
+  },
+  {
+    source: 'CSV in ZIP',
+    target: 'marketing_costs_events.csv_entry_name',
+    transform: 'Alle CSV-Dateien werden verarbeitet; priorisierte CSV als Referenz im Run',
+    required: true,
+  },
+  {
+    source: 'CSV Zeile',
+    target: 'marketing_costs_events.source_row_number',
+    transform: 'Business Key mit source_file_id (idempotent; bei mehreren CSVs mit technischem Offset)',
+    required: true,
+  },
+  {
+    source: 'Alle CSV-Spalten',
+    target: 'marketing_costs_events.payload',
+    transform: 'Dynamisch als JSONB gespeichert',
+    required: true,
+  },
+];
+
 // Role display names
 const ROLE_LABELS: Record<UserRole, string> = {
   country_manager: 'Country Manager',
@@ -1055,9 +1162,18 @@ const EXPANDING_ARR_DEFAULTS = {
   totalUpgrades: [12, 27, 45, 53, 50, 45, 44, 50, 36, 36, 30, 32],
   totalDowngrades: [-2, -3, -1, 0, -3, -2, -2, -1, -1, -1, -1, -3],
   netUpgradeDowngradeArr: [14440, 18565, 18565, 22691, 20629, 18565, 18565, 20628, 18061, 18060, 10567, 6946],
+  existingTerminalSales: [20, 20, 20, 25, 35, 25, 25, 30, 40, 40, 40, 10],
+  existingTippingSales: [16, 16, 16, 16, 16, 17, 15, 15, 19, 19, 18, 15],
 };
 
 const EMPTY_MONTH_VALUES = Array.from({ length: 12 }, () => 0);
+
+interface NrrBasisValues {
+  /** Referenz nur (Vorjahresabschluss), nicht fuer NRR-Fortschreibung */
+  arr_basis_dec: number;
+  /** Berechnungsbasis: manueller ARR-Stand Ende Januar des Planjahres */
+  arr_basis_jan_end: number;
+}
 
 interface ExpandingArrData {
   upgrade_downgrade: {
@@ -1065,6 +1181,11 @@ interface ExpandingArrData {
     total_downgrades: number[];
     net_upgrade_downgrade_arr: number[];
   };
+  existing_clients: {
+    terminal_sales: number[];
+    tipping_sales: number[];
+  };
+  nrr_basis: NrrBasisValues;
 }
 
 interface ChurnArrData {
@@ -1128,14 +1249,30 @@ function parseChurnArrData(raw: unknown): ChurnArrData {
   };
 }
 
+function parseNrrBasisValues(raw: unknown): NrrBasisValues {
+  const data = raw && typeof raw === 'object' ? (raw as any) : {};
+  return {
+    arr_basis_dec: typeof data.arr_basis_dec === 'number' ? data.arr_basis_dec : 0,
+    arr_basis_jan_end: typeof data.arr_basis_jan_end === 'number' ? data.arr_basis_jan_end : 0,
+  };
+}
+
 function parseExpandingArrData(raw: unknown): ExpandingArrData {
   const data = raw && typeof raw === 'object' ? (raw as any) : {};
   const upgradeDowngrade =
     data.upgrade_downgrade && typeof data.upgrade_downgrade === 'object' ? data.upgrade_downgrade : {};
+  const existingClients =
+    data.existing_clients && typeof data.existing_clients === 'object' ? data.existing_clients : {};
 
   const upgrades = normalizeMonthlyArray(upgradeDowngrade.total_upgrades);
   const downgrades = normalizeMonthlyArray(upgradeDowngrade.total_downgrades);
   const netArr = normalizeMonthlyArray(upgradeDowngrade.net_upgrade_downgrade_arr);
+  const existingTerminalSales = Array.isArray(existingClients.terminal_sales)
+    ? normalizeMonthlyArray(existingClients.terminal_sales)
+    : [...EXPANDING_ARR_DEFAULTS.existingTerminalSales];
+  const existingTippingSales = Array.isArray(existingClients.tipping_sales)
+    ? normalizeMonthlyArray(existingClients.tipping_sales)
+    : [...EXPANDING_ARR_DEFAULTS.existingTippingSales];
 
   const hasAnyData =
     upgrades.some((v) => v !== 0) || downgrades.some((v) => v !== 0) || netArr.some((v) => v !== 0);
@@ -1147,6 +1284,11 @@ function parseExpandingArrData(raw: unknown): ExpandingArrData {
         total_downgrades: [...EXPANDING_ARR_DEFAULTS.totalDowngrades],
         net_upgrade_downgrade_arr: [...EXPANDING_ARR_DEFAULTS.netUpgradeDowngradeArr],
       },
+      existing_clients: {
+        terminal_sales: existingTerminalSales,
+        tipping_sales: existingTippingSales,
+      },
+      nrr_basis: parseNrrBasisValues(data.nrr_basis),
     };
   }
 
@@ -1156,6 +1298,11 @@ function parseExpandingArrData(raw: unknown): ExpandingArrData {
       total_downgrades: downgrades,
       net_upgrade_downgrade_arr: netArr,
     },
+    existing_clients: {
+      terminal_sales: existingTerminalSales,
+      tipping_sales: existingTippingSales,
+    },
+    nrr_basis: parseNrrBasisValues(data.nrr_basis),
   };
 }
 
@@ -1207,6 +1354,8 @@ type ImportSubTab =
   | 'payStripeTerminalInstallationImport'
   | 'phorestPayRevenueImport'
   | 'lookerLeadsImport'
+  | 'dachClientNumbersImport'
+  | 'marketingCostsImport'
   | 'salespipeImport'
   | 'salespipe2Import'
   | 'leadsImport'
@@ -1297,6 +1446,8 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [smsAutoImportLoading, setSmsAutoImportLoading] = useState(false);
   const [smsAutoImportSaving, setSmsAutoImportSaving] = useState(false);
   const [smsAutoImportMessage, setSmsAutoImportMessage] = useState('');
+  const smsAutoImportLoadReqSeqRef = useRef(0);
+  const smsAutoImportSaveReqSeqRef = useRef(0);
   const [smsBatchLoading, setSmsBatchLoading] = useState(false);
   const [smsBatchError, setSmsBatchError] = useState('');
   const [smsBatchResult, setSmsBatchResult] = useState<SmsDryRunResponse | null>(null);
@@ -1389,6 +1540,50 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [selectedLookerLeadsImportRunItems, setSelectedLookerLeadsImportRunItems] = useState<LookerLeadsImportRunItem[]>(
     []
   );
+  const [dachClientNumbersImportMode, setDachClientNumbersImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [dachClientNumbersAutoImportEnabled, setDachClientNumbersAutoImportEnabled] = useState(false);
+  const [dachClientNumbersAutoImportLoading, setDachClientNumbersAutoImportLoading] = useState(false);
+  const [dachClientNumbersAutoImportSaving, setDachClientNumbersAutoImportSaving] = useState(false);
+  const [dachClientNumbersAutoImportMessage, setDachClientNumbersAutoImportMessage] = useState('');
+  const [dachClientNumbersBatchLoading, setDachClientNumbersBatchLoading] = useState(false);
+  const [dachClientNumbersBatchError, setDachClientNumbersBatchError] = useState('');
+  const [dachClientNumbersBatchResult, setDachClientNumbersBatchResult] =
+    useState<DachClientNumbersDryRunResponse | null>(null);
+  const [lastDachClientNumbersBatchCheckAt, setLastDachClientNumbersBatchCheckAt] = useState<string | null>(null);
+  const [dachClientNumbersBatchImportLoading, setDachClientNumbersBatchImportLoading] = useState(false);
+  const [dachClientNumbersBatchImportError, setDachClientNumbersBatchImportError] = useState('');
+  const [dachClientNumbersBatchImportResult, setDachClientNumbersBatchImportResult] =
+    useState<DachClientNumbersCommitResponse | null>(null);
+  const [lastDachClientNumbersBatchImportAt, setLastDachClientNumbersBatchImportAt] = useState<string | null>(null);
+  const [dachClientNumbersImportHistoryLoading, setDachClientNumbersImportHistoryLoading] = useState(false);
+  const [dachClientNumbersImportHistoryError, setDachClientNumbersImportHistoryError] = useState('');
+  const [dachClientNumbersImportRuns, setDachClientNumbersImportRuns] = useState<DachClientNumbersImportRun[]>([]);
+  const [selectedDachClientNumbersImportRunId, setSelectedDachClientNumbersImportRunId] = useState<string | null>(null);
+  const [selectedDachClientNumbersImportRunItems, setSelectedDachClientNumbersImportRunItems] = useState<
+    DachClientNumbersImportRunItem[]
+  >([]);
+  const [marketingCostsImportMode, setMarketingCostsImportMode] = useState<'manual' | 'automatic'>('manual');
+  const [marketingCostsAutoImportEnabled, setMarketingCostsAutoImportEnabled] = useState(false);
+  const [marketingCostsAutoImportLoading, setMarketingCostsAutoImportLoading] = useState(false);
+  const [marketingCostsAutoImportSaving, setMarketingCostsAutoImportSaving] = useState(false);
+  const [marketingCostsAutoImportMessage, setMarketingCostsAutoImportMessage] = useState('');
+  const [marketingCostsBatchLoading, setMarketingCostsBatchLoading] = useState(false);
+  const [marketingCostsBatchError, setMarketingCostsBatchError] = useState('');
+  const [marketingCostsBatchResult, setMarketingCostsBatchResult] =
+    useState<MarketingCostsDryRunResponse | null>(null);
+  const [lastMarketingCostsBatchCheckAt, setLastMarketingCostsBatchCheckAt] = useState<string | null>(null);
+  const [marketingCostsBatchImportLoading, setMarketingCostsBatchImportLoading] = useState(false);
+  const [marketingCostsBatchImportError, setMarketingCostsBatchImportError] = useState('');
+  const [marketingCostsBatchImportResult, setMarketingCostsBatchImportResult] =
+    useState<MarketingCostsCommitResponse | null>(null);
+  const [lastMarketingCostsBatchImportAt, setLastMarketingCostsBatchImportAt] = useState<string | null>(null);
+  const [marketingCostsImportHistoryLoading, setMarketingCostsImportHistoryLoading] = useState(false);
+  const [marketingCostsImportHistoryError, setMarketingCostsImportHistoryError] = useState('');
+  const [marketingCostsImportRuns, setMarketingCostsImportRuns] = useState<MarketingCostsImportRun[]>([]);
+  const [selectedMarketingCostsImportRunId, setSelectedMarketingCostsImportRunId] = useState<string | null>(null);
+  const [selectedMarketingCostsImportRunItems, setSelectedMarketingCostsImportRunItems] = useState<
+    MarketingCostsImportRunItem[]
+  >([]);
   const [salespipeImportMode, setSalespipeImportMode] = useState<'manual' | 'automatic'>('manual');
   const [salespipeAutoImportEnabled, setSalespipeAutoImportEnabled] = useState(false);
   const [salespipeAutoImportLoading, setSalespipeAutoImportLoading] = useState(false);
@@ -1443,6 +1638,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [salespipe2EventsCountLoading, setSalespipe2EventsCountLoading] = useState(false);
   const [salespipe2EventsCountError, setSalespipe2EventsCountError] = useState('');
   const [salespipe2EventsCount, setSalespipe2EventsCount] = useState<number | null>(null);
+  const salespipe2AutoImportReqSeqRef = useRef(0);
+  const salespipe2HistoryReqSeqRef = useRef(0);
+  const salespipe2StatsReqSeqRef = useRef(0);
   const [signupsImportHistoryLoading, setSignupsImportHistoryLoading] = useState(false);
   const [signupsImportHistoryError, setSignupsImportHistoryError] = useState('');
   const [signupsImportRuns, setSignupsImportRuns] = useState<SignupsImportRun[]>([]);
@@ -1520,6 +1718,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [expandingNetUpgradeDowngradeArr, setExpandingNetUpgradeDowngradeArr] = useState<number[]>([
     ...EXPANDING_ARR_DEFAULTS.netUpgradeDowngradeArr,
   ]);
+  const [expandingExistingTerminalSales, setExpandingExistingTerminalSales] = useState<number[]>([
+    ...EXPANDING_ARR_DEFAULTS.existingTerminalSales,
+  ]);
+  const [expandingExistingTippingSales, setExpandingExistingTippingSales] = useState<number[]>([
+    ...EXPANDING_ARR_DEFAULTS.existingTippingSales,
+  ]);
+
+  // ========== NRR BASISWERTE ==========
+  const [nrrArrBasisDec, setNrrArrBasisDec] = useState<number>(0);
+  const [nrrArrBasisJanEnd, setNrrArrBasisJanEnd] = useState<number>(0);
 
   // ========== 3. CHURN ARR (manuelle Eingabe) ==========
   const [invoicedChurnTargetCount, setInvoicedChurnTargetCount] = useState<number[]>([...EMPTY_MONTH_VALUES]);
@@ -1542,6 +1750,8 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     newArr: true,
     expandingArr: true,
     churnArr: true,
+    nrrBasis: true,
+    expandingExistingArr: true,
     newClients: true,
     churnedClients: true,
     endingClients: true,
@@ -1578,6 +1788,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [savingUser, setSavingUser] = useState(false);
   const [userEditError, setUserEditError] = useState('');
+  const [userEditNewPassword, setUserEditNewPassword] = useState('');
+  const [userEditConfirmPassword, setUserEditConfirmPassword] = useState('');
+  const [userEditPasswordSuccess, setUserEditPasswordSuccess] = useState('');
   const [roleHistory, setRoleHistory] = useState<UserRoleHistoryRecord[]>([]);
   const [aeRoleHistoryByUser, setAeRoleHistoryByUser] = useState<Record<string, RoleHistorySlice[]>>({});
   const [plannedRoleChanges, setPlannedRoleChanges] = useState<Record<string, { role: string; effective_from: string }>>({});
@@ -2207,6 +2420,168 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const handleRunDachClientNumbersBatchCheck = async () => {
+    setDachClientNumbersBatchLoading(true);
+    setDachClientNumbersBatchError('');
+    try {
+      const response = await fetch('/api/dachClientNumbers/sync', { method: 'GET' });
+      const data = (await response.json()) as DachClientNumbersDryRunResponse;
+      if (!response.ok || !data.success) {
+        setDachClientNumbersBatchResult(null);
+        setDachClientNumbersBatchError(data.error || 'Batch-Pruefung fehlgeschlagen');
+        return;
+      }
+      setDachClientNumbersBatchResult(data);
+      setLastDachClientNumbersBatchCheckAt(new Date().toISOString());
+    } catch (err: any) {
+      setDachClientNumbersBatchResult(null);
+      setDachClientNumbersBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
+    } finally {
+      setDachClientNumbersBatchLoading(false);
+    }
+  };
+
+  const handleRunDachClientNumbersBatchImport = async () => {
+    setDachClientNumbersBatchImportLoading(true);
+    setDachClientNumbersBatchImportError('');
+    try {
+      const response = await fetch('/api/dachClientNumbers/sync', { method: 'POST' });
+      const data = (await response.json()) as DachClientNumbersCommitResponse;
+      if (!response.ok || !data.success) {
+        setDachClientNumbersBatchImportResult(null);
+        setDachClientNumbersBatchImportError(data.error || 'Manueller Import fehlgeschlagen');
+        return;
+      }
+      setDachClientNumbersBatchImportResult(data);
+      setLastDachClientNumbersBatchImportAt(new Date().toISOString());
+      await loadDachClientNumbersImportHistory();
+    } catch (err: any) {
+      setDachClientNumbersBatchImportResult(null);
+      setDachClientNumbersBatchImportError(err?.message || 'Manueller Import fehlgeschlagen');
+    } finally {
+      setDachClientNumbersBatchImportLoading(false);
+    }
+  };
+
+  const loadDachClientNumbersImportHistory = useCallback(async () => {
+    setDachClientNumbersImportHistoryLoading(true);
+    setDachClientNumbersImportHistoryError('');
+    try {
+      const response = await fetch('/api/dachClientNumbers/sync/history?limit=20', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setDachClientNumbersImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as DachClientNumbersImportRun[];
+      setDachClientNumbersImportRuns(runs);
+      if (!selectedDachClientNumbersImportRunId && runs.length > 0) {
+        setSelectedDachClientNumbersImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setDachClientNumbersImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setDachClientNumbersImportHistoryLoading(false);
+    }
+  }, [selectedDachClientNumbersImportRunId]);
+
+  const loadDachClientNumbersImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/dachClientNumbers/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setDachClientNumbersImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedDachClientNumbersImportRunItems((data.items || []) as DachClientNumbersImportRunItem[]);
+    } catch (err: any) {
+      setDachClientNumbersImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
+  const handleRunMarketingCostsBatchCheck = async () => {
+    setMarketingCostsBatchLoading(true);
+    setMarketingCostsBatchError('');
+    try {
+      const response = await fetch('/api/marketingCosts/sync', { method: 'GET' });
+      const data = (await response.json()) as MarketingCostsDryRunResponse;
+      if (!response.ok || !data.success) {
+        setMarketingCostsBatchResult(null);
+        setMarketingCostsBatchError(data.error || 'Batch-Pruefung fehlgeschlagen');
+        return;
+      }
+      setMarketingCostsBatchResult(data);
+      setLastMarketingCostsBatchCheckAt(new Date().toISOString());
+    } catch (err: any) {
+      setMarketingCostsBatchResult(null);
+      setMarketingCostsBatchError(err?.message || 'Batch-Pruefung fehlgeschlagen');
+    } finally {
+      setMarketingCostsBatchLoading(false);
+    }
+  };
+
+  const handleRunMarketingCostsBatchImport = async () => {
+    setMarketingCostsBatchImportLoading(true);
+    setMarketingCostsBatchImportError('');
+    try {
+      const response = await fetch('/api/marketingCosts/sync', { method: 'POST' });
+      const data = (await response.json()) as MarketingCostsCommitResponse;
+      if (!response.ok || !data.success) {
+        setMarketingCostsBatchImportResult(null);
+        setMarketingCostsBatchImportError(data.error || 'Manueller Import fehlgeschlagen');
+        return;
+      }
+      setMarketingCostsBatchImportResult(data);
+      setLastMarketingCostsBatchImportAt(new Date().toISOString());
+      await loadMarketingCostsImportHistory();
+    } catch (err: any) {
+      setMarketingCostsBatchImportResult(null);
+      setMarketingCostsBatchImportError(err?.message || 'Manueller Import fehlgeschlagen');
+    } finally {
+      setMarketingCostsBatchImportLoading(false);
+    }
+  };
+
+  const loadMarketingCostsImportHistory = useCallback(async () => {
+    setMarketingCostsImportHistoryLoading(true);
+    setMarketingCostsImportHistoryError('');
+    try {
+      const response = await fetch('/api/marketingCosts/sync/history?limit=20', { method: 'GET' });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setMarketingCostsImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
+        return;
+      }
+      const runs = (data.runs || []) as MarketingCostsImportRun[];
+      setMarketingCostsImportRuns(runs);
+      if (!selectedMarketingCostsImportRunId && runs.length > 0) {
+        setSelectedMarketingCostsImportRunId(runs[0].id);
+      }
+    } catch (err: any) {
+      setMarketingCostsImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+    } finally {
+      setMarketingCostsImportHistoryLoading(false);
+    }
+  }, [selectedMarketingCostsImportRunId]);
+
+  const loadMarketingCostsImportRunItems = useCallback(async (runId: string) => {
+    try {
+      const response = await fetch(`/api/marketingCosts/sync/history?runId=${encodeURIComponent(runId)}`, {
+        method: 'GET',
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        setMarketingCostsImportHistoryError(data.error || 'Import-Details konnten nicht geladen werden.');
+        return;
+      }
+      setSelectedMarketingCostsImportRunItems((data.items || []) as MarketingCostsImportRunItem[]);
+    } catch (err: any) {
+      setMarketingCostsImportHistoryError(err?.message || 'Import-Details konnten nicht geladen werden.');
+    }
+  }, []);
+
   const handleRunSalespipeBatchCheck = async () => {
     setSalespipeBatchLoading(true);
     setSalespipeBatchError('');
@@ -2370,26 +2745,42 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   }, []);
 
   const loadSalespipe2ImportHistory = useCallback(async () => {
+    const reqSeq = ++salespipe2HistoryReqSeqRef.current;
     setSalespipe2ImportHistoryLoading(true);
     setSalespipe2ImportHistoryError('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SALESPIPE2_UI_TIMEOUT_MS);
     try {
-      const response = await fetch('/api/salespipe2/sync/history?limit=50', { method: 'GET' });
+      const response = await fetch('/api/salespipe2/sync/history?limit=50', {
+        method: 'GET',
+        signal: controller.signal,
+      });
       const data = await response.json();
       if (!response.ok || !data.success) {
         setSalespipe2ImportHistoryError(data.error || 'Import-Historie konnte nicht geladen werden.');
         return;
       }
       const runs = (data.runs || []) as Salespipe2ImportRun[];
+      if (reqSeq !== salespipe2HistoryReqSeqRef.current) return;
       setSalespipe2ImportRuns(runs);
       if (!selectedSalespipe2ImportRunId && runs.length > 0) {
         setSelectedSalespipe2ImportRunId(runs[0].id);
       }
     } catch (err: any) {
-      setSalespipe2ImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+      if (reqSeq !== salespipe2HistoryReqSeqRef.current) return;
+      if (err?.name === 'AbortError') {
+        if (salespipe2ImportRuns.length === 0) {
+          setSalespipe2ImportHistoryError('Import-Historie Timeout. Bitte erneut versuchen.');
+        }
+      } else {
+        setSalespipe2ImportHistoryError(err?.message || 'Import-Historie konnte nicht geladen werden.');
+      }
     } finally {
+      clearTimeout(timeout);
+      if (reqSeq !== salespipe2HistoryReqSeqRef.current) return;
       setSalespipe2ImportHistoryLoading(false);
     }
-  }, [selectedSalespipe2ImportRunId]);
+  }, [selectedSalespipe2ImportRunId, salespipe2ImportRuns.length]);
 
   const loadSalespipe2ImportRunItems = useCallback(async (runId: string) => {
     try {
@@ -2482,22 +2873,38 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   }, []);
 
   const loadSalespipe2EventsStats = useCallback(async () => {
+    const reqSeq = ++salespipe2StatsReqSeqRef.current;
     setSalespipe2EventsCountLoading(true);
     setSalespipe2EventsCountError('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SALESPIPE2_UI_TIMEOUT_MS);
     try {
-      const response = await fetch('/api/salespipe2/sync/stats', { method: 'GET' });
+      const response = await fetch('/api/salespipe2/sync/stats', {
+        method: 'GET',
+        signal: controller.signal,
+      });
       const data = (await response.json()) as Salespipe2StatsResponse;
       if (!response.ok || !data.success) {
         setSalespipe2EventsCountError(data.error || 'Salespipe 2 Datenbank-Status konnte nicht geladen werden.');
         return;
       }
+      if (reqSeq !== salespipe2StatsReqSeqRef.current) return;
       setSalespipe2EventsCount(typeof data.count === 'number' ? data.count : 0);
     } catch (err: any) {
-      setSalespipe2EventsCountError(err?.message || 'Salespipe 2 Datenbank-Status konnte nicht geladen werden.');
+      if (reqSeq !== salespipe2StatsReqSeqRef.current) return;
+      if (err?.name === 'AbortError') {
+        if (salespipe2EventsCount === null) {
+          setSalespipe2EventsCountError('Salespipe 2 DB-Check Timeout. Bitte erneut versuchen.');
+        }
+      } else {
+        setSalespipe2EventsCountError(err?.message || 'Salespipe 2 Datenbank-Status konnte nicht geladen werden.');
+      }
     } finally {
+      clearTimeout(timeout);
+      if (reqSeq !== salespipe2StatsReqSeqRef.current) return;
       setSalespipe2EventsCountLoading(false);
     }
-  }, []);
+  }, [salespipe2EventsCount]);
 
   const handlePaymarginFactorChange = (idx: number, value: number) => {
     setPaymarginSeasonalFactors((prev) => {
@@ -2622,19 +3029,34 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   }, []);
 
   const loadSmsAutoImportState = useCallback(async () => {
+    const reqSeq = ++smsAutoImportLoadReqSeqRef.current;
     setSmsAutoImportLoading(true);
     setSmsAutoImportMessage('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SMS_UI_TIMEOUT_MS);
     try {
-      const response = await fetch('/api/sms/sync/auto-import', { method: 'GET' });
+      const response = await fetch('/api/sms/sync/auto-import', {
+        method: 'GET',
+        signal: controller.signal,
+      });
       const data = (await response.json()) as SmsAutoImportResponse;
       if (!response.ok || !data.success) {
+        if (reqSeq !== smsAutoImportLoadReqSeqRef.current) return;
         setSmsAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
         return;
       }
+      if (reqSeq !== smsAutoImportLoadReqSeqRef.current) return;
       setSmsAutoImportEnabled(Boolean(data.enabled));
     } catch (err: any) {
-      setSmsAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+      if (reqSeq !== smsAutoImportLoadReqSeqRef.current) return;
+      if (err?.name === 'AbortError') {
+        setSmsAutoImportMessage('SMS Auto-Import-Status ist langsam (Timeout). Du kannst trotzdem weiterarbeiten.');
+      } else {
+        setSmsAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+      }
     } finally {
+      clearTimeout(timeout);
+      if (reqSeq !== smsAutoImportLoadReqSeqRef.current) return;
       setSmsAutoImportLoading(false);
     }
   }, []);
@@ -2717,6 +3139,62 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   }, []);
 
+  const loadDachClientNumbersAutoImportState = useCallback(async () => {
+    setDachClientNumbersAutoImportLoading(true);
+    setDachClientNumbersAutoImportMessage('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch('/api/dachClientNumbers/sync/auto-import', {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      const data = (await response.json()) as DachClientNumbersAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setDachClientNumbersAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setDachClientNumbersAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        setDachClientNumbersAutoImportMessage('Auto-Import-Status Timeout. Bitte Seite neu laden.');
+      } else {
+        setDachClientNumbersAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+      }
+    } finally {
+      clearTimeout(timeout);
+      setDachClientNumbersAutoImportLoading(false);
+    }
+  }, []);
+
+  const loadMarketingCostsAutoImportState = useCallback(async () => {
+    setMarketingCostsAutoImportLoading(true);
+    setMarketingCostsAutoImportMessage('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch('/api/marketingCosts/sync/auto-import', {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      const data = (await response.json()) as MarketingCostsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setMarketingCostsAutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
+        return;
+      }
+      setMarketingCostsAutoImportEnabled(Boolean(data.enabled));
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        setMarketingCostsAutoImportMessage('Auto-Import-Status Timeout. Bitte Seite neu laden.');
+      } else {
+        setMarketingCostsAutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+      }
+    } finally {
+      clearTimeout(timeout);
+      setMarketingCostsAutoImportLoading(false);
+    }
+  }, []);
+
   const loadSalespipeAutoImportState = useCallback(async () => {
     setSalespipeAutoImportLoading(true);
     setSalespipeAutoImportMessage('');
@@ -2754,19 +3232,33 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   }, []);
 
   const loadSalespipe2AutoImportState = useCallback(async () => {
+    const reqSeq = ++salespipe2AutoImportReqSeqRef.current;
     setSalespipe2AutoImportLoading(true);
     setSalespipe2AutoImportMessage('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SALESPIPE2_UI_TIMEOUT_MS);
     try {
-      const response = await fetch('/api/salespipe2/sync/auto-import', { method: 'GET' });
+      const response = await fetch('/api/salespipe2/sync/auto-import', {
+        method: 'GET',
+        signal: controller.signal,
+      });
       const data = (await response.json()) as Salespipe2AutoImportResponse;
       if (!response.ok || !data.success) {
         setSalespipe2AutoImportMessage(data.error || 'Auto-Import-Status konnte nicht geladen werden.');
         return;
       }
+      if (reqSeq !== salespipe2AutoImportReqSeqRef.current) return;
       setSalespipe2AutoImportEnabled(Boolean(data.enabled));
     } catch (err: any) {
-      setSalespipe2AutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+      if (reqSeq !== salespipe2AutoImportReqSeqRef.current) return;
+      if (err?.name === 'AbortError') {
+        setSalespipe2AutoImportMessage('Auto-Import-Status ist langsam (Timeout). Du kannst trotzdem weiterarbeiten.');
+      } else {
+        setSalespipe2AutoImportMessage(err?.message || 'Auto-Import-Status konnte nicht geladen werden.');
+      }
     } finally {
+      clearTimeout(timeout);
+      if (reqSeq !== salespipe2AutoImportReqSeqRef.current) return;
       setSalespipe2AutoImportLoading(false);
     }
   }, []);
@@ -2889,14 +3381,15 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       loadPhorestPayRevenueImportHistory();
       loadLookerLeadsAutoImportState();
       loadLookerLeadsImportHistory();
+      loadDachClientNumbersAutoImportState();
+      loadDachClientNumbersImportHistory();
+      loadMarketingCostsAutoImportState();
+      loadMarketingCostsImportHistory();
       loadSalespipeAutoImportState();
       loadSalespipeImportHistory();
       loadLeadsAutoImportState();
       loadLeadsImportHistory();
       loadLeadsEventsStats();
-      loadSalespipe2AutoImportState();
-      loadSalespipe2ImportHistory();
-      loadSalespipe2EventsStats();
       loadSignupsImportHistory();
       loadSignupsEventsStats();
     }
@@ -2920,17 +3413,31 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     loadPhorestPayRevenueImportHistory,
     loadLookerLeadsAutoImportState,
     loadLookerLeadsImportHistory,
+    loadDachClientNumbersAutoImportState,
+    loadDachClientNumbersImportHistory,
+    loadMarketingCostsAutoImportState,
+    loadMarketingCostsImportHistory,
     loadSalespipeAutoImportState,
     loadSalespipeImportHistory,
     loadLeadsAutoImportState,
     loadLeadsImportHistory,
     loadLeadsEventsStats,
-    loadSalespipe2AutoImportState,
-    loadSalespipe2ImportHistory,
-    loadSalespipe2EventsStats,
     loadSignupsImportHistory,
     loadSignupsEventsStats,
     loadDynamicRoles,
+  ]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || activeImportSubTab !== 'salespipe2Import') return;
+    loadSalespipe2AutoImportState();
+    loadSalespipe2ImportHistory();
+    loadSalespipe2EventsStats();
+  }, [
+    activeTab,
+    activeImportSubTab,
+    loadSalespipe2AutoImportState,
+    loadSalespipe2ImportHistory,
+    loadSalespipe2EventsStats,
   ]);
 
   useEffect(() => {
@@ -2971,6 +3478,16 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     if (activeTab !== 'imports' || !selectedLookerLeadsImportRunId) return;
     loadLookerLeadsImportRunItems(selectedLookerLeadsImportRunId);
   }, [activeTab, selectedLookerLeadsImportRunId, loadLookerLeadsImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedDachClientNumbersImportRunId) return;
+    loadDachClientNumbersImportRunItems(selectedDachClientNumbersImportRunId);
+  }, [activeTab, selectedDachClientNumbersImportRunId, loadDachClientNumbersImportRunItems]);
+
+  useEffect(() => {
+    if (activeTab !== 'imports' || !selectedMarketingCostsImportRunId) return;
+    loadMarketingCostsImportRunItems(selectedMarketingCostsImportRunId);
+  }, [activeTab, selectedMarketingCostsImportRunId, loadMarketingCostsImportRunItems]);
 
   useEffect(() => {
     if (activeTab !== 'imports' || !selectedSalespipeImportRunId) return;
@@ -3140,27 +3657,40 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   };
 
   const handleSmsAutoImportToggle = async (enabled: boolean) => {
+    const reqSeq = ++smsAutoImportSaveReqSeqRef.current;
     setSmsAutoImportEnabled(enabled);
     setSmsAutoImportSaving(true);
     setSmsAutoImportMessage('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SMS_UI_TIMEOUT_MS);
     try {
       const response = await fetch('/api/sms/sync/auto-import', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
+        signal: controller.signal,
       });
       const data = (await response.json()) as SmsAutoImportResponse;
       if (!response.ok || !data.success) {
+        if (reqSeq !== smsAutoImportSaveReqSeqRef.current) return;
         setSmsAutoImportEnabled(!enabled);
         setSmsAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
         return;
       }
+      if (reqSeq !== smsAutoImportSaveReqSeqRef.current) return;
       setSmsAutoImportEnabled(Boolean(data.enabled));
       setSmsAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
     } catch (err: any) {
-      setSmsAutoImportEnabled(!enabled);
-      setSmsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+      if (reqSeq !== smsAutoImportSaveReqSeqRef.current) return;
+      if (err?.name === 'AbortError') {
+        setSmsAutoImportMessage('Speichern Timeout. Bitte erneut versuchen.');
+      } else {
+        setSmsAutoImportEnabled(!enabled);
+        setSmsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+      }
     } finally {
+      clearTimeout(timeout);
+      if (reqSeq !== smsAutoImportSaveReqSeqRef.current) return;
       setSmsAutoImportSaving(false);
     }
   };
@@ -3249,6 +3779,58 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     }
   };
 
+  const handleDachClientNumbersAutoImportToggle = async (enabled: boolean) => {
+    setDachClientNumbersAutoImportEnabled(enabled);
+    setDachClientNumbersAutoImportSaving(true);
+    setDachClientNumbersAutoImportMessage('');
+    try {
+      const response = await fetch('/api/dachClientNumbers/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as DachClientNumbersAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setDachClientNumbersAutoImportEnabled(!enabled);
+        setDachClientNumbersAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setDachClientNumbersAutoImportEnabled(Boolean(data.enabled));
+      setDachClientNumbersAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
+    } catch (err: any) {
+      setDachClientNumbersAutoImportEnabled(!enabled);
+      setDachClientNumbersAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setDachClientNumbersAutoImportSaving(false);
+    }
+  };
+
+  const handleMarketingCostsAutoImportToggle = async (enabled: boolean) => {
+    setMarketingCostsAutoImportEnabled(enabled);
+    setMarketingCostsAutoImportSaving(true);
+    setMarketingCostsAutoImportMessage('');
+    try {
+      const response = await fetch('/api/marketingCosts/sync/auto-import', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as MarketingCostsAutoImportResponse;
+      if (!response.ok || !data.success) {
+        setMarketingCostsAutoImportEnabled(!enabled);
+        setMarketingCostsAutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+        return;
+      }
+      setMarketingCostsAutoImportEnabled(Boolean(data.enabled));
+      setMarketingCostsAutoImportMessage(enabled ? 'Auto-Import ist jetzt aktiviert.' : 'Auto-Import ist jetzt deaktiviert.');
+    } catch (err: any) {
+      setMarketingCostsAutoImportEnabled(!enabled);
+      setMarketingCostsAutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+    } finally {
+      setMarketingCostsAutoImportSaving(false);
+    }
+  };
+
   const handleSalespipeAutoImportToggle = async (enabled: boolean) => {
     setSalespipeAutoImportEnabled(enabled);
     setSalespipeAutoImportSaving(true);
@@ -3302,27 +3884,39 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   };
 
   const handleSalespipe2AutoImportToggle = async (enabled: boolean) => {
+    const reqSeq = ++salespipe2AutoImportReqSeqRef.current;
     setSalespipe2AutoImportSaving(true);
     setSalespipe2AutoImportMessage('');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SALESPIPE2_UI_TIMEOUT_MS);
     try {
       const response = await fetch('/api/salespipe2/sync/auto-import', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
+        signal: controller.signal,
       });
       const data = (await response.json()) as Salespipe2AutoImportResponse;
       if (!response.ok || !data.success) {
         setSalespipe2AutoImportMessage(data.error || 'Auto-Import-Flag konnte nicht gespeichert werden.');
         return;
       }
+      if (reqSeq !== salespipe2AutoImportReqSeqRef.current) return;
       setSalespipe2AutoImportEnabled(Boolean(data.enabled));
       setSalespipe2AutoImportMessage(
         `Auto-Import ${data.enabled ? 'aktiviert' : 'deaktiviert'}${data.updatedAt ? ` (Stand: ${new Date(data.updatedAt).toLocaleString('de-DE')})` : ''}`
       );
       await loadSalespipe2ImportHistory();
     } catch (err: any) {
-      setSalespipe2AutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+      if (reqSeq !== salespipe2AutoImportReqSeqRef.current) return;
+      if (err?.name === 'AbortError') {
+        setSalespipe2AutoImportMessage('Speichern Timeout. Bitte erneut versuchen.');
+      } else {
+        setSalespipe2AutoImportMessage(err?.message || 'Auto-Import-Flag konnte nicht gespeichert werden.');
+      }
     } finally {
+      clearTimeout(timeout);
+      if (reqSeq !== salespipe2AutoImportReqSeqRef.current) return;
       setSalespipe2AutoImportSaving(false);
     }
   };
@@ -3435,9 +4029,29 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
     [lookerLeadsImportRuns]
   );
 
+  const latestDachClientNumbersAutoRun = useMemo(
+    () => dachClientNumbersImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [dachClientNumbersImportRuns]
+  );
+
+  const latestMarketingCostsAutoRun = useMemo(
+    () => marketingCostsImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [marketingCostsImportRuns]
+  );
+
   const latestSalespipeAutoRun = useMemo(
     () => salespipeImportRuns.find((run) => run.triggered_by === 'cron') || null,
     [salespipeImportRuns]
+  );
+
+  const latestSalespipe2ImportRun = useMemo(
+    () => salespipe2ImportRuns[0] || null,
+    [salespipe2ImportRuns]
+  );
+
+  const latestSalespipe2CronRun = useMemo(
+    () => salespipe2ImportRuns.find((run) => run.triggered_by === 'cron') || null,
+    [salespipe2ImportRuns]
   );
 
   const latestLeadsAutoRun = useMemo(
@@ -3493,6 +4107,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         setExpandingTotalUpgrades(expanding.upgrade_downgrade.total_upgrades);
         setExpandingTotalDowngrades(expanding.upgrade_downgrade.total_downgrades);
         setExpandingNetUpgradeDowngradeArr(expanding.upgrade_downgrade.net_upgrade_downgrade_arr);
+        setExpandingExistingTerminalSales(expanding.existing_clients.terminal_sales);
+        setExpandingExistingTippingSales(expanding.existing_clients.tipping_sales);
+        setNrrArrBasisDec(expanding.nrr_basis.arr_basis_dec);
+        setNrrArrBasisJanEnd(expanding.nrr_basis.arr_basis_jan_end);
 
         const churn = parseChurnArrData(data.churn_arr_data);
         setInvoicedChurnTargetCount(churn.invoiced_churn.target_count);
@@ -3514,6 +4132,10 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         setExpandingTotalUpgrades([...EXPANDING_ARR_DEFAULTS.totalUpgrades]);
         setExpandingTotalDowngrades([...EXPANDING_ARR_DEFAULTS.totalDowngrades]);
         setExpandingNetUpgradeDowngradeArr([...EXPANDING_ARR_DEFAULTS.netUpgradeDowngradeArr]);
+        setExpandingExistingTerminalSales([...EXPANDING_ARR_DEFAULTS.existingTerminalSales]);
+        setExpandingExistingTippingSales([...EXPANDING_ARR_DEFAULTS.existingTippingSales]);
+        setNrrArrBasisDec(0);
+        setNrrArrBasisJanEnd(0);
         churnLoadingFromDbRef.current = true;
         setInvoicedChurnTargetCount([...EMPTY_MONTH_VALUES]);
         setInvoicedChurnActualCount([...EMPTY_MONTH_VALUES]);
@@ -3543,9 +4165,25 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         total_downgrades: expandingTotalDowngrades,
         net_upgrade_downgrade_arr: expandingNetUpgradeDowngradeArr,
       },
+      existing_clients: {
+        terminal_sales: expandingExistingTerminalSales,
+        tipping_sales: expandingExistingTippingSales,
+      },
+      nrr_basis: {
+        arr_basis_dec: nrrArrBasisDec,
+        arr_basis_jan_end: nrrArrBasisJanEnd,
+      },
       source_note: 'Manual app entry',
     }),
-    [expandingTotalUpgrades, expandingTotalDowngrades, expandingNetUpgradeDowngradeArr]
+    [
+      expandingTotalUpgrades,
+      expandingTotalDowngrades,
+      expandingNetUpgradeDowngradeArr,
+      expandingExistingTerminalSales,
+      expandingExistingTippingSales,
+      nrrArrBasisDec,
+      nrrArrBasisJanEnd,
+    ]
   );
 
   const buildChurnArrPayload = useCallback(
@@ -3986,6 +4624,9 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   const openUserEdit = (targetUser: User) => {
     setEditingUser(targetUser);
     setUserEditError('');
+    setUserEditNewPassword('');
+    setUserEditConfirmPassword('');
+    setUserEditPasswordSuccess('');
     setSelectedRole(targetUser.role);
     setRoleEffectiveFrom(new Date().toISOString().slice(0, 10));
     setUserEditData({
@@ -4016,10 +4657,33 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       });
   };
 
+  const closeUserEdit = () => {
+    setEditingUser(null);
+    setUserEditError('');
+    setUserEditNewPassword('');
+    setUserEditConfirmPassword('');
+    setUserEditPasswordSuccess('');
+  };
+
   const saveUserStammdaten = async () => {
     if (!editingUser) return;
+    const isOwnUser = editingUser.id === user.id;
+    const wantsPasswordChange = isOwnUser && userEditNewPassword.trim().length > 0;
+
+    if (wantsPasswordChange) {
+      if (userEditNewPassword.length < 8) {
+        setUserEditError('Passwort muss mindestens 8 Zeichen haben.');
+        return;
+      }
+      if (userEditNewPassword !== userEditConfirmPassword) {
+        setUserEditError('Passwörter stimmen nicht überein.');
+        return;
+      }
+    }
+
     setSavingUser(true);
     setUserEditError('');
+    setUserEditPasswordSuccess('');
     try {
       const { error } = await supabase
         .from('users')
@@ -4037,6 +4701,12 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         .eq('id', editingUser.id);
 
       if (error) throw error;
+
+      if (wantsPasswordChange) {
+        const { error: passwordError } = await supabase.auth.updateUser({ password: userEditNewPassword });
+        if (passwordError) throw passwordError;
+        setUserEditPasswordSuccess('Passwort erfolgreich aktualisiert.');
+      }
 
       // Rolle mit Stichtag ändern (inkl. Historie), falls geändert
       if (permissions.assignRoles && selectedRole && selectedRole !== editingUser.role) {
@@ -4058,8 +4728,20 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
         if (closeHistoryError) throw closeHistoryError;
       }
 
-      setEditingUser(null);
-      await refetchUsers();
+      if (wantsPasswordChange) {
+        setUserEditNewPassword('');
+        setUserEditConfirmPassword('');
+      }
+
+      // Modal immer sofort schließen, wenn Speichern erfolgreich war.
+      closeUserEdit();
+
+      // Refetch darf das Schließen nicht blockieren.
+      try {
+        await refetchUsers();
+      } catch (refreshError) {
+        console.error('Fehler beim Aktualisieren der User-Liste:', refreshError);
+      }
     } catch (err: any) {
       setUserEditError(err.message || 'Fehler beim Speichern');
     } finally {
@@ -4166,6 +4848,14 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
   };
 
   const sumMonthlyValues = (values: number[]) => values.reduce((sum, current) => sum + (current || 0), 0);
+  const expandingExistingTerminalArrByMonth = useMemo(
+    () => expandingExistingTerminalSales.map((count) => Math.max(0, (count || 0) * avgPayBillTerminal * 12)),
+    [expandingExistingTerminalSales, avgPayBillTerminal]
+  );
+  const expandingExistingTippingArrByMonth = useMemo(
+    () => expandingExistingTippingSales.map((count) => Math.max(0, (count || 0) * avgPayBillTipping * 12)),
+    [expandingExistingTippingSales, avgPayBillTipping]
+  );
 
   const updateSalesCycleRule = (key: keyof SalesCyclePlanRules, value: number) => {
     setSalesCyclePlanRules((prev) => ({
@@ -4205,6 +4895,8 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
       | 'newArr'
       | 'expandingArr'
       | 'churnArr'
+      | 'nrrBasis'
+      | 'expandingExistingArr'
       | 'newClients'
       | 'churnedClients'
       | 'endingClients'
@@ -4912,7 +5604,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
             <div className="p-5 border-b border-gray-200 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-800">User Stammdaten bearbeiten</h3>
               <button
-                onClick={() => setEditingUser(null)}
+                onClick={closeUserEdit}
                 className="text-gray-500 hover:text-gray-700"
               >
                 ✕
@@ -5023,6 +5715,42 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 </select>
               </div>
 
+              {editingUser.id === user.id && (
+                <div className="pt-2 border-t border-gray-200">
+                  <h4 className="text-sm font-semibold text-gray-800 mb-2">Passwort ändern</h4>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Optional: Nur ausfüllen, wenn du dein Passwort jetzt ändern möchtest.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-1">Neues Passwort</label>
+                      <input
+                        type="password"
+                        value={userEditNewPassword}
+                        onChange={(e) => setUserEditNewPassword(e.target.value)}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                        placeholder="Mindestens 8 Zeichen"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-1">Passwort wiederholen</label>
+                      <input
+                        type="password"
+                        value={userEditConfirmPassword}
+                        onChange={(e) => setUserEditConfirmPassword(e.target.value)}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2"
+                        placeholder="Passwort wiederholen"
+                      />
+                    </div>
+                  </div>
+                  {userEditPasswordSuccess && (
+                    <div className="mt-2 p-2 rounded bg-green-50 text-green-700 text-sm">
+                      {userEditPasswordSuccess}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Rollenwechsel + Historie */}
               <div className="pt-2 border-t border-gray-200">
                 <h4 className="text-sm font-semibold text-gray-800 mb-2">Rollenhistorie</h4>
@@ -5087,7 +5815,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
             </div>
             <div className="p-5 border-t border-gray-200 flex justify-end gap-2">
               <button
-                onClick={() => setEditingUser(null)}
+                onClick={closeUserEdit}
                 className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
               >
                 Abbrechen
@@ -5228,6 +5956,26 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 }`}
               >
                 Looker Leads Import
+              </button>
+              <button
+                onClick={() => setActiveImportSubTab('dachClientNumbersImport')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'dachClientNumbersImport'
+                    ? 'bg-sky-50 border-sky-300 text-sky-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                DACH Client Numbers Import
+              </button>
+              <button
+                onClick={() => setActiveImportSubTab('marketingCostsImport')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  activeImportSubTab === 'marketingCostsImport'
+                    ? 'bg-sky-50 border-sky-300 text-sky-700'
+                    : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Marketing Cost Import
               </button>
             </div>
           </div>
@@ -5953,9 +6701,17 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
           {activeImportSubTab === 'upDownsellsImport' && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
               <div>
-                <h4 className="text-lg font-semibold text-gray-800 mb-1">Google-Sheet Batch Import</h4>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">Looker ZIP (Google Drive)</h4>
                 <p className="text-sm text-gray-500">
-                  Pruefe eingehende Up-/Downsell-Daten als Stapel und entscheide dann ueber den Import.
+                  Neue ZIPs aus dem konfigurierten Drive-Ordner: Es wird die Salon-Level-CSV mit Package-Up-/Downgrades
+                  erkannt, geparst und nach <span className="font-mono text-xs">up_downsells_events</span> importiert.
+                  Pro Lauf wird die juengste noch nicht erfolgreich verarbeitete ZIP gewaehlt (wie Phorest Pay Revenue).
+                </p>
+                <p className="text-xs text-gray-500 mt-2">
+                  ENV:{' '}
+                  <span className="font-mono">GOOGLE_DRIVE_UP_DOWNSELLS_FOLDER_ID</span>, dieselben Drive-Service-Account-Variablen
+                  wie bei anderen Drive-Imports. Optional erneuter Import derselben ZIP:{' '}
+                  <span className="font-mono">GET/POST ?force=true</span>.
                 </p>
               </div>
 
@@ -6060,7 +6816,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                       <div className="font-semibold text-red-700">{upDownsellsBatchImportResult.stats.failed}</div>
                     </div>
                     <div className="rounded bg-white border p-2">
-                      <div className="text-gray-500">Duplikate im Sheet</div>
+                      <div className="text-gray-500">Duplikate in CSV</div>
                       <div className="font-semibold text-amber-700">{upDownsellsBatchImportResult.stats.duplicates}</div>
                     </div>
                   </div>
@@ -6069,10 +6825,37 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
 
               {upDownsellsBatchResult?.stats && (
                 <div className="space-y-3">
+                  {upDownsellsBatchResult.sourceFile ? (
+                    <div className="text-xs text-gray-600 rounded-lg border border-gray-200 bg-gray-50 p-2 space-y-1">
+                      <div>
+                        <span className="font-semibold">ZIP:</span> {upDownsellsBatchResult.sourceFile.name}
+                      </div>
+                      {upDownsellsBatchResult.csvEntryName ? (
+                        <div>
+                          <span className="font-semibold">CSV:</span> {upDownsellsBatchResult.csvEntryName}
+                        </div>
+                      ) : null}
+                      {typeof upDownsellsBatchResult.zipEntries === 'number' ? (
+                        <div>
+                          <span className="font-semibold">Eintraege in ZIP:</span> {upDownsellsBatchResult.zipEntries}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {upDownsellsBatchResult.warnings && upDownsellsBatchResult.warnings.length > 0 ? (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 space-y-1">
+                      {upDownsellsBatchResult.warnings.slice(0, 8).map((w, i) => (
+                        <div key={i}>
+                          {w.rowNumber ? `Zeile ${w.rowNumber}: ` : ''}
+                          {w.warning}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="rounded-lg bg-gray-50 p-3 border">
-                      <div className="text-gray-500">Sheet Zeilen</div>
-                      <div className="text-xl font-semibold">{upDownsellsBatchResult.stats.totalRowsFromSheet}</div>
+                      <div className="text-gray-500">CSV-Datenzeilen</div>
+                      <div className="text-xl font-semibold">{upDownsellsBatchResult.stats.totalRowsFromFile}</div>
                     </div>
                     <div className="rounded-lg bg-gray-50 p-3 border">
                       <div className="text-gray-500">Geparst</div>
@@ -6089,13 +6872,13 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   </div>
 
                   <div>
-                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Sheet -&gt; Datenbank)</h5>
+                    <h5 className="text-sm font-semibold text-gray-700 mb-2">Feld-Mapping (Looker-CSV -&gt; Datenbank)</h5>
                     <div className="rounded-lg border border-gray-200 overflow-hidden">
                       <div className="max-h-60 overflow-auto">
                         <table className="w-full text-xs">
                           <thead className="bg-gray-50 sticky top-0">
                             <tr>
-                              <th className="text-left px-2 py-2 text-gray-600">Sheet-Spalte</th>
+                              <th className="text-left px-2 py-2 text-gray-600">CSV-Spalte</th>
                               <th className="text-left px-2 py-2 text-gray-600">DB-Feld</th>
                               <th className="text-left px-2 py-2 text-gray-600">Transformation</th>
                               <th className="text-left px-2 py-2 text-gray-600">Pflicht</th>
@@ -6351,7 +7134,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   type="checkbox"
                   className="h-4 w-4"
                   checked={smsAutoImportEnabled}
-                  disabled={smsAutoImportLoading || smsAutoImportSaving}
+                  disabled={smsAutoImportSaving}
                   onChange={(e) => handleSmsAutoImportToggle(e.target.checked)}
                 />
               </label>
@@ -7498,6 +8281,584 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
             </div>
           )}
 
+          {activeImportSubTab === 'dachClientNumbersImport' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">DACH Client Numbers - Google-Drive ZIP Batch Import</h4>
+                <p className="text-sm text-gray-500">
+                  Pruefe neue ZIP-Dateien aus dem Drive-Ordner und importiere die entpackten CSV-Dateien in die Datenbank.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setDachClientNumbersImportMode('manual')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    dachClientNumbersImportMode === 'manual'
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Manuell pruefen
+                </button>
+                <button
+                  onClick={() => setDachClientNumbersImportMode('automatic')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    dachClientNumbersImportMode === 'automatic'
+                      ? 'bg-green-50 border-green-300 text-green-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Automatisch einlaufen
+                </button>
+              </div>
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={dachClientNumbersAutoImportEnabled}
+                  disabled={dachClientNumbersAutoImportSaving}
+                  onChange={(e) => handleDachClientNumbersAutoImportToggle(e.target.checked)}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+                <div>Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.</div>
+                {dachClientNumbersAutoImportLoading ? <div>Status wird geladen...</div> : null}
+                {dachClientNumbersAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                {dachClientNumbersAutoImportMessage ? <div>{dachClientNumbersAutoImportMessage}</div> : null}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunDachClientNumbersBatchCheck}
+                  disabled={dachClientNumbersBatchLoading || dachClientNumbersBatchImportLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {dachClientNumbersBatchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
+                </button>
+                <button
+                  onClick={handleRunDachClientNumbersBatchImport}
+                  disabled={dachClientNumbersBatchImportLoading || dachClientNumbersBatchLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {dachClientNumbersBatchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
+                {lastDachClientNumbersBatchCheckAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Check: {new Date(lastDachClientNumbersBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+                {lastDachClientNumbersBatchImportAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Import: {new Date(lastDachClientNumbersBatchImportAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+              </div>
+
+              {dachClientNumbersBatchError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {dachClientNumbersBatchError}
+                </div>
+              ) : null}
+
+              {dachClientNumbersBatchImportError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {dachClientNumbersBatchImportError}
+                </div>
+              ) : null}
+
+              {dachClientNumbersBatchImportResult?.stats ? (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">To Import</div>
+                      <div className="font-semibold">{dachClientNumbersBatchImportResult.stats.toImport}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{dachClientNumbersBatchImportResult.stats.imported}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{dachClientNumbersBatchImportResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{dachClientNumbersBatchImportResult.stats.failed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">ZIP Entries</div>
+                      <div className="font-semibold text-gray-700">{dachClientNumbersBatchImportResult.stats.zipEntries ?? 0}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {dachClientNumbersBatchResult?.stats ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Datei-Zeilen</div>
+                      <div className="text-xl font-semibold">{dachClientNumbersBatchResult.stats.totalRowsFromFile}</div>
+                    </div>
+                    <div className="rounded-lg bg-green-50 p-3 border border-green-200">
+                      <div className="text-green-700">Importierbar</div>
+                      <div className="text-xl font-semibold text-green-700">{dachClientNumbersBatchResult.stats.validRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-red-50 p-3 border border-red-200">
+                      <div className="text-red-700">Fehlerhaft</div>
+                      <div className="text-xl font-semibold text-red-700">{dachClientNumbersBatchResult.stats.invalidRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Quelldatei</div>
+                      <div className="text-sm font-semibold break-all">{dachClientNumbersBatchResult.sourceFile?.name || '-'}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="text-left px-3 py-2 text-gray-600">Quelle</th>
+                      <th className="text-left px-3 py-2 text-gray-600">Ziel</th>
+                      <th className="text-left px-3 py-2 text-gray-600">Transformation</th>
+                      <th className="text-left px-3 py-2 text-gray-600">Pflicht</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {DACH_CLIENT_NUMBERS_FIELD_MAPPING.map((row) => (
+                      <tr key={`${row.source}-${row.target}`} className="border-t border-gray-100">
+                        <td className="px-3 py-2 text-gray-700">{row.source}</td>
+                        <td className="px-3 py-2 text-gray-700 font-mono">{row.target}</td>
+                        <td className="px-3 py-2 text-gray-700">{row.transform}</td>
+                        <td className="px-3 py-2 text-gray-700">{row.required ? 'Ja' : 'Nein'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-sm font-semibold text-gray-700">Import-Historie</h5>
+                  <button
+                    onClick={loadDachClientNumbersImportHistory}
+                    disabled={dachClientNumbersImportHistoryLoading}
+                    className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {dachClientNumbersImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                  </button>
+                </div>
+
+                {dachClientNumbersImportHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {dachClientNumbersImportHistoryError}
+                  </div>
+                ) : null}
+
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
+                  <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
+                  {latestDachClientNumbersAutoRun ? (
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
+                      <div>
+                        <div className="text-indigo-700">Zeitpunkt</div>
+                        <div>{new Date(latestDachClientNumbersAutoRun.started_at).toLocaleString('de-DE')}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Status</div>
+                        <div>{getImportRunStatusLabel(latestDachClientNumbersAutoRun.status)}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Importiert</div>
+                        <div>{latestDachClientNumbersAutoRun.imported}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Fehler</div>
+                        <div>{latestDachClientNumbersAutoRun.failed}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">ZIP Entries</div>
+                        <div>{latestDachClientNumbersAutoRun.zip_entries ?? 0}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Hinweis</div>
+                        <div>
+                          {latestDachClientNumbersAutoRun.reason || (latestDachClientNumbersAutoRun.skipped ? 'Skipped' : '-')}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
+                  )}
+                </div>
+
+                {dachClientNumbersImportRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Datei</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dachClientNumbersImportRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedDachClientNumbersImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedDachClientNumbersImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">{new Date(run.started_at).toLocaleString('de-DE')}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.source_file_name || '-'}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedDachClientNumbersImportRunId && selectedDachClientNumbersImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedDachClientNumbersImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {activeImportSubTab === 'marketingCostsImport' && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
+              <div>
+                <h4 className="text-lg font-semibold text-gray-800 mb-1">Marketing Cost - Google-Drive ZIP Batch Import</h4>
+                <p className="text-sm text-gray-500">
+                  Pruefe neue ZIP-Dateien aus dem Drive-Ordner und importiere die entpackten CSV-Dateien in die Datenbank.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => setMarketingCostsImportMode('manual')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    marketingCostsImportMode === 'manual'
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Manuell pruefen
+                </button>
+                <button
+                  onClick={() => setMarketingCostsImportMode('automatic')}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                    marketingCostsImportMode === 'automatic'
+                      ? 'bg-green-50 border-green-300 text-green-700'
+                      : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  Automatisch einlaufen
+                </button>
+              </div>
+
+              <label className="flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-200 bg-gray-50">
+                <span className="text-sm text-gray-700">Auto-Import aktivieren</span>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4"
+                  checked={marketingCostsAutoImportEnabled}
+                  disabled={marketingCostsAutoImportSaving}
+                  onChange={(e) => handleMarketingCostsAutoImportToggle(e.target.checked)}
+                />
+              </label>
+
+              <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
+                <div>Der Schalter ist persistent gespeichert. Der Cron importiert nur, wenn Auto-Import aktiviert ist.</div>
+                {marketingCostsAutoImportLoading ? <div>Status wird geladen...</div> : null}
+                {marketingCostsAutoImportSaving ? <div>Status wird gespeichert...</div> : null}
+                {marketingCostsAutoImportMessage ? <div>{marketingCostsAutoImportMessage}</div> : null}
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleRunMarketingCostsBatchCheck}
+                  disabled={marketingCostsBatchLoading || marketingCostsBatchImportLoading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {marketingCostsBatchLoading ? 'Pruefe Batch...' : 'Batch pruefen (Dry-Run)'}
+                </button>
+                <button
+                  onClick={handleRunMarketingCostsBatchImport}
+                  disabled={marketingCostsBatchImportLoading || marketingCostsBatchLoading}
+                  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                >
+                  {marketingCostsBatchImportLoading ? 'Importiere...' : 'Jetzt importieren (Commit)'}
+                </button>
+                {lastMarketingCostsBatchCheckAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Check: {new Date(lastMarketingCostsBatchCheckAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+                {lastMarketingCostsBatchImportAt && (
+                  <span className="text-xs text-gray-500">
+                    Letzter Import: {new Date(lastMarketingCostsBatchImportAt).toLocaleString('de-DE')}
+                  </span>
+                )}
+              </div>
+
+              {marketingCostsBatchError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {marketingCostsBatchError}
+                </div>
+              ) : null}
+
+              {marketingCostsBatchImportError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {marketingCostsBatchImportError}
+                </div>
+              ) : null}
+
+              {marketingCostsBatchImportResult?.stats ? (
+                <div className="rounded-lg border border-green-200 bg-green-50 p-3 space-y-2">
+                  <h5 className="text-sm font-semibold text-green-800">Ergebnis manueller Import</h5>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">To Import</div>
+                      <div className="font-semibold">{marketingCostsBatchImportResult.stats.toImport}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Importiert</div>
+                      <div className="font-semibold text-green-700">{marketingCostsBatchImportResult.stats.imported}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Aktualisiert</div>
+                      <div className="font-semibold text-blue-700">{marketingCostsBatchImportResult.stats.updated ?? 0}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">Fehler</div>
+                      <div className="font-semibold text-red-700">{marketingCostsBatchImportResult.stats.failed}</div>
+                    </div>
+                    <div className="rounded bg-white border p-2">
+                      <div className="text-gray-500">ZIP Entries</div>
+                      <div className="font-semibold text-gray-700">{marketingCostsBatchImportResult.stats.zipEntries ?? 0}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {marketingCostsBatchResult?.stats ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Datei-Zeilen</div>
+                      <div className="text-xl font-semibold">{marketingCostsBatchResult.stats.totalRowsFromFile}</div>
+                    </div>
+                    <div className="rounded-lg bg-green-50 p-3 border border-green-200">
+                      <div className="text-green-700">Importierbar</div>
+                      <div className="text-xl font-semibold text-green-700">{marketingCostsBatchResult.stats.validRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-red-50 p-3 border border-red-200">
+                      <div className="text-red-700">Fehlerhaft</div>
+                      <div className="text-xl font-semibold text-red-700">{marketingCostsBatchResult.stats.invalidRows}</div>
+                    </div>
+                    <div className="rounded-lg bg-gray-50 p-3 border">
+                      <div className="text-gray-500">Quelldatei</div>
+                      <div className="text-sm font-semibold break-all">{marketingCostsBatchResult.sourceFile?.name || '-'}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="text-left px-3 py-2 text-gray-600">Quelle</th>
+                      <th className="text-left px-3 py-2 text-gray-600">Ziel</th>
+                      <th className="text-left px-3 py-2 text-gray-600">Transformation</th>
+                      <th className="text-left px-3 py-2 text-gray-600">Pflicht</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {MARKETING_COSTS_FIELD_MAPPING.map((row) => (
+                      <tr key={`${row.source}-${row.target}`} className="border-t border-gray-100">
+                        <td className="px-3 py-2 text-gray-700">{row.source}</td>
+                        <td className="px-3 py-2 text-gray-700 font-mono">{row.target}</td>
+                        <td className="px-3 py-2 text-gray-700">{row.transform}</td>
+                        <td className="px-3 py-2 text-gray-700">{row.required ? 'Ja' : 'Nein'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="space-y-3 pt-1">
+                <div className="flex items-center justify-between">
+                  <h5 className="text-sm font-semibold text-gray-700">Import-Historie</h5>
+                  <button
+                    onClick={loadMarketingCostsImportHistory}
+                    disabled={marketingCostsImportHistoryLoading}
+                    className="px-2 py-1 text-xs border rounded-md text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {marketingCostsImportHistoryLoading ? 'Aktualisiere...' : 'Aktualisieren'}
+                  </button>
+                </div>
+
+                {marketingCostsImportHistoryError ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-2 text-xs text-red-700">
+                    {marketingCostsImportHistoryError}
+                  </div>
+                ) : null}
+
+                <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs">
+                  <div className="font-semibold text-indigo-800 mb-1">Letzter Auto-Run (Cron)</div>
+                  {latestMarketingCostsAutoRun ? (
+                    <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-indigo-900">
+                      <div>
+                        <div className="text-indigo-700">Zeitpunkt</div>
+                        <div>{new Date(latestMarketingCostsAutoRun.started_at).toLocaleString('de-DE')}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Status</div>
+                        <div>{getImportRunStatusLabel(latestMarketingCostsAutoRun.status)}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Importiert</div>
+                        <div>{latestMarketingCostsAutoRun.imported}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Fehler</div>
+                        <div>{latestMarketingCostsAutoRun.failed}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">ZIP Entries</div>
+                        <div>{latestMarketingCostsAutoRun.zip_entries ?? 0}</div>
+                      </div>
+                      <div>
+                        <div className="text-indigo-700">Hinweis</div>
+                        <div>
+                          {latestMarketingCostsAutoRun.reason || (latestMarketingCostsAutoRun.skipped ? 'Skipped' : '-')}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-indigo-700">Noch kein automatischer Lauf protokolliert.</div>
+                  )}
+                </div>
+
+                {marketingCostsImportRuns.length === 0 ? (
+                  <div className="text-xs text-gray-500 border border-dashed border-gray-300 rounded-lg p-3">
+                    Noch keine Import-Läufe protokolliert.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="max-h-52 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            <th className="text-left px-2 py-2 text-gray-600">Zeitpunkt</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Trigger</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Status</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Datei</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Importiert</th>
+                            <th className="text-left px-2 py-2 text-gray-600">Fehler</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {marketingCostsImportRuns.map((run) => (
+                            <tr
+                              key={run.id}
+                              onClick={() => setSelectedMarketingCostsImportRunId(run.id)}
+                              className={`border-t border-gray-100 cursor-pointer ${
+                                selectedMarketingCostsImportRunId === run.id ? 'bg-blue-50' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <td className="px-2 py-1.5 text-gray-700">{new Date(run.started_at).toLocaleString('de-DE')}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.triggered_by}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{getImportRunStatusLabel(run.status)}</td>
+                              <td className="px-2 py-1.5 text-gray-700">{run.source_file_name || '-'}</td>
+                              <td className="px-2 py-1.5 text-green-700">{run.imported}</td>
+                              <td className="px-2 py-1.5 text-red-700">{run.failed}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {selectedMarketingCostsImportRunId && selectedMarketingCostsImportRunItems.length > 0 ? (
+                  <div>
+                    <h6 className="text-xs font-semibold text-gray-600 mb-1">Details zum gewählten Lauf</h6>
+                    <div className="rounded-lg border border-gray-200 overflow-hidden">
+                      <div className="max-h-40 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-gray-50 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-2 text-gray-600">Level</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Zeile</th>
+                              <th className="text-left px-2 py-2 text-gray-600">Meldung</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedMarketingCostsImportRunItems.slice(0, 150).map((item) => (
+                              <tr key={item.id} className="border-t border-gray-100">
+                                <td className="px-2 py-1.5 text-gray-700">{item.level}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.row_number ?? '-'}</td>
+                                <td className="px-2 py-1.5 text-gray-700">{item.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )}
+
           {activeImportSubTab === 'salespipeImport' && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 space-y-5">
               <div>
@@ -7907,16 +9268,17 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                 <code className="mx-1">/api/salespipe2/sync/ingest</code>
                 mit Secret
                 <code className="mx-1">SALESPIPE2_DRIVE_INGEST_SECRET</code>.
+                Die Daten werden über diesen Ingest geschrieben; Cron lädt hier keine CSV direkt.
               </div>
 
               <div className="space-y-2">
                 <label className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
-                  <span className="font-medium text-gray-700">Auto-Import aktivieren (Cron)</span>
+                  <span className="font-medium text-gray-700">Ingest-Automation aktivieren (Cron-Guard)</span>
                   <input
                     type="checkbox"
                     checked={salespipe2AutoImportEnabled}
                     onChange={(e) => handleSalespipe2AutoImportToggle(e.target.checked)}
-                    disabled={salespipe2AutoImportLoading || salespipe2AutoImportSaving}
+                    disabled={salespipe2AutoImportSaving}
                     className="h-4 w-4"
                   />
                 </label>
@@ -7925,6 +9287,36 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                     {salespipe2AutoImportMessage}
                   </div>
                 ) : null}
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                  Hinweis: Bei Salespipe Import 2 kommen erfolgreiche Importe typischerweise mit Trigger
+                  <strong className="mx-1">manual</strong>
+                  (aus dem Ingest-Endpoint). Das ist erwartetes Verhalten.
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2 text-xs">
+                <div className="rounded border border-gray-200 bg-gray-50 p-2">
+                  <div className="text-gray-500">Letzter Ingest-Lauf</div>
+                  <div className="font-semibold text-gray-800">
+                    {latestSalespipe2ImportRun
+                      ? `${new Date(latestSalespipe2ImportRun.started_at).toLocaleString('de-DE')} (${latestSalespipe2ImportRun.triggered_by})`
+                      : '-'}
+                  </div>
+                  <div className="text-gray-600 mt-1">
+                    Status: {latestSalespipe2ImportRun ? getImportRunStatusLabel(latestSalespipe2ImportRun.status) : '-'}
+                  </div>
+                </div>
+                <div className="rounded border border-gray-200 bg-gray-50 p-2">
+                  <div className="text-gray-500">Letzter Cron-Lauf</div>
+                  <div className="font-semibold text-gray-800">
+                    {latestSalespipe2CronRun
+                      ? new Date(latestSalespipe2CronRun.started_at).toLocaleString('de-DE')
+                      : 'Kein Cron-Lauf protokolliert'}
+                  </div>
+                  <div className="text-gray-600 mt-1">
+                    {latestSalespipe2CronRun?.reason || 'Cron ist nur Guard/Status, kein direkter CSV-Import.'}
+                  </div>
+                </div>
               </div>
 
               <div className="flex items-center gap-3">
@@ -7933,7 +9325,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                   disabled={salespipe2EventsCountLoading}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {salespipe2EventsCountLoading ? 'Prüfe DB...' : 'salespipe2_events > 0 prüfen'}
+                  {salespipe2EventsCountLoading ? 'Prüfe DB...' : 'salespipe_events (source_tab=drive_salespipe2_csv) prüfen'}
                 </button>
               </div>
 
@@ -8342,6 +9734,17 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                     onChange={(e) => setPaymarginCsvFile(e.target.files?.[0] || null)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white"
                   />
+                  <p className="text-xs text-gray-600 mt-2">
+                    Importquelle (Datei in Looker öffnen):{' '}
+                    <a
+                      href="https://phorestinternal.cloud.looker.com/dashboards/188?OAK+ID=&Activity+Date=2026%2F03%2F01+to+2026%2F04%2F01&Region=&Platform+Account+Name=&Business+Advisor=&Phorest+Pay+Account+Executive=&Currency=EURO&Country=&Phorest+Pay+channel="
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-blue-600 underline hover:text-blue-800 break-all"
+                    >
+                      Looker Dashboard 188 (Activity Date 2026/03/01 bis 2026/04/01)
+                    </a>
+                  </p>
                   <p className="text-xs text-gray-500 mt-1">
                     Erwartete Spalten: OAK ID, Net Margin
                   </p>
@@ -8389,15 +9792,7 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                     ) : null}
                   </div>
                   <p className="text-xs text-gray-500 mt-1">
-                    Referenzquelle (manuell):{' '}
-                    <a
-                      href="https://phorestinternal.cloud.looker.com/dashboards/188?OAK+ID=&Activity+Date=last+month&Region=DACH&Platform+Account+Name=&Business+Advisor=&Phorest+Pay+Account+Executive=&Currency=EURO&Country=&Phorest+Pay+channel="
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-blue-600 underline hover:text-blue-800 break-all"
-                    >
-                      Looker Dashboard 188 (DACH, Last Month)
-                    </a>
+                    Referenzquelle (manuell): Looker Dashboard 188
                   </p>
                 </div>
               </div>
@@ -10073,6 +11468,239 @@ export default function DLTSettings({ user }: DLTSettingsProps) {
                         </div>
                       </div>
                     </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            )}
+          </div>
+
+          {/* NRR BASISWERTE */}
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-indigo-500">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-indigo-50 cursor-pointer"
+              onClick={() => togglePlanningSection('nrrBasis')}
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">📊</span>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">NRR BASISWERTE</h3>
+                  <p className="text-sm text-gray-500">Berechnungsbasis Ende Januar · Referenz 31.12.</p>
+                </div>
+                <span className="ml-auto text-gray-500">
+                  {planningSectionsExpanded.nrrBasis ? '▼' : '▶'}
+                </span>
+              </div>
+            </div>
+            {planningSectionsExpanded.nrrBasis && (
+              <div className="p-6">
+                <div className="rounded-lg border border-indigo-100 bg-indigo-50 p-3 text-xs text-indigo-700 mb-5">
+                  Für die <strong>NRR-Fortschreibung</strong> in den strategischen Reports gilt der <strong>manuell erfasste ARR-Stand Ende Januar</strong> des Planjahres (saisonbereinigt). Der ARR per 31.12. bleibt optional als <strong>Referenz</strong> (Vorjahresabschluss), fließt aber nicht in die laufende Berechnung ein. SMS- und Pay-Deltas beziehen sich weiter auf den Januar-Import als Referenzmonat.
+                </div>
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+                  <div className="rounded-lg border-2 border-indigo-400 bg-white p-4 shadow-sm">
+                    <label className="block text-sm font-semibold text-gray-800 mb-1">
+                      ARR Berechnungsbasis Ende Januar
+                    </label>
+                    <p className="text-xs text-gray-500 mb-2">
+                      Gesamt-ARR zum Monatsende Januar (Planjahr) — Ausgangspunkt für NRR / „ARR aktuell“
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step="1000"
+                        min="0"
+                        value={nrrArrBasisJanEnd}
+                        onChange={(e) => setNrrArrBasisJanEnd(Math.max(0, parseFloat(e.target.value) || 0))}
+                        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                        placeholder="z.B. 6100000"
+                      />
+                      <span className="text-xs text-gray-500 whitespace-nowrap">€ ARR</span>
+                    </div>
+                    {nrrArrBasisJanEnd > 0 && (
+                      <p className="text-xs text-indigo-600 mt-1 font-medium">
+                        = {(nrrArrBasisJanEnd / 1000000).toFixed(2)} Mio. €
+                      </p>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-indigo-200 bg-white p-4">
+                    <label className="block text-sm font-semibold text-gray-700 mb-1">
+                      ARR Referenz 31.12. (Vorjahr)
+                    </label>
+                    <p className="text-xs text-gray-500 mb-2">Nur Anzeige-Referenz, nicht für die Jahres-NRR-Rechnung</p>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step="1000"
+                        min="0"
+                        value={nrrArrBasisDec}
+                        onChange={(e) => setNrrArrBasisDec(Math.max(0, parseFloat(e.target.value) || 0))}
+                        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                        placeholder="optional"
+                      />
+                      <span className="text-xs text-gray-500 whitespace-nowrap">€ ARR</span>
+                    </div>
+                    {nrrArrBasisDec > 0 && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        = {(nrrArrBasisDec / 1000000).toFixed(2)} Mio. €
+                      </p>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-indigo-100 bg-indigo-50/40 p-4">
+                    <p className="text-xs font-semibold text-indigo-700 mb-1">SMS & Pay Basis — automatisch aus Import</p>
+                    <p className="text-xs text-gray-500">
+                      Die Basiswerte für SMS MRR und Phorest Pay Net Margin (DACH) werden automatisch aus dem <strong>Januar-Import</strong> des gewählten Jahres abgeleitet.
+                      Kein manueller Eintrag nötig — Januar dient als saisonbereinigter Referenzmonat statt Dezember.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* EXPANDING EXISTING ARR */}
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-l-teal-500">
+            <div
+              className="px-6 py-4 border-b border-gray-200 bg-teal-50 cursor-pointer"
+              onClick={() => togglePlanningSection('expandingExistingArr')}
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">📈</span>
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800">EXPANDING EXISTING ARR</h3>
+                  <p className="text-sm text-gray-500">Ausbau ARR bestehender Kunden</p>
+                </div>
+                <span className="ml-auto text-gray-500">
+                  {planningSectionsExpanded.expandingExistingArr ? '▼' : '▶'}
+                </span>
+              </div>
+            </div>
+            {planningSectionsExpanded.expandingExistingArr && (
+            <div className="p-6">
+              <div className="rounded-lg border border-teal-100 bg-teal-50 p-3 text-xs text-teal-700 mb-4">
+                Planwerte fuer bestehende Kunden: Terminal/Tipping Volumen und ARR-Verteilung pro Monat.
+              </div>
+              <div className="overflow-x-auto">
+                <div className="min-w-[1280px] space-y-2">
+                  <div className="grid grid-cols-[260px_140px_100px_repeat(12,minmax(80px,1fr))] gap-1 text-xs text-gray-600 font-medium">
+                    <div>Total DACH</div>
+                    <div>Pay Existing Clients Total DACH</div>
+                    <div className="text-center">%</div>
+                    {MONTHS.map((m) => (
+                      <div key={`exp-existing-pct-${m}`} className="text-center">
+                        100
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-[260px_140px_100px_repeat(12,minmax(80px,1fr))] gap-1 text-xs text-gray-500">
+                    <div></div>
+                    <div></div>
+                    <div className="text-center font-medium">Objective</div>
+                    {MONTHS.map((m) => (
+                      <div key={`exp-existing-month-${m}`} className="text-center font-medium">
+                        {m === 'Mär' ? 'March' : m === 'Mai' ? 'May' : m === 'Okt' ? 'October' : m}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-[260px_140px_100px_repeat(12,minmax(80px,1fr))] gap-1 text-xs text-gray-700 font-semibold">
+                    <div></div>
+                    <div>Month</div>
+                    <div>ARR €</div>
+                    <div className="text-center">Total GL</div>
+                    <div className="text-center">January</div>
+                    <div className="text-center">February</div>
+                    <div className="text-center">March</div>
+                    <div className="text-center">April</div>
+                    <div className="text-center">May</div>
+                    <div className="text-center">June</div>
+                    <div className="text-center">July</div>
+                    <div className="text-center">August</div>
+                    <div className="text-center">September</div>
+                    <div className="text-center">October</div>
+                    <div className="text-center">November</div>
+                    <div className="text-center">December</div>
+                  </div>
+
+                  <div className="grid grid-cols-[260px_140px_100px_repeat(12,minmax(80px,1fr))] gap-1 items-center">
+                    <div></div>
+                    <div className="text-sm font-medium text-gray-700">Terminal Sales Existing Clients</div>
+                    <div className="text-sm text-gray-500"></div>
+                    <div className="text-sm text-center text-gray-700 font-medium">
+                      {sumMonthlyValues(expandingExistingTerminalSales)}
+                    </div>
+                    {MONTHS.map((m, i) => (
+                      <input
+                        key={`exp-existing-terminal-${m}`}
+                        type="number"
+                        value={expandingExistingTerminalSales[i] ?? 0}
+                        onChange={(e) =>
+                          updateMonthlyValues(
+                            setExpandingExistingTerminalSales,
+                            i,
+                            parseInt(e.target.value, 10) || 0
+                          )
+                        }
+                        className="w-full px-1 py-1 text-center border border-teal-200 rounded text-sm bg-white"
+                      />
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-[260px_140px_100px_repeat(12,minmax(80px,1fr))] gap-1 items-center">
+                    <div></div>
+                    <div className="text-sm font-medium text-gray-700">Terminal Sales Existing Clients ARR</div>
+                    <div className="text-sm text-gray-700 font-semibold">
+                      {formatCurrency(sumMonthlyValues(expandingExistingTerminalArrByMonth))}
+                    </div>
+                    <div></div>
+                    {MONTHS.map((m, i) => (
+                      <div
+                        key={`exp-existing-terminal-arr-${m}`}
+                        className="w-full px-1 py-1 text-center border border-gray-200 rounded text-sm bg-gray-50 text-gray-700"
+                      >
+                        {formatCurrency(expandingExistingTerminalArrByMonth[i] || 0)}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-[260px_140px_100px_repeat(12,minmax(80px,1fr))] gap-1 items-center">
+                    <div></div>
+                    <div className="text-sm font-medium text-gray-700">Tipping Sales Existing Clients</div>
+                    <div className="text-sm text-gray-500"></div>
+                    <div className="text-sm text-center text-gray-700 font-medium">
+                      {sumMonthlyValues(expandingExistingTippingSales)}
+                    </div>
+                    {MONTHS.map((m, i) => (
+                      <input
+                        key={`exp-existing-tipping-${m}`}
+                        type="number"
+                        value={expandingExistingTippingSales[i] ?? 0}
+                        onChange={(e) =>
+                          updateMonthlyValues(
+                            setExpandingExistingTippingSales,
+                            i,
+                            parseInt(e.target.value, 10) || 0
+                          )
+                        }
+                        className="w-full px-1 py-1 text-center border border-teal-200 rounded text-sm bg-white"
+                      />
+                    ))}
+                  </div>
+
+                  <div className="grid grid-cols-[260px_140px_100px_repeat(12,minmax(80px,1fr))] gap-1 items-center">
+                    <div></div>
+                    <div className="text-sm font-medium text-gray-700">Tipping Sales Existing Clients ARR</div>
+                    <div className="text-sm text-gray-700 font-semibold">
+                      {formatCurrency(sumMonthlyValues(expandingExistingTippingArrByMonth))}
+                    </div>
+                    <div></div>
+                    {MONTHS.map((m, i) => (
+                      <div
+                        key={`exp-existing-tipping-arr-${m}`}
+                        className="w-full px-1 py-1 text-center border border-gray-200 rounded text-sm bg-gray-50 text-gray-700"
+                      >
+                        {formatCurrency(expandingExistingTippingArrByMonth[i] || 0)}
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>

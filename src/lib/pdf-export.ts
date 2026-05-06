@@ -253,3 +253,130 @@ export function formatPDFFilename(baseName: string, userName?: string, year?: nu
   
   return `${parts.join('_')}.pdf`;
 }
+
+
+export async function exportToPDFBlob(
+  element: HTMLElement,
+  options: PDFExportOptions
+): Promise<Blob> {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const { title, subtitle, orientation, format, margin, quality, onProgress } = opts;
+
+  onProgress?.(10);
+
+  const canvas = await html2canvas(element, {
+    scale: quality,
+    useCORS: true,
+    allowTaint: true,
+    backgroundColor: '#ffffff',
+    logging: false,
+    onclone: (clonedDoc) => {
+      const svgs = clonedDoc.querySelectorAll('svg');
+      svgs.forEach((svg) => {
+        svg.setAttribute('width', svg.getBoundingClientRect().width.toString());
+        svg.setAttribute('height', svg.getBoundingClientRect().height.toString());
+      });
+    },
+  });
+
+  onProgress?.(50);
+
+  const pdf = new jsPDF({
+    orientation,
+    unit: 'mm',
+    format,
+  });
+
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const pageHeight = pdf.internal.pageSize.getHeight();
+  const contentWidth = pageWidth - margin! * 2;
+
+  let yOffset = margin!;
+
+  if (title) {
+    pdf.setFontSize(18);
+    pdf.setFont('helvetica', 'bold');
+    pdf.text(title, margin!, yOffset + 6);
+    yOffset += 10;
+  }
+
+  if (subtitle) {
+    pdf.setFontSize(11);
+    pdf.setFont('helvetica', 'normal');
+    pdf.setTextColor(100);
+    pdf.text(subtitle, margin!, yOffset + 4);
+    yOffset += 8;
+    pdf.setTextColor(0);
+  }
+
+  pdf.setFontSize(9);
+  pdf.setTextColor(150);
+  const dateStr = new Date().toLocaleDateString('de-DE', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  pdf.text(`Erstellt: ${dateStr}`, pageWidth - margin! - 45, margin! + 4);
+  pdf.setTextColor(0);
+
+  yOffset += 5;
+  onProgress?.(70);
+
+  const imgData = canvas.toDataURL('image/png', 1.0);
+  const imgWidth = contentWidth;
+  const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+  const availableHeight = pageHeight - yOffset - margin!;
+
+  if (imgHeight <= availableHeight) {
+    pdf.addImage(imgData, 'PNG', margin!, yOffset, imgWidth, imgHeight);
+  } else {
+    let remainingHeight = imgHeight;
+    let sourceY = 0;
+    let isFirstPage = true;
+
+    while (remainingHeight > 0) {
+      const currentAvailableHeight = isFirstPage ? availableHeight : pageHeight - margin! * 2;
+      const sliceHeight = Math.min(remainingHeight, currentAvailableHeight);
+      const sliceRatio = sliceHeight / imgHeight;
+      const sourceHeight = canvas.height * sliceRatio;
+
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = canvas.width;
+      tempCanvas.height = sourceHeight;
+      const tempCtx = tempCanvas.getContext('2d');
+
+      if (tempCtx) {
+        tempCtx.drawImage(canvas, 0, sourceY, canvas.width, sourceHeight, 0, 0, canvas.width, sourceHeight);
+
+        const sliceImgData = tempCanvas.toDataURL('image/png', 1.0);
+        const sliceImgHeight = (sourceHeight * imgWidth) / canvas.width;
+
+        if (!isFirstPage) {
+          pdf.addPage();
+        }
+
+        pdf.addImage(sliceImgData, 'PNG', margin!, isFirstPage ? yOffset : margin!, imgWidth, sliceImgHeight);
+      }
+
+      sourceY += sourceHeight;
+      remainingHeight -= sliceHeight;
+      isFirstPage = false;
+    }
+  }
+
+  onProgress?.(90);
+
+  const totalPages = pdf.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    pdf.setPage(i);
+    pdf.setFontSize(8);
+    pdf.setTextColor(150);
+    pdf.text(`Seite ${i} von ${totalPages}`, pageWidth / 2, pageHeight - 5, { align: 'center' });
+  }
+
+  onProgress?.(100);
+  return pdf.output('blob');
+}

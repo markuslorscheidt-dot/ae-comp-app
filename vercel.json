@@ -35,6 +35,14 @@
     {
       "path": "/api/lookerLeads/sync/cron",
       "schedule": "50 5 * * *"
+    },
+    {
+      "path": "/api/dachClientNumbers/sync/cron",
+      "schedule": "55 5 * * *"
+    },
+    {
+      "path": "/api/marketingCosts/sync/cron",
+      "schedule": "0 6 * * *"
     }
   ]
 }
